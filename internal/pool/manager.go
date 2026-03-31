@@ -14,6 +14,7 @@ import (
 type poolEntry struct {
 	pool      *pgxpool.Pool
 	createdAt time.Time
+	connStr   string // to detect credential rotation
 }
 
 type Manager struct {
@@ -63,6 +64,17 @@ func (m *Manager) createPool(ctx context.Context, projectID string) (*pgxpool.Po
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable search_path=auth",
 		creds["host"], creds["port"], creds["username"], creds["password"], creds["database"])
 
+	// If credentials haven't changed, just refresh the timestamp (keep existing pool)
+	m.mu.RLock()
+	existing, exists := m.pools[projectID]
+	m.mu.RUnlock()
+	if exists && existing.connStr == connStr && existing.pool != nil {
+		m.mu.Lock()
+		existing.createdAt = time.Now()
+		m.mu.Unlock()
+		return existing.pool, nil
+	}
+
 	pool, err := m.poolCreator(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
@@ -76,11 +88,11 @@ func (m *Manager) createPool(ctx context.Context, projectID string) (*pgxpool.Po
 	}
 
 	m.mu.Lock()
-	// Close old pool if exists
+	// Close old pool if credentials changed
 	if old, ok := m.pools[projectID]; ok && old.pool != nil {
 		old.pool.Close()
 	}
-	m.pools[projectID] = &poolEntry{pool: pool, createdAt: time.Now()}
+	m.pools[projectID] = &poolEntry{pool: pool, createdAt: time.Now(), connStr: connStr}
 	m.mu.Unlock()
 
 	return pool, nil
@@ -112,5 +124,14 @@ func (m *Manager) fetchCredentials(ctx context.Context, projectID string) (map[s
 }
 
 func defaultPoolCreator(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
-	return pgxpool.New(ctx, connStr)
+	config, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return nil, err
+	}
+	config.MinConns = 2
+	config.MaxConns = 10
+	config.MaxConnLifetime = 30 * time.Minute
+	config.MaxConnIdleTime = 5 * time.Minute
+	config.HealthCheckPeriod = 30 * time.Second
+	return pgxpool.NewWithConfig(ctx, config)
 }
