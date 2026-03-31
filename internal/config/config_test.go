@@ -35,3 +35,23 @@ func TestLoadFromEnv(t *testing.T) {
 		t.Errorf("pat: got %s", cfg.ProvisioningPAT)
 	}
 }
+
+func TestEnvIntValid(t *testing.T) {
+	os.Setenv("JWT_EXPIRATION", "7200")
+	defer os.Unsetenv("JWT_EXPIRATION")
+
+	cfg := Load()
+	if cfg.JWTExpiration != 7200 {
+		t.Errorf("jwtExpiration: got %d", cfg.JWTExpiration)
+	}
+}
+
+func TestEnvIntInvalid(t *testing.T) {
+	os.Setenv("JWT_EXPIRATION", "not-a-number")
+	defer os.Unsetenv("JWT_EXPIRATION")
+
+	cfg := Load()
+	if cfg.JWTExpiration != 86400 {
+		t.Errorf("should fallback to default, got %d", cfg.JWTExpiration)
+	}
+}
