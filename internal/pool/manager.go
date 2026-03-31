@@ -24,6 +24,7 @@ type Manager struct {
 	ttl             time.Duration
 	httpClient      *http.Client
 	poolCreator     func(ctx context.Context, connStr string) (*pgxpool.Pool, error)
+	migrator        func(ctx context.Context, connStr string) error // optional, runs on first connect
 }
 
 func NewManager(provisioningURL, pat string, ttl time.Duration) *Manager {
@@ -35,6 +36,10 @@ func NewManager(provisioningURL, pat string, ttl time.Duration) *Manager {
 		httpClient:      &http.Client{Timeout: 10 * time.Second},
 		poolCreator:     defaultPoolCreator,
 	}
+}
+
+func (m *Manager) SetMigrator(fn func(ctx context.Context, connStr string) error) {
+	m.migrator = fn
 }
 
 func (m *Manager) GetPool(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
@@ -61,6 +66,13 @@ func (m *Manager) createPool(ctx context.Context, projectID string) (*pgxpool.Po
 	pool, err := m.poolCreator(ctx, connStr)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
+	}
+
+	// Run migrations on first connect
+	if pool != nil && m.migrator != nil {
+		if err := m.migrator(ctx, connStr); err != nil {
+			fmt.Printf("WARN: migration failed for %s: %v\n", projectID, err)
+		}
 	}
 
 	m.mu.Lock()
