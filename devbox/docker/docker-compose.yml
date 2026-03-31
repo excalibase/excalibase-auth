@@ -1,0 +1,19 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: auth_admin
+      POSTGRES_PASSWORD: testpass123
+      POSTGRES_DB: auth_test
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth_admin -d auth_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes: {}
