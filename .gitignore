@@ -1,3 +1,8 @@
 node_modules
 *.exe
 .env
+/.idea/.gitignore
+/.idea/excalibase-auth.iml
+/.idea/go.imports.xml
+/.idea/modules.xml
+/.idea/vcs.xml

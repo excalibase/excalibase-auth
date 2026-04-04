@@ -9,16 +9,15 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/excalibase/auth/internal/auth"
+	"github.com/excalibase/auth/internal/migrate"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -64,35 +63,7 @@ func setupIntegration(t *testing.T) (*httptest.Server, func()) {
 	// 4. Pool manager with auto-migration
 	poolMgr := pool.NewManager(vaultServer.URL, "test-pat", 1*time.Hour)
 	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error {
-		p, err := pgxpool.New(ctx, connStr)
-		if err != nil {
-			return err
-		}
-		defer p.Close()
-		_, err = p.Exec(ctx, `
-			CREATE SCHEMA IF NOT EXISTS auth;
-			SET search_path TO auth;
-			CREATE TABLE IF NOT EXISTS users (
-				id BIGSERIAL PRIMARY KEY,
-				email VARCHAR(100) NOT NULL UNIQUE,
-				password VARCHAR(255) NOT NULL,
-				full_name VARCHAR(100) NOT NULL,
-				role VARCHAR(50) NOT NULL DEFAULT 'user',
-				enabled BOOLEAN NOT NULL DEFAULT true,
-				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-				last_login_at TIMESTAMPTZ
-			);
-			CREATE TABLE IF NOT EXISTS refresh_tokens (
-				id BIGSERIAL PRIMARY KEY,
-				token VARCHAR(255) NOT NULL UNIQUE,
-				user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-				expiry_date TIMESTAMPTZ NOT NULL,
-				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-				revoked BOOLEAN NOT NULL DEFAULT false
-			);
-		`)
-		return err
+		return migrate.Run(connStr)
 	})
 
 	// 5. Auth handler + router
@@ -282,4 +253,3 @@ func TestIntegration_InvalidJWT(t *testing.T) {
 	}
 }
 
-func init() { _ = fmt.Sprintf("") }

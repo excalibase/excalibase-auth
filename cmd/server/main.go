@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/config"
 	"github.com/excalibase/auth/internal/handler"
+	"github.com/excalibase/auth/internal/migrate"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -37,6 +39,9 @@ func main() {
 
 	// Pool manager (multi-tenant connection cache)
 	poolMgr := pool.NewManager(cfg.ProvisioningURL, cfg.ProvisioningPAT, 1*time.Hour)
+	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error {
+		return migrate.Run(connStr)
+	})
 
 	// Handler
 	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.RefreshExpiration)

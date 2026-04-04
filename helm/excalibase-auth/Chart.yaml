@@ -1,0 +1,17 @@
+apiVersion: v2
+name: excalibase-auth
+description: Multi-tenant JWT authentication service for the Excalibase platform
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - auth
+  - jwt
+  - multi-tenant
+  - postgresql
+home: https://github.com/excalibase/excalibase-auth
+sources:
+  - https://github.com/excalibase/excalibase-auth
+maintainers:
+  - name: Excalibase Team
+    url: https://github.com/excalibase

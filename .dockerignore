@@ -1,0 +1,7 @@
+bin/
+.git/
+.idea/
+devbox/
+e2e/
+k8s/
+*.md

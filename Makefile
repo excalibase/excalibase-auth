@@ -20,8 +20,9 @@ help:
 	@echo "  make test.e2e           - Run E2E tests (requires docker)"
 	@echo ""
 	@echo "$(GREEN)Docker:$(RESET)"
-	@echo "  make docker.up          - Start PostgreSQL for E2E"
-	@echo "  make docker.down        - Stop PostgreSQL"
+	@echo "  make docker.build       - Build auth Docker image"
+	@echo "  make docker.up          - Start auth + PostgreSQL"
+	@echo "  make docker.down        - Stop all services"
 	@echo ""
 	@echo "$(GREEN)Dev:$(RESET)"
 	@echo "  make dev                - Start auth server (dev mode)"
@@ -51,14 +52,19 @@ test.e2e: docker.up
 		$(MAKE) docker.down; \
 		exit $$status
 
+.PHONY: docker.build
+docker.build:
+	@echo "$(BLUE)Building auth Docker image...$(RESET)"
+	@docker build -t excalibase-auth .
+
 .PHONY: docker.up
 docker.up:
-	@echo "$(BLUE)Starting PostgreSQL...$(RESET)"
-	@cd $(DOCKER_DIR) && docker compose up -d --wait
+	@echo "$(BLUE)Starting auth + PostgreSQL...$(RESET)"
+	@cd $(DOCKER_DIR) && docker compose up -d --build --wait
 
 .PHONY: docker.down
 docker.down:
-	@echo "$(BLUE)Stopping PostgreSQL...$(RESET)"
+	@echo "$(BLUE)Stopping all services...$(RESET)"
 	@cd $(DOCKER_DIR) && docker compose down -v
 
 .PHONY: dev

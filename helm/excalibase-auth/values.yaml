@@ -1,0 +1,124 @@
+# Default values for excalibase-auth
+
+replicaCount: 1
+
+image:
+  repository: excalibase/excalibase-auth
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext: {}
+
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 24000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: auth.excalibase.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # - secretName: excalibase-auth-tls
+  #   hosts:
+  #     - auth.excalibase.local
+
+# ---------------------------------------------------------------------------
+# Provisioning service connection
+# ---------------------------------------------------------------------------
+provisioning:
+  # URL of the excalibase-provisioning API
+  url: "http://excalibase-provisioning:24005/api"
+
+  # Personal access token for vault access (use existingSecret in production)
+  pat: ""
+
+  # Reference an existing Secret instead of inline PAT
+  existingSecret: ""
+  existingSecretPatKey: "provisioning-pat"
+
+# ---------------------------------------------------------------------------
+# Application settings
+# ---------------------------------------------------------------------------
+app:
+  # Server port (must match service.port)
+  port: 24000
+
+  # JWT access token expiration in seconds (default: 24h)
+  jwtExpiration: 86400
+
+  # Refresh token expiration in seconds (default: 7d)
+  refreshExpiration: 604800
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+resources:
+  limits:
+    cpu: 250m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+# ---------------------------------------------------------------------------
+# Autoscaling
+# ---------------------------------------------------------------------------
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  # targetMemoryUtilizationPercentage: 80
+
+# ---------------------------------------------------------------------------
+# Liveness / readiness probes
+# ---------------------------------------------------------------------------
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 15
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 3
+  periodSeconds: 10
+  failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# Extra env vars (passed directly to the container)
+# ---------------------------------------------------------------------------
+extraEnv: []
+# - name: LOG_LEVEL
+#   value: debug
+
+# Extra volumes / mounts
+extraVolumes: []
+extraVolumeMounts: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

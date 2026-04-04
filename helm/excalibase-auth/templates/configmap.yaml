@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "excalibase-auth.fullname" . }}
+  labels:
+    {{- include "excalibase-auth.labels" . | nindent 4 }}
+data:
+  PORT: {{ .Values.app.port | quote }}
+  PROVISIONING_URL: {{ .Values.provisioning.url | quote }}
+  JWT_EXPIRATION: {{ .Values.app.jwtExpiration | quote }}
+  REFRESH_EXPIRATION: {{ .Values.app.refreshExpiration | quote }}
