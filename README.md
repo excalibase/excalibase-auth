@@ -11,18 +11,19 @@ Excalibase Auth is a **multi-tenant JWT authentication microservice** built in G
 ### How It Fits in the Platform
 
 ```
-┌──────────┐     JWT      ┌─────────────────────┐     X-User-Id     ┌────────────────────┐
-│  Client   │────────────▶│   API Gateway        │──────────────────▶│ excalibase-graphql  │
-│           │◀────────────│   (validates JWT)     │                   │ (sets RLS context)  │
-└──────────┘              └─────────────────────┘                   └────────┬───────────┘
-     │                                                                       │
-     │  register/login                                              set_config('request.user_id')
-     ▼                                                                       │
-┌──────────────────┐         credentials          ┌──────────────┐           ▼
-│ excalibase-auth   │◀───────────────────────────▶│ provisioning  │    ┌──────────┐
-│ (this service)    │         vault API            │ service       │    │ PostgreSQL│
-└──────────────────┘                              └──────────────┘    │ (RLS)    │
-                                                                      └──────────┘
+                          ┌────────────────────────────────────────────┐
+                          │         excalibase-graphql                  │
+┌──────────┐    JWT       │  1. verifies JWT (public key from vault)   │
+│  Client   │────────────▶│  2. extracts userId, projectId, role       │
+│           │◀────────────│  3. set_config('request.user_id', ...)     │
+└──────────┘              │  4. executes query (RLS enforced)          │
+     │                    └───────────────────────┬────────────────────┘
+     │  register/login                            │
+     ▼                                            ▼
+┌──────────────────┐         credentials    ┌──────────┐
+│ excalibase-auth   │◀──── vault API ──────▶│provisioning│
+│ (this service)    │                       │ service    │
+└──────────────────┘                        └──────────┘
 ```
 
 ### Features
@@ -240,7 +241,7 @@ Tokens are signed with ECDSA P-256 (ES256). The private key is fetched from the 
 }
 ```
 
-Downstream services (excalibase-graphql) use these claims to set PostgreSQL RLS context:
+excalibase-graphql fetches the public key from the provisioning vault, verifies the JWT directly, and uses the claims to set PostgreSQL RLS context:
 ```sql
 SELECT set_config('request.user_id', '1', true);
 -- RLS policies then filter rows based on current_setting('request.user_id')
