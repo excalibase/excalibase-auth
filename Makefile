@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-GO := /home/duc/go-sdk/go/bin/go
+GO ?= go
 DOCKER_DIR := devbox/docker
 
 BLUE := \033[1;34m

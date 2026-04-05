@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -54,8 +55,13 @@ func TestMain(m *testing.M) {
 
 	// 3. Build auth binary
 	fmt.Println("Building auth server...")
-	build := exec.Command("/home/duc/go-sdk/go/bin/go", "build", "-o", "/tmp/excalibase-auth-e2e", "./cmd/server/")
-	build.Dir = "/home/duc/Documents/duk/excalibase-auth"
+	tmpBin := os.TempDir() + "/excalibase-auth-e2e"
+	gobin := "go"
+	if v := os.Getenv("GO_BIN"); v != "" {
+		gobin = v
+	}
+	build := exec.Command(gobin, "build", "-o", tmpBin, "./cmd/server/")
+	build.Dir = findModuleRoot()
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Printf("Build failed: %s\n%s\n", err, out)
 		os.Exit(1)
@@ -63,7 +69,7 @@ func TestMain(m *testing.M) {
 
 	// 4. Start auth server as subprocess
 	fmt.Println("Starting auth server...")
-	authProcess = exec.Command("/tmp/excalibase-auth-e2e")
+	authProcess = exec.Command(tmpBin)
 	authProcess.Env = append(os.Environ(),
 		"PORT=24100",
 		"PROVISIONING_URL="+mockVault.URL,
@@ -104,6 +110,20 @@ func TestMain(m *testing.M) {
 	// 7. Cleanup
 	cleanup()
 	os.Exit(code)
+}
+
+func findModuleRoot() string {
+	dir, _ := os.Getwd()
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "."
+		}
+		dir = parent
+	}
 }
 
 func cleanup() {

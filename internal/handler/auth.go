@@ -2,7 +2,6 @@ package handler
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -75,7 +74,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		req.Email, string(hash), req.FullName,
 	).Scan(&userID)
 	if err != nil {
-		httpError(w, fmt.Sprintf("failed to create user: %v", err), 500)
+		httpError(w, "failed to create user", 500)
 		return
 	}
 

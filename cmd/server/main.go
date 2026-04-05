@@ -54,7 +54,6 @@ func main() {
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
-		AllowCredentials: true,
 		MaxAge:           3600,
 	}))
 
@@ -79,7 +78,8 @@ func fetchSigningKey(provisioningURL, pat string) (string, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+pat)
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}

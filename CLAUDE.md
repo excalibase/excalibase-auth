@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance when working with code in this repository.
 
 ## What This Is
 
@@ -21,16 +21,16 @@ make dev                # Run server locally (needs PROVISIONING_PAT env var)
 
 Run a single test:
 ```bash
-/home/duc/go-sdk/go/bin/go test ./internal/handler/ -run TestRegister -count=1
+go test ./internal/handler/ -run TestRegister -count=1
 ```
 
-Note: The Makefile uses a hardcoded Go path (`/home/duc/go-sdk/go/bin/go`). Use that binary or update `GO` in the Makefile.
+The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go build` if needed.
 
 ## Architecture
 
 **Multi-tenant pool pattern**: Requests include `{projectId}` in the URL. `pool.Manager` lazily creates/caches a `pgxpool.Pool` per project by calling the provisioning API for credentials. Pools are cached with a TTL and refreshed when credentials rotate. On first pool creation per project, golang-migrate runs embedded SQL migrations automatically.
 
-**Request flow**: HTTP request → chi router → `handler.AuthHandler` → `pool.Manager.GetPool(projectID)` → auto-migrate → per-tenant PostgreSQL query.
+**Request flow**: HTTP request -> chi router -> `handler.AuthHandler` -> `pool.Manager.GetPool(projectID)` -> auto-migrate -> per-tenant PostgreSQL query.
 
 **Key packages**:
 - `internal/pool` — Multi-tenant connection pool manager. Fetches credentials from `{PROVISIONING_URL}/vault/secrets/projects/{id}/credentials/auth_admin`. Has injectable `poolCreator` and `migrator` functions.
@@ -60,5 +60,5 @@ Note: The Makefile uses a hardcoded Go path (`/home/duc/go-sdk/go/bin/go`). Use 
 
 ## Docker
 
-- `Dockerfile` — Multi-stage build (golang:1.24-alpine → alpine:3.20). Migrations are embedded in the binary.
+- `Dockerfile` — Multi-stage build (golang:1.24-alpine -> alpine:3.20). Migrations are embedded in the binary.
 - `devbox/docker/docker-compose.yml` — Runs auth service + PostgreSQL together.
