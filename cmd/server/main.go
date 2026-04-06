@@ -11,11 +11,11 @@ import (
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/config"
 	"github.com/excalibase/auth/internal/handler"
+	custommw "github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/migrate"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
 )
 
 func main() {
@@ -50,12 +50,8 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"*"},
-		MaxAge:           3600,
-	}))
+	r.Use(custommw.SecurityHeaders)
+	r.Use(custommw.CORS(cfg.CORSOrigins))
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
