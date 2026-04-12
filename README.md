@@ -1,7 +1,7 @@
 # Excalibase Auth
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8.svg)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8.svg)](https://go.dev/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16+-blue.svg)](https://www.postgresql.org/)
 
 ## Overview
@@ -37,21 +37,21 @@ Excalibase Auth is a **multi-tenant JWT authentication microservice** built in G
 
 ## API Endpoints
 
-All endpoints are scoped under `/auth/{projectId}/`:
+All endpoints are scoped under `/auth/{orgSlug}/{projectName}/`:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/auth/{projectId}/register` | Register a new user |
-| `POST` | `/auth/{projectId}/login` | Authenticate and receive tokens |
-| `POST` | `/auth/{projectId}/validate` | Validate a JWT and return claims |
-| `POST` | `/auth/{projectId}/refresh` | Exchange refresh token for new token pair |
-| `POST` | `/auth/{projectId}/logout` | Revoke a refresh token |
+| `POST` | `/auth/{orgSlug}/{projectName}/register` | Register a new user |
+| `POST` | `/auth/{orgSlug}/{projectName}/login` | Authenticate and receive tokens |
+| `POST` | `/auth/{orgSlug}/{projectName}/validate` | Validate a JWT and return claims |
+| `POST` | `/auth/{orgSlug}/{projectName}/refresh` | Exchange refresh token for new token pair |
+| `POST` | `/auth/{orgSlug}/{projectName}/logout` | Revoke a refresh token |
 | `GET`  | `/healthz` | Health check |
 
 ### Register
 
 ```bash
-curl -X POST http://localhost:24000/auth/my-project/register \
+curl -X POST http://localhost:24000/auth/my-org/my-project/register \
   -H "Content-Type: application/json" \
   -d '{"email": "alice@example.com", "password": "secret123", "fullName": "Alice Smith"}'
 ```
@@ -74,7 +74,7 @@ curl -X POST http://localhost:24000/auth/my-project/register \
 ### Login
 
 ```bash
-curl -X POST http://localhost:24000/auth/my-project/login \
+curl -X POST http://localhost:24000/auth/my-org/my-project/login \
   -H "Content-Type: application/json" \
   -d '{"email": "alice@example.com", "password": "secret123"}'
 ```
@@ -82,7 +82,7 @@ curl -X POST http://localhost:24000/auth/my-project/login \
 ### Validate
 
 ```bash
-curl -X POST http://localhost:24000/auth/my-project/validate \
+curl -X POST http://localhost:24000/auth/my-org/my-project/validate \
   -H "Content-Type: application/json" \
   -d '{"token": "eyJhbGciOiJFUzI1NiIs..."}'
 ```
@@ -93,7 +93,7 @@ curl -X POST http://localhost:24000/auth/my-project/validate \
   "valid": true,
   "email": "alice@example.com",
   "userId": 1,
-  "projectId": "my-project",
+  "projectId": "my-org/my-project",
   "role": "user"
 }
 ```
@@ -101,7 +101,7 @@ curl -X POST http://localhost:24000/auth/my-project/validate \
 ### Refresh
 
 ```bash
-curl -X POST http://localhost:24000/auth/my-project/refresh \
+curl -X POST http://localhost:24000/auth/my-org/my-project/refresh \
   -H "Content-Type: application/json" \
   -d '{"refreshToken": "550e8400-e29b-41d4-a716-446655440000"}'
 ```
@@ -109,7 +109,7 @@ curl -X POST http://localhost:24000/auth/my-project/refresh \
 ### Logout
 
 ```bash
-curl -X POST http://localhost:24000/auth/my-project/logout \
+curl -X POST http://localhost:24000/auth/my-org/my-project/logout \
   -H "Content-Type: application/json" \
   -d '{"refreshToken": "550e8400-e29b-41d4-a716-446655440000"}'
 ```
@@ -192,7 +192,7 @@ excalibase-auth/
 
 ### Multi-Tenant Connection Flow
 
-1. Request arrives at `/auth/{projectId}/register`
+1. Request arrives at `/auth/{orgSlug}/{projectName}/register`
 2. `pool.Manager` checks cache for an existing pool for this project
 3. If missing or expired (1h TTL), fetches credentials from provisioning vault:
    `GET {PROVISIONING_URL}/vault/secrets/projects/{projectId}/credentials/auth_admin`
@@ -233,7 +233,9 @@ Tokens are signed with ECDSA P-256 (ES256). The private key is fetched from the 
 {
   "sub": "alice@example.com",
   "userId": 1,
-  "projectId": "my-project",
+  "projectId": "my-org/my-project",
+  "orgSlug": "my-org",
+  "projectName": "my-project",
   "role": "user",
   "iss": "excalibase",
   "iat": 1712200000,

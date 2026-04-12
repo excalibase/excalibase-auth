@@ -102,7 +102,7 @@ func TestIntegration_FullAuthFlow(t *testing.T) {
 	defer cleanup()
 
 	// 1. Register
-	resp := postJSON(srv, "/auth/test-project/register", map[string]string{
+	resp := postJSON(srv, "/auth/test-org/test-project/register", map[string]string{
 		"email": "alice@test.com", "password": "password123", "fullName": "Alice",
 	})
 	if resp.StatusCode != 201 {
@@ -120,7 +120,7 @@ func TestIntegration_FullAuthFlow(t *testing.T) {
 	}
 
 	// 2. Login
-	resp = postJSON(srv, "/auth/test-project/login", map[string]string{
+	resp = postJSON(srv, "/auth/test-org/test-project/login", map[string]string{
 		"email": "alice@test.com", "password": "password123",
 	})
 	if resp.StatusCode != 200 {
@@ -134,7 +134,7 @@ func TestIntegration_FullAuthFlow(t *testing.T) {
 	refreshToken := loginResp["refreshToken"].(string)
 
 	// 3. Validate JWT
-	resp = postJSON(srv, "/auth/test-project/validate", map[string]string{
+	resp = postJSON(srv, "/auth/test-org/test-project/validate", map[string]string{
 		"token": accessToken,
 	})
 	var validateResp map[string]interface{}
@@ -145,12 +145,12 @@ func TestIntegration_FullAuthFlow(t *testing.T) {
 	if validateResp["email"] != "alice@test.com" {
 		t.Errorf("email: got %v", validateResp["email"])
 	}
-	if validateResp["projectId"] != "test-project" {
+	if validateResp["projectId"] != "test-org/test-project" {
 		t.Errorf("projectId: got %v", validateResp["projectId"])
 	}
 
 	// 4. Refresh
-	resp = postJSON(srv, "/auth/test-project/refresh", map[string]string{
+	resp = postJSON(srv, "/auth/test-org/test-project/refresh", map[string]string{
 		"refreshToken": refreshToken,
 	})
 	if resp.StatusCode != 200 {
@@ -163,7 +163,7 @@ func TestIntegration_FullAuthFlow(t *testing.T) {
 	newRefreshToken := refreshResp["refreshToken"].(string)
 
 	// 5. Old refresh token revoked
-	resp = postJSON(srv, "/auth/test-project/refresh", map[string]string{
+	resp = postJSON(srv, "/auth/test-org/test-project/refresh", map[string]string{
 		"refreshToken": refreshToken,
 	})
 	if resp.StatusCode != 401 {
@@ -172,7 +172,7 @@ func TestIntegration_FullAuthFlow(t *testing.T) {
 	resp.Body.Close()
 
 	// 6. Logout
-	resp = postJSON(srv, "/auth/test-project/logout", map[string]string{
+	resp = postJSON(srv, "/auth/test-org/test-project/logout", map[string]string{
 		"refreshToken": newRefreshToken,
 	})
 	if resp.StatusCode != 200 {
@@ -181,7 +181,7 @@ func TestIntegration_FullAuthFlow(t *testing.T) {
 	resp.Body.Close()
 
 	// 7. Post-logout refresh fails
-	resp = postJSON(srv, "/auth/test-project/refresh", map[string]string{
+	resp = postJSON(srv, "/auth/test-org/test-project/refresh", map[string]string{
 		"refreshToken": newRefreshToken,
 	})
 	if resp.StatusCode != 401 {
@@ -201,13 +201,13 @@ func TestIntegration_DuplicateRegister(t *testing.T) {
 	body := map[string]string{
 		"email": "dup@test.com", "password": "password123", "fullName": "Dup",
 	}
-	resp := postJSON(srv, "/auth/test-project/register", body)
+	resp := postJSON(srv, "/auth/test-org/test-project/register", body)
 	if resp.StatusCode != 201 {
 		t.Fatalf("first register: got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
-	resp = postJSON(srv, "/auth/test-project/register", body)
+	resp = postJSON(srv, "/auth/test-org/test-project/register", body)
 	if resp.StatusCode != 409 {
 		t.Errorf("duplicate: expected 409, got %d", resp.StatusCode)
 	}
@@ -222,11 +222,11 @@ func TestIntegration_WrongPassword(t *testing.T) {
 	srv, cleanup := setupIntegration(t)
 	defer cleanup()
 
-	postJSON(srv, "/auth/test-project/register", map[string]string{
+	postJSON(srv, "/auth/test-org/test-project/register", map[string]string{
 		"email": "bob@test.com", "password": "correct123", "fullName": "Bob",
 	}).Body.Close()
 
-	resp := postJSON(srv, "/auth/test-project/login", map[string]string{
+	resp := postJSON(srv, "/auth/test-org/test-project/login", map[string]string{
 		"email": "bob@test.com", "password": "wrong",
 	})
 	if resp.StatusCode != 401 {
@@ -243,7 +243,7 @@ func TestIntegration_InvalidJWT(t *testing.T) {
 	srv, cleanup := setupIntegration(t)
 	defer cleanup()
 
-	resp := postJSON(srv, "/auth/test-project/validate", map[string]string{
+	resp := postJSON(srv, "/auth/test-org/test-project/validate", map[string]string{
 		"token": "invalid.jwt.token",
 	})
 	var body map[string]interface{}

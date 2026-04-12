@@ -1,13 +1,16 @@
 package migrate
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5"
 )
 
 //go:embed migrations/*.sql
@@ -15,6 +18,10 @@ var migrationsFS embed.FS
 
 // Run applies all pending UP migrations.
 func Run(connStr string) error {
+	if err := ensureAuthSchema(connStr); err != nil {
+		return fmt.Errorf("ensure auth schema: %w", err)
+	}
+
 	m, err := newMigrate(connStr)
 	if err != nil {
 		return err
@@ -25,6 +32,39 @@ func Run(connStr string) error {
 	}
 	return nil
 }
+
+// ensureAuthSchema creates the auth schema if it doesn't exist.
+// Must run before golang-migrate because the pgx5 driver checks CURRENT_SCHEMA()
+// which returns NULL if the search_path schema doesn't exist.
+func ensureAuthSchema(connStr string) error {
+	params := parseKV(connStr)
+	host := params["host"]
+	port := params["port"]
+	user := params["username"]
+	if user == "" {
+		user = params["user"]
+	}
+	password := params["password"]
+	dbname := params["dbname"]
+	if dbname == "" {
+		dbname = params["database"]
+	}
+
+	pgURL := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, dbname)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, pgURL)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	_, err = conn.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS auth")
+	return err
+}
+
 
 // Down rolls back all migrations.
 func Down(connStr string) error {
@@ -91,8 +131,8 @@ func connStrToURL(connStr string) (string, error) {
 		sslmode = "disable"
 	}
 
-	// Intentionally omit search_path — migrations handle schema creation and SET search_path themselves.
-	return fmt.Sprintf("pgx5://%s:%s@%s:%s/%s?sslmode=%s", user, password, host, port, dbname, sslmode), nil
+	// Use auth schema for the migrations tracking table so auth_admin doesn't need public schema access
+	return fmt.Sprintf("pgx5://%s:%s@%s:%s/%s?sslmode=%s&search_path=auth&x-migrations-table=auth.schema_migrations", user, password, host, port, dbname, sslmode), nil
 }
 
 func parseKV(s string) map[string]string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -58,8 +59,12 @@ func (m *Manager) GetPool(ctx context.Context, projectID string) (*pgxpool.Pool,
 func (m *Manager) createPool(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
 	creds, err := m.fetchCredentials(ctx, projectID)
 	if err != nil {
+		log.Printf("ERROR: fetch credentials for %s: %v", projectID, err)
 		return nil, fmt.Errorf("fetch credentials: %w", err)
 	}
+
+	log.Printf("INFO: got credentials for %s: host=%s port=%s user=%s db=%s",
+		projectID, creds["host"], creds["port"], creds["username"], creds["database"])
 
 	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable search_path=auth",
 		creds["host"], creds["port"], creds["username"], creds["password"], creds["database"])
@@ -99,7 +104,9 @@ func (m *Manager) createPool(ctx context.Context, projectID string) (*pgxpool.Po
 }
 
 func (m *Manager) fetchCredentials(ctx context.Context, projectID string) (map[string]string, error) {
+	// projectID is "{orgSlug}/{projectName}" — vault path: projects/{orgSlug}/{projectName}/credentials/auth_admin
 	url := fmt.Sprintf("%s/vault/secrets/projects/%s/credentials/auth_admin", m.provisioningURL, projectID)
+	log.Printf("INFO: fetching credentials from %s", url)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err

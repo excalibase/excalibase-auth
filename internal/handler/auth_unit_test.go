@@ -35,7 +35,7 @@ func setupUnitRouter(t *testing.T) chi.Router {
 
 func TestRegister_BadJSON(t *testing.T) {
 	r := setupUnitRouter(t)
-	req := httptest.NewRequest("POST", "/auth/test/register", strings.NewReader("not json"))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/register", strings.NewReader("not json"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -46,7 +46,7 @@ func TestRegister_BadJSON(t *testing.T) {
 
 func TestRegister_MissingFields(t *testing.T) {
 	r := setupUnitRouter(t)
-	req := httptest.NewRequest("POST", "/auth/test/register", strings.NewReader(`{"email":"a@b.com"}`))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/register", strings.NewReader(`{"email":"a@b.com"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -58,7 +58,7 @@ func TestRegister_MissingFields(t *testing.T) {
 func TestRegister_DBUnavailable(t *testing.T) {
 	r := setupUnitRouter(t)
 	body := `{"email":"a@b.com","password":"pass1234","fullName":"Test"}`
-	req := httptest.NewRequest("POST", "/auth/test/register", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/register", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -69,7 +69,7 @@ func TestRegister_DBUnavailable(t *testing.T) {
 
 func TestLogin_BadJSON(t *testing.T) {
 	r := setupUnitRouter(t)
-	req := httptest.NewRequest("POST", "/auth/test/login", strings.NewReader("{bad"))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/login", strings.NewReader("{bad"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -81,7 +81,7 @@ func TestLogin_BadJSON(t *testing.T) {
 func TestLogin_DBUnavailable(t *testing.T) {
 	r := setupUnitRouter(t)
 	body := `{"email":"a@b.com","password":"pass"}`
-	req := httptest.NewRequest("POST", "/auth/test/login", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -93,7 +93,7 @@ func TestLogin_DBUnavailable(t *testing.T) {
 
 func TestValidate_BadJSON(t *testing.T) {
 	r := setupUnitRouter(t)
-	req := httptest.NewRequest("POST", "/auth/test/validate", strings.NewReader(""))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/validate", strings.NewReader(""))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -104,7 +104,7 @@ func TestValidate_BadJSON(t *testing.T) {
 
 func TestRefresh_BadJSON(t *testing.T) {
 	r := setupUnitRouter(t)
-	req := httptest.NewRequest("POST", "/auth/test/refresh", strings.NewReader("xxx"))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/refresh", strings.NewReader("xxx"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -116,7 +116,7 @@ func TestRefresh_BadJSON(t *testing.T) {
 func TestRefresh_DBUnavailable(t *testing.T) {
 	r := setupUnitRouter(t)
 	body := `{"refreshToken":"some-uuid"}`
-	req := httptest.NewRequest("POST", "/auth/test/refresh", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/refresh", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -127,7 +127,7 @@ func TestRefresh_DBUnavailable(t *testing.T) {
 
 func TestLogout_BadJSON(t *testing.T) {
 	r := setupUnitRouter(t)
-	req := httptest.NewRequest("POST", "/auth/test/logout", strings.NewReader(""))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/logout", strings.NewReader(""))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -139,7 +139,7 @@ func TestLogout_BadJSON(t *testing.T) {
 func TestLogout_DBUnavailable(t *testing.T) {
 	r := setupUnitRouter(t)
 	body := `{"refreshToken":"some-uuid"}`
-	req := httptest.NewRequest("POST", "/auth/test/logout", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/logout", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -152,7 +152,7 @@ func TestLogout_DBUnavailable(t *testing.T) {
 func TestValidate_InvalidToken(t *testing.T) {
 	r := setupUnitRouter(t)
 	body := `{"token":"invalid.token.here"}`
-	req := httptest.NewRequest("POST", "/auth/test/validate", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "/auth/test-org/test-project/validate", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)

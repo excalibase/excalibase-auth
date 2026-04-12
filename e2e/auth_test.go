@@ -8,7 +8,7 @@ import (
 
 func TestE2E_RegisterAndLogin(t *testing.T) {
 	// Register
-	resp := post(t, "/auth/my-app/register", map[string]string{
+	resp := post(t, "/auth/test-org/my-app/register", map[string]string{
 		"email": "alice@example.com", "password": "SecureP@ss123", "fullName": "Alice",
 	})
 	assertStatus(t, resp, 201)
@@ -29,7 +29,7 @@ func TestE2E_RegisterAndLogin(t *testing.T) {
 	}
 
 	// Login with same credentials
-	resp = post(t, "/auth/my-app/login", map[string]string{
+	resp = post(t, "/auth/test-org/my-app/login", map[string]string{
 		"email": "alice@example.com", "password": "SecureP@ss123",
 	})
 	assertStatus(t, resp, 200)
@@ -41,18 +41,18 @@ func TestE2E_RegisterAndLogin(t *testing.T) {
 
 func TestE2E_ValidateJWT(t *testing.T) {
 	// Register + login to get a token
-	post(t, "/auth/my-app/register", map[string]string{
+	post(t, "/auth/test-org/my-app/register", map[string]string{
 		"email": "validate@example.com", "password": "Pass1234", "fullName": "Val",
 	}).Body.Close()
 
-	resp := post(t, "/auth/my-app/login", map[string]string{
+	resp := post(t, "/auth/test-org/my-app/login", map[string]string{
 		"email": "validate@example.com", "password": "Pass1234",
 	})
 	loginBody := decode(t, resp)
 	token := loginBody["accessToken"].(string)
 
 	// Validate
-	resp = post(t, "/auth/my-app/validate", map[string]string{"token": token})
+	resp = post(t, "/auth/test-org/my-app/validate", map[string]string{"token": token})
 	assertStatus(t, resp, 200)
 	body := decode(t, resp)
 
@@ -62,7 +62,7 @@ func TestE2E_ValidateJWT(t *testing.T) {
 	if body["email"] != "validate@example.com" {
 		t.Errorf("email: got %v", body["email"])
 	}
-	if body["projectId"] != "my-app" {
+	if body["projectId"] != "test-org/my-app" {
 		t.Errorf("projectId: got %v", body["projectId"])
 	}
 	if body["role"] != "user" {
@@ -71,11 +71,11 @@ func TestE2E_ValidateJWT(t *testing.T) {
 }
 
 func TestE2E_RefreshToken(t *testing.T) {
-	post(t, "/auth/my-app/register", map[string]string{
+	post(t, "/auth/test-org/my-app/register", map[string]string{
 		"email": "refresh@example.com", "password": "Pass1234", "fullName": "Ref",
 	}).Body.Close()
 
-	resp := post(t, "/auth/my-app/login", map[string]string{
+	resp := post(t, "/auth/test-org/my-app/login", map[string]string{
 		"email": "refresh@example.com", "password": "Pass1234",
 	})
 	loginBody := decode(t, resp)
@@ -83,7 +83,7 @@ func TestE2E_RefreshToken(t *testing.T) {
 	oldAccess := loginBody["accessToken"].(string)
 
 	// Refresh
-	resp = post(t, "/auth/my-app/refresh", map[string]string{"refreshToken": refreshToken})
+	resp = post(t, "/auth/test-org/my-app/refresh", map[string]string{"refreshToken": refreshToken})
 	assertStatus(t, resp, 200)
 	body := decode(t, resp)
 	newAccess := body["accessToken"].(string)
@@ -93,29 +93,29 @@ func TestE2E_RefreshToken(t *testing.T) {
 	}
 
 	// Old refresh token should be revoked
-	resp = post(t, "/auth/my-app/refresh", map[string]string{"refreshToken": refreshToken})
+	resp = post(t, "/auth/test-org/my-app/refresh", map[string]string{"refreshToken": refreshToken})
 	assertStatus(t, resp, 401)
 	resp.Body.Close()
 }
 
 func TestE2E_Logout(t *testing.T) {
-	post(t, "/auth/my-app/register", map[string]string{
+	post(t, "/auth/test-org/my-app/register", map[string]string{
 		"email": "logout@example.com", "password": "Pass1234", "fullName": "Log",
 	}).Body.Close()
 
-	resp := post(t, "/auth/my-app/login", map[string]string{
+	resp := post(t, "/auth/test-org/my-app/login", map[string]string{
 		"email": "logout@example.com", "password": "Pass1234",
 	})
 	body := decode(t, resp)
 	refreshToken := body["refreshToken"].(string)
 
 	// Logout
-	resp = post(t, "/auth/my-app/logout", map[string]string{"refreshToken": refreshToken})
+	resp = post(t, "/auth/test-org/my-app/logout", map[string]string{"refreshToken": refreshToken})
 	assertStatus(t, resp, 200)
 	resp.Body.Close()
 
 	// Refresh after logout should fail
-	resp = post(t, "/auth/my-app/refresh", map[string]string{"refreshToken": refreshToken})
+	resp = post(t, "/auth/test-org/my-app/refresh", map[string]string{"refreshToken": refreshToken})
 	assertStatus(t, resp, 401)
 	resp.Body.Close()
 }
@@ -125,21 +125,21 @@ func TestE2E_DuplicateRegister(t *testing.T) {
 		"email": "dup@example.com", "password": "Pass1234", "fullName": "Dup",
 	}
 
-	resp := post(t, "/auth/my-app/register", body)
+	resp := post(t, "/auth/test-org/my-app/register", body)
 	assertStatus(t, resp, 201)
 	resp.Body.Close()
 
-	resp = post(t, "/auth/my-app/register", body)
+	resp = post(t, "/auth/test-org/my-app/register", body)
 	assertStatus(t, resp, 409)
 	resp.Body.Close()
 }
 
 func TestE2E_WrongPassword(t *testing.T) {
-	post(t, "/auth/my-app/register", map[string]string{
+	post(t, "/auth/test-org/my-app/register", map[string]string{
 		"email": "wrong@example.com", "password": "Correct123", "fullName": "Wrong",
 	}).Body.Close()
 
-	resp := post(t, "/auth/my-app/login", map[string]string{
+	resp := post(t, "/auth/test-org/my-app/login", map[string]string{
 		"email": "wrong@example.com", "password": "BadPassword",
 	})
 	assertStatus(t, resp, 401)
@@ -147,7 +147,7 @@ func TestE2E_WrongPassword(t *testing.T) {
 }
 
 func TestE2E_InvalidJWT(t *testing.T) {
-	resp := post(t, "/auth/my-app/validate", map[string]string{"token": "not.a.jwt"})
+	resp := post(t, "/auth/test-org/my-app/validate", map[string]string{"token": "not.a.jwt"})
 	assertStatus(t, resp, 200)
 	body := decode(t, resp)
 	if body["valid"] != false {

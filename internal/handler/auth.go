@@ -24,7 +24,7 @@ func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshE
 }
 
 func (h *AuthHandler) Routes(r chi.Router) {
-	r.Route("/{projectId}", func(r chi.Router) {
+	r.Route("/{orgSlug}/{projectName}", func(r chi.Router) {
 		r.Post("/register", h.Register)
 		r.Post("/login", h.Login)
 		r.Post("/validate", h.Validate)
@@ -33,8 +33,13 @@ func (h *AuthHandler) Routes(r chi.Router) {
 	})
 }
 
+// projectKey returns "{orgSlug}/{projectName}" used as pool key and vault path segment.
+func projectKey(r *http.Request) string {
+	return chi.URLParam(r, "orgSlug") + "/" + chi.URLParam(r, "projectName")
+}
+
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
-	projectID := chi.URLParam(r, "projectId")
+	projectID := projectKey(r)
 	var req domain.RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, "invalid request", 400)
@@ -89,7 +94,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
-	projectID := chi.URLParam(r, "projectId")
+	projectID := projectKey(r)
 	var req domain.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, "invalid request", 400)
@@ -157,7 +162,7 @@ func (h *AuthHandler) Validate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
-	projectID := chi.URLParam(r, "projectId")
+	projectID := projectKey(r)
 	var req domain.RefreshRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, "invalid request", 400)
@@ -208,7 +213,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	projectID := chi.URLParam(r, "projectId")
+	projectID := projectKey(r)
 	var req domain.RefreshRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, "invalid request", 400)
@@ -226,11 +231,16 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, userID int64, email, fullName string) (*domain.AuthResponse, error) {
+	orgSlug := chi.URLParam(r, "orgSlug")
+	projectName := chi.URLParam(r, "projectName")
+
 	accessToken, err := h.jwtService.Sign(auth.Claims{
-		Sub:       email,
-		UserID:    userID,
-		ProjectID: projectID,
-		Role:      "user",
+		Sub:         email,
+		UserID:      userID,
+		ProjectID:   projectID,
+		OrgSlug:     orgSlug,
+		ProjectName: projectName,
+		Role:        "user",
 	})
 	if err != nil {
 		return nil, err

@@ -11,10 +11,12 @@ import (
 )
 
 type Claims struct {
-	Sub       string `json:"sub"`
-	UserID    int64  `json:"userId"`
-	ProjectID string `json:"projectId"`
-	Role      string `json:"role"`
+	Sub         string `json:"sub"`
+	UserID      int64  `json:"userId"`
+	ProjectID   string `json:"projectId"`   // "{orgSlug}/{projectName}" composite key
+	OrgSlug     string `json:"orgSlug"`
+	ProjectName string `json:"projectName"`
+	Role        string `json:"role"`
 }
 
 type JWTService struct {
@@ -46,13 +48,15 @@ func NewJWTService(privateKeyPEM string, issuer string, expSeconds int) (*JWTSer
 func (s *JWTService) Sign(claims Claims) (string, error) {
 	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
-		"sub":       claims.Sub,
-		"userId":    claims.UserID,
-		"projectId": claims.ProjectID,
-		"role":      claims.Role,
-		"iss":       s.issuer,
-		"iat":       now.Unix(),
-		"exp":       now.Add(time.Duration(s.expSeconds) * time.Second).Unix(),
+		"sub":         claims.Sub,
+		"userId":      claims.UserID,
+		"projectId":   claims.ProjectID,
+		"orgSlug":     claims.OrgSlug,
+		"projectName": claims.ProjectName,
+		"role":        claims.Role,
+		"iss":         s.issuer,
+		"iat":         now.Unix(),
+		"exp":         now.Add(time.Duration(s.expSeconds) * time.Second).Unix(),
 	})
 
 	return token.SignedString(s.privateKey)
@@ -75,10 +79,14 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	}
 
 	userID, _ := mapClaims["userId"].(float64)
+	orgSlug, _ := mapClaims["orgSlug"].(string)
+	projectName, _ := mapClaims["projectName"].(string)
 	return &Claims{
-		Sub:       mapClaims["sub"].(string),
-		UserID:    int64(userID),
-		ProjectID: mapClaims["projectId"].(string),
-		Role:      mapClaims["role"].(string),
+		Sub:         mapClaims["sub"].(string),
+		UserID:      int64(userID),
+		ProjectID:   mapClaims["projectId"].(string),
+		OrgSlug:     orgSlug,
+		ProjectName: projectName,
+		Role:        mapClaims["role"].(string),
 	}, nil
 }
