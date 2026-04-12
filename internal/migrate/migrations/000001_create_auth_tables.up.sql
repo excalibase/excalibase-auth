@@ -1,5 +1,4 @@
--- Schema 'auth' is created by the provisioner during project setup.
--- auth_admin has ALL ON SCHEMA auth.
+CREATE SCHEMA IF NOT EXISTS auth;
 SET search_path TO auth;
 
 CREATE TABLE IF NOT EXISTS users (

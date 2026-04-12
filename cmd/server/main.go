@@ -57,6 +57,11 @@ func main() {
 		w.Write([]byte("ok"))
 	})
 
+	r.Get("/.well-known/jwks.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(jwtService.PublicKeyJWKS())
+	})
+
 	r.Route("/auth", authHandler.Routes)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)

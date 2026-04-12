@@ -2,13 +2,32 @@ package auth
 
 import (
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// JWK represents a single JSON Web Key for an EC public key.
+type JWK struct {
+	Kty string `json:"kty"`
+	Crv string `json:"crv"`
+	X   string `json:"x"`
+	Y   string `json:"y"`
+	Use string `json:"use"`
+	Alg string `json:"alg"`
+	Kid string `json:"kid"`
+}
+
+// JWKS represents a JSON Web Key Set.
+type JWKS struct {
+	Keys []JWK `json:"keys"`
+}
 
 type Claims struct {
 	Sub         string `json:"sub"`
@@ -61,6 +80,47 @@ func (s *JWTService) Sign(claims Claims) (string, error) {
 
 	return token.SignedString(s.privateKey)
 }
+
+// PublicKeyJWKS returns the JWKS representation of the EC public key.
+func (s *JWTService) PublicKeyJWKS() JWKS {
+	pub := s.publicKey
+	byteLen := (pub.Curve.Params().BitSize + 7) / 8
+	x := padBytes(pub.X.Bytes(), byteLen)
+	y := padBytes(pub.Y.Bytes(), byteLen)
+
+	crv := "P-256"
+	if pub.Curve == elliptic.P384() {
+		crv = "P-384"
+	} else if pub.Curve == elliptic.P521() {
+		crv = "P-521"
+	}
+
+	return JWKS{
+		Keys: []JWK{
+			{
+				Kty: "EC",
+				Crv: crv,
+				X:   base64.RawURLEncoding.EncodeToString(x),
+				Y:   base64.RawURLEncoding.EncodeToString(y),
+				Use: "sig",
+				Alg: "ES256",
+				Kid: "excalibase-auth-key",
+			},
+		},
+	}
+}
+
+func padBytes(b []byte, size int) []byte {
+	if len(b) >= size {
+		return b
+	}
+	padded := make([]byte, size)
+	copy(padded[size-len(b):], b)
+	return padded
+}
+
+// ensure big is used (imported for padBytes via math/big)
+var _ = (*big.Int)(nil)
 
 func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
