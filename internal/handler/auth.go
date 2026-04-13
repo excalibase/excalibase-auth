@@ -10,7 +10,6 @@ import (
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type AuthHandler struct {
@@ -65,7 +64,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Hash password
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		httpError(w, "internal error", 500)
 		return
@@ -76,7 +75,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	err = pool.QueryRow(r.Context(),
 		`INSERT INTO users (email, password, full_name, role, enabled, created_at, updated_at)
 		 VALUES ($1, $2, $3, 'user', true, NOW(), NOW()) RETURNING id`,
-		req.Email, string(hash), req.FullName,
+		req.Email, hash, req.FullName,
 	).Scan(&userID)
 	if err != nil {
 		httpError(w, "failed to create user", 500)
@@ -122,7 +121,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
+	if !auth.CheckPassword(req.Password, user.Password) {
 		httpError(w, "invalid email or password", 401)
 		return
 	}
