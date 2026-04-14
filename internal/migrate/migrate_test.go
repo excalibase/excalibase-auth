@@ -85,6 +85,9 @@ func TestMigrate_Up(t *testing.T) {
 	if !tableExists(t, connStr, "auth", "refresh_tokens") {
 		t.Error("expected auth.refresh_tokens table to exist after migration")
 	}
+	if !tableExists(t, connStr, "auth", "api_keys") {
+		t.Error("expected auth.api_keys table to exist after migration")
+	}
 }
 
 func TestMigrate_Up_Idempotent(t *testing.T) {
@@ -120,6 +123,9 @@ func TestMigrate_Down(t *testing.T) {
 	}
 	if tableExists(t, connStr, "auth", "refresh_tokens") {
 		t.Error("expected auth.refresh_tokens table to NOT exist after down migration")
+	}
+	if tableExists(t, connStr, "auth", "api_keys") {
+		t.Error("expected auth.api_keys table to NOT exist after down migration")
 	}
 }
 

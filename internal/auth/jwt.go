@@ -32,10 +32,17 @@ type JWKS struct {
 type Claims struct {
 	Sub         string `json:"sub"`
 	UserID      int64  `json:"userId"`
-	ProjectID   string `json:"projectId"`   // "{orgSlug}/{projectName}" composite key
+	ProjectID   string `json:"projectId"` // "{orgSlug}/{projectName}" composite key
 	OrgSlug     string `json:"orgSlug"`
 	ProjectName string `json:"projectName"`
 	Role        string `json:"role"`
+	// Scope distinguishes credential origin: "authenticated" (password login),
+	// "public" (publishable api key, browser-safe), or "service" (secret api key,
+	// server-side only). Empty for legacy password flows that don't set it.
+	Scope string `json:"scope,omitempty"`
+	// KeyID points back to auth.api_keys.id when this token was minted via an
+	// api-key grant. Zero for password / refresh grants.
+	KeyID int64 `json:"keyId,omitempty"`
 }
 
 type JWTService struct {
@@ -66,7 +73,7 @@ func NewJWTService(privateKeyPEM string, issuer string, expSeconds int) (*JWTSer
 
 func (s *JWTService) Sign(claims Claims) (string, error) {
 	now := time.Now()
-	token := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
+	mc := jwt.MapClaims{
 		"sub":         claims.Sub,
 		"userId":      claims.UserID,
 		"projectId":   claims.ProjectID,
@@ -76,9 +83,16 @@ func (s *JWTService) Sign(claims Claims) (string, error) {
 		"iss":         s.issuer,
 		"iat":         now.Unix(),
 		"exp":         now.Add(time.Duration(s.expSeconds) * time.Second).Unix(),
-	})
-
-	return token.SignedString(s.privateKey)
+	}
+	// Optional claims — only emit when set so password-flow tokens stay
+	// byte-for-byte identical to the pre-api-key behavior.
+	if claims.Scope != "" {
+		mc["scope"] = claims.Scope
+	}
+	if claims.KeyID != 0 {
+		mc["keyId"] = claims.KeyID
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodES256, mc).SignedString(s.privateKey)
 }
 
 // PublicKeyJWKS returns the JWKS representation of the EC public key.

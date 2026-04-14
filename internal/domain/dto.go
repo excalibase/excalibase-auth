@@ -19,6 +19,16 @@ type ValidateRequest struct {
 	Token string `json:"token"`
 }
 
+// TokenRequest is the OAuth2-shaped payload for the unified /token endpoint.
+// Only the fields relevant to the chosen grant_type need to be populated.
+type TokenRequest struct {
+	GrantType    string `json:"grant_type"`
+	Email        string `json:"email,omitempty"`
+	Password     string `json:"password,omitempty"`
+	APIKey       string `json:"api_key,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+}
+
 type AuthResponse struct {
 	AccessToken  string   `json:"accessToken"`
 	RefreshToken string   `json:"refreshToken"`
