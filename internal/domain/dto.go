@@ -29,6 +29,34 @@ type TokenRequest struct {
 	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
+// CreateAPIKeyRequest is the body for POST /api-keys. The plaintext key
+// returned in the response is only ever shown once.
+type CreateAPIKeyRequest struct {
+	Name    string `json:"name"`
+	KeyType string `json:"keyType"` // "publishable" | "secret"
+}
+
+// CreateAPIKeyResponse contains the freshly-minted plaintext key (returned
+// once and never readable again) plus the metadata that GET /api-keys exposes.
+type CreateAPIKeyResponse struct {
+	ID         int64  `json:"id"`
+	Plaintext  string `json:"plaintext"`
+	KeyPrefix  string `json:"keyPrefix"`
+	KeyType    string `json:"keyType"`
+	Name       string `json:"name"`
+	CreatedAt  string `json:"createdAt"`
+}
+
+// APIKeyInfo is the read-only listing shape (no plaintext, no key_hash).
+type APIKeyInfo struct {
+	ID         int64   `json:"id"`
+	KeyPrefix  string  `json:"keyPrefix"`
+	KeyType    string  `json:"keyType"`
+	Name       string  `json:"name"`
+	CreatedAt  string  `json:"createdAt"`
+	LastUsedAt *string `json:"lastUsedAt,omitempty"`
+}
+
 type AuthResponse struct {
 	AccessToken  string   `json:"accessToken"`
 	RefreshToken string   `json:"refreshToken"`

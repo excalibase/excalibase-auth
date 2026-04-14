@@ -9,6 +9,7 @@ import (
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/domain"
+	"github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/excalibase/auth/internal/service"
 	"github.com/go-chi/chi/v5"
@@ -51,6 +52,14 @@ func (h *AuthHandler) Routes(r chi.Router) {
 		// OAuth2-shaped unified endpoint. Legacy routes above still work and
 		// share the same exchange helpers — no HTTP re-dispatch.
 		r.Post("/token", h.Token)
+
+		// API key management — protected by JWT. Mounting RequireJWT here at
+		// the route registration site (instead of inside apikey.go) makes the
+		// auth requirement impossible to forget.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RequireJWT(h.jwtService))
+			r.Route("/api-keys", h.APIKeyRoutes)
+		})
 	})
 }
 

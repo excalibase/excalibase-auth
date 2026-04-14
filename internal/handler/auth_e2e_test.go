@@ -370,9 +370,99 @@ func TestIntegration_TokenGrant_UnsupportedReturns400(t *testing.T) {
 	resp.Body.Close()
 }
 
-// Full api-key grant flow: register a user, insert an api_keys row directly
-// (CRUD endpoints land in Phase 3), then exchange the plaintext via /token.
-// Verifies the issued JWT carries scope, keyId, and the apikey:<id> sub.
+// Full api-key CRUD + grant journey via real HTTP.
+// register → login → POST /api-keys → use plaintext via /token → revoke → /token rejects.
+func TestIntegration_APIKeyCRUDAndExchange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	srv, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	// 1. Register & capture the user JWT.
+	resp := postJSON(srv, "/auth/test-org/test-project/register", map[string]string{
+		"email": "frank@test.com", "password": "password123", "fullName": "Frank",
+	})
+	if resp.StatusCode != 201 {
+		t.Fatalf("register: got %d", resp.StatusCode)
+	}
+	var registerResp map[string]interface{}
+	decodeJSON(resp, &registerResp)
+	userJWT := registerResp["accessToken"].(string)
+
+	// 2. POST /api-keys (authenticated) returns plaintext once.
+	createBody, _ := json.Marshal(map[string]string{"name": "ci-key", "keyType": "publishable"})
+	req, _ := http.NewRequest("POST", srv.URL+"/auth/test-org/test-project/api-keys/", bytes.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 201 {
+		var body map[string]interface{}
+		decodeJSON(resp, &body)
+		t.Fatalf("create api key: got %d, body: %v", resp.StatusCode, body)
+	}
+	var createResp map[string]interface{}
+	decodeJSON(resp, &createResp)
+	plaintext, _ := createResp["plaintext"].(string)
+	if plaintext == "" || !strings.HasPrefix(plaintext, "esk_pub_live_") {
+		t.Fatalf("unexpected plaintext: %q", plaintext)
+	}
+	apiKeyID := int64(createResp["id"].(float64))
+
+	// 3. GET /api-keys lists the new key but never the hash or plaintext.
+	req, _ = http.NewRequest("GET", srv.URL+"/auth/test-org/test-project/api-keys/", nil)
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		t.Fatalf("list api keys: got %d", resp.StatusCode)
+	}
+	var listResp map[string]interface{}
+	decodeJSON(resp, &listResp)
+	keys := listResp["keys"].([]interface{})
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+	first := keys[0].(map[string]interface{})
+	if _, present := first["plaintext"]; present {
+		t.Error("list response must not include plaintext")
+	}
+	if _, present := first["keyHash"]; present {
+		t.Error("list response must not include keyHash")
+	}
+
+	// 4. Exchange the plaintext via /token.
+	resp = postJSON(srv, "/auth/test-org/test-project/token", map[string]string{
+		"grant_type": "api_key",
+		"api_key":    plaintext,
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("/token api_key after CRUD create: got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// 5. DELETE /api-keys/{id} revokes via the HTTP path.
+	req, _ = http.NewRequest("DELETE",
+		fmt.Sprintf("%s/auth/test-org/test-project/api-keys/%d", srv.URL, apiKeyID), nil)
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 204 {
+		t.Errorf("revoke: got %d, want 204", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// 6. Post-revocation /token must reject.
+	resp = postJSON(srv, "/auth/test-org/test-project/token", map[string]string{
+		"grant_type": "api_key",
+		"api_key":    plaintext,
+	})
+	if resp.StatusCode != 401 {
+		t.Errorf("post-revocation: got %d, want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// Full api-key grant flow with direct DB seeding (kept for the JWT-shape
+// assertions). Verifies the issued JWT carries scope and the apikey:<id> sub.
 func TestIntegration_TokenGrant_APIKey(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")

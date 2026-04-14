@@ -155,12 +155,19 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	userID, _ := mapClaims["userId"].(float64)
 	orgSlug, _ := mapClaims["orgSlug"].(string)
 	projectName, _ := mapClaims["projectName"].(string)
+	sub, _ := mapClaims["sub"].(string)
+	projectID, _ := mapClaims["projectId"].(string)
+	role, _ := mapClaims["role"].(string)
+	scope, _ := mapClaims["scope"].(string)
+	keyID, _ := mapClaims["keyId"].(float64)
 	return &Claims{
-		Sub:         mapClaims["sub"].(string),
+		Sub:         sub,
 		UserID:      int64(userID),
-		ProjectID:   mapClaims["projectId"].(string),
+		ProjectID:   projectID,
 		OrgSlug:     orgSlug,
 		ProjectName: projectName,
-		Role:        mapClaims["role"].(string),
+		Role:        role,
+		Scope:       scope,
+		KeyID:       int64(keyID),
 	}, nil
 }
