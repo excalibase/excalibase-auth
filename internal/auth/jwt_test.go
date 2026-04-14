@@ -95,3 +95,157 @@ func TestWrongKey(t *testing.T) {
 }
 
 func _ () { _ = time.Now() } // keep time import used
+
+// --- Phase 3: scope + keyId round-trip ---
+
+// A Claims round-trip must carry scope and keyId untouched when they are set
+// (api-key grant) and must omit them entirely from the token when they aren't
+// (password grant) so existing consumers see no observable change.
+func TestSignVerify_ScopeAndKeyIdRoundTrip(t *testing.T) {
+	keyPEM := testKeyPEM(t)
+	svc, _ := NewJWTService(keyPEM, "excalibase", 3600)
+
+	token, err := svc.Sign(Claims{
+		Sub:       "apikey:7",
+		UserID:    42,
+		ProjectID: "acme/prod",
+		Role:      "service",
+		Scope:     "service",
+		KeyID:     7,
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	claims, err := svc.Verify(token)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if claims.Scope != "service" {
+		t.Errorf("scope: got %q, want service", claims.Scope)
+	}
+	if claims.KeyID != 7 {
+		t.Errorf("keyId: got %d, want 7", claims.KeyID)
+	}
+	if claims.Sub != "apikey:7" {
+		t.Errorf("sub: got %q, want apikey:7", claims.Sub)
+	}
+}
+
+// A password-grant token must verify cleanly with empty scope / zero keyId so
+// existing legacy flows aren't broken by the new optional fields.
+func TestSignVerify_OmitsScopeAndKeyIdWhenUnset(t *testing.T) {
+	keyPEM := testKeyPEM(t)
+	svc, _ := NewJWTService(keyPEM, "excalibase", 3600)
+
+	token, err := svc.Sign(Claims{
+		Sub:       "alice@test.com",
+		UserID:    1,
+		ProjectID: "acme/prod",
+		Role:      "user",
+		// Scope and KeyID intentionally zero-value
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	claims, err := svc.Verify(token)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if claims.Scope != "" {
+		t.Errorf("scope should be empty when unset, got %q", claims.Scope)
+	}
+	if claims.KeyID != 0 {
+		t.Errorf("keyId should be zero when unset, got %d", claims.KeyID)
+	}
+}
+
+// Publishable-key tokens use Scope="public" which is a distinct branch from
+// service-scope and must also round-trip.
+func TestSignVerify_PublishableKeyScope(t *testing.T) {
+	keyPEM := testKeyPEM(t)
+	svc, _ := NewJWTService(keyPEM, "excalibase", 3600)
+
+	token, _ := svc.Sign(Claims{
+		Sub:       "apikey:3",
+		UserID:    1,
+		ProjectID: "acme/prod",
+		Role:      "user",
+		Scope:     "public",
+		KeyID:     3,
+	})
+	claims, err := svc.Verify(token)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if claims.Scope != "public" {
+		t.Errorf("scope: got %q, want public", claims.Scope)
+	}
+}
+
+// Verify() must not crash on a token missing optional claims. Construct a raw
+// token via Sign() with everything empty — this is the minimum-shape path.
+func TestVerify_MinimumShapeToken(t *testing.T) {
+	keyPEM := testKeyPEM(t)
+	svc, _ := NewJWTService(keyPEM, "excalibase", 3600)
+
+	token, err := svc.Sign(Claims{Sub: "", UserID: 0, ProjectID: ""})
+	if err != nil {
+		t.Fatalf("Sign minimal: %v", err)
+	}
+	claims, err := svc.Verify(token)
+	if err != nil {
+		t.Fatalf("Verify minimal: %v", err)
+	}
+	if claims == nil {
+		t.Fatal("claims should not be nil")
+	}
+}
+
+func TestNewJWTService_RejectsInvalidPEM(t *testing.T) {
+	_, err := NewJWTService("not a pem block", "excalibase", 3600)
+	if err == nil {
+		t.Error("expected error for invalid PEM input")
+	}
+}
+
+func TestNewJWTService_RejectsUnparseableKey(t *testing.T) {
+	bogus := "-----BEGIN EC PRIVATE KEY-----\nQUFB\n-----END EC PRIVATE KEY-----\n"
+	_, err := NewJWTService(bogus, "excalibase", 3600)
+	if err == nil {
+		t.Error("expected error for unparseable key bytes")
+	}
+}
+
+// PublicKeyJWKS is consumed by the /.well-known/jwks.json endpoint. Downstream
+// services like excalibase-graphql use the produced JWK Set to verify tokens,
+// so the serialization shape (kty, crv, x, y, alg, kid) must stay stable.
+func TestPublicKeyJWKS_SerializesP256(t *testing.T) {
+	keyPEM := testKeyPEM(t)
+	svc, _ := NewJWTService(keyPEM, "excalibase", 3600)
+
+	jwks := svc.PublicKeyJWKS()
+	if len(jwks.Keys) != 1 {
+		t.Fatalf("expected exactly one JWK, got %d", len(jwks.Keys))
+	}
+	k := jwks.Keys[0]
+	if k.Kty != "EC" {
+		t.Errorf("kty: got %q, want EC", k.Kty)
+	}
+	if k.Crv != "P-256" {
+		t.Errorf("crv: got %q, want P-256", k.Crv)
+	}
+	if k.Alg != "ES256" {
+		t.Errorf("alg: got %q, want ES256", k.Alg)
+	}
+	if k.Kid == "" {
+		t.Error("kid must not be empty — downstream caches key on this value")
+	}
+	if k.X == "" || k.Y == "" {
+		t.Error("x and y coordinates must be populated")
+	}
+	if k.Use != "sig" {
+		t.Errorf("use: got %q, want sig", k.Use)
+	}
+}

@@ -370,6 +370,159 @@ func TestIntegration_TokenGrant_UnsupportedReturns400(t *testing.T) {
 	resp.Body.Close()
 }
 
+// Tighter coverage of the CRUD positive paths: invalid keyType rejection,
+// list-shape assertions, revoke idempotency. Complements the happy-path
+// journey test below.
+func TestIntegration_APIKeyCRUD_InvalidKeyType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	srv, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	userJWT := registerAndGetJWT(t, srv, "grace@test.com", "Grace")
+
+	body, _ := json.Marshal(map[string]string{"name": "bad", "keyType": "admin"})
+	req, _ := http.NewRequest("POST", srv.URL+"/auth/test-org/test-project/api-keys/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 400 {
+		t.Errorf("invalid keyType: got %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestIntegration_APIKeyCRUD_ListShape(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	srv, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	userJWT := registerAndGetJWT(t, srv, "henry@test.com", "Henry")
+
+	// Create two keys (publishable + secret) so we can verify both types appear.
+	for _, kt := range []string{"publishable", "secret"} {
+		b, _ := json.Marshal(map[string]string{"name": kt + "-key", "keyType": kt})
+		req, _ := http.NewRequest("POST", srv.URL+"/auth/test-org/test-project/api-keys/", bytes.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+userJWT)
+		resp, _ := http.DefaultClient.Do(req)
+		if resp.StatusCode != 201 {
+			t.Fatalf("create %s: got %d", kt, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// List and verify shape
+	req, _ := http.NewRequest("GET", srv.URL+"/auth/test-org/test-project/api-keys/", nil)
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		t.Fatalf("list: got %d", resp.StatusCode)
+	}
+	var listResp map[string]interface{}
+	decodeJSON(resp, &listResp)
+	keys := listResp["keys"].([]interface{})
+	if len(keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d", len(keys))
+	}
+
+	// Every key must have id, keyPrefix, keyType, name, createdAt — never plaintext or hash.
+	for _, raw := range keys {
+		k := raw.(map[string]interface{})
+		for _, req := range []string{"id", "keyPrefix", "keyType", "name", "createdAt"} {
+			if _, ok := k[req]; !ok {
+				t.Errorf("list entry missing required field %q: %v", req, k)
+			}
+		}
+		for _, forbidden := range []string{"plaintext", "keyHash", "key_hash"} {
+			if _, ok := k[forbidden]; ok {
+				t.Errorf("list entry leaked forbidden field %q", forbidden)
+			}
+		}
+	}
+}
+
+func TestIntegration_APIKeyCRUD_RevokeIdempotent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	srv, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	userJWT := registerAndGetJWT(t, srv, "ivy@test.com", "Ivy")
+
+	// Create a key and capture its id
+	body, _ := json.Marshal(map[string]string{"name": "idem", "keyType": "publishable"})
+	req, _ := http.NewRequest("POST", srv.URL+"/auth/test-org/test-project/api-keys/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	resp, _ := http.DefaultClient.Do(req)
+	var createResp map[string]interface{}
+	decodeJSON(resp, &createResp)
+	id := int64(createResp["id"].(float64))
+
+	// First DELETE → 204
+	req, _ = http.NewRequest("DELETE",
+		fmt.Sprintf("%s/auth/test-org/test-project/api-keys/%d", srv.URL, id), nil)
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 204 {
+		t.Errorf("first revoke: got %d, want 204", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Second DELETE on the same id → 200 with status=already_revoked_or_missing (idempotent)
+	req, _ = http.NewRequest("DELETE",
+		fmt.Sprintf("%s/auth/test-org/test-project/api-keys/%d", srv.URL, id), nil)
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		t.Errorf("second revoke: got %d, want 200 (idempotent)", resp.StatusCode)
+	}
+	var idemBody map[string]interface{}
+	decodeJSON(resp, &idemBody)
+	if idemBody["status"] != "already_revoked_or_missing" {
+		t.Errorf("idempotent revoke body: got %v", idemBody)
+	}
+
+	// Revoking a non-existent id also returns 200 with the same status
+	req, _ = http.NewRequest("DELETE", srv.URL+"/auth/test-org/test-project/api-keys/999999", nil)
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 200 {
+		t.Errorf("missing-id revoke: got %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Bad id (non-numeric) is a 400
+	req, _ = http.NewRequest("DELETE", srv.URL+"/auth/test-org/test-project/api-keys/not-a-number", nil)
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != 400 {
+		t.Errorf("bad id: got %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// registerAndGetJWT is a test helper: registers a new user and returns the
+// access token from the register response. Used by tests that need a valid
+// user JWT without duplicating the register boilerplate.
+func registerAndGetJWT(t *testing.T, srv *httptest.Server, email, name string) string {
+	t.Helper()
+	resp := postJSON(srv, "/auth/test-org/test-project/register", map[string]string{
+		"email": email, "password": "password123", "fullName": name,
+	})
+	if resp.StatusCode != 201 {
+		t.Fatalf("register %s: got %d", email, resp.StatusCode)
+	}
+	var r map[string]interface{}
+	decodeJSON(resp, &r)
+	return r["accessToken"].(string)
+}
+
 // Full api-key CRUD + grant journey via real HTTP.
 // register → login → POST /api-keys → use plaintext via /token → revoke → /token rejects.
 func TestIntegration_APIKeyCRUDAndExchange(t *testing.T) {
