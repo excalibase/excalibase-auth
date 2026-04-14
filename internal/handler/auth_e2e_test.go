@@ -67,7 +67,7 @@ func setupIntegration(t *testing.T) (*httptest.Server, func()) {
 	})
 
 	// 5. Auth handler + router
-	authHandler := NewAuthHandler(poolMgr, jwtSvc, 604800)
+	authHandler := NewAuthHandler(poolMgr, jwtSvc, 3600, 604800)
 	r := chi.NewRouter()
 	r.Route("/auth", authHandler.Routes)
 	srv := httptest.NewServer(r)

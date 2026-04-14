@@ -15,11 +15,12 @@ import (
 type AuthHandler struct {
 	poolMgr    *pool.Manager
 	jwtService *auth.JWTService
+	accessExp  int // seconds — access token lifetime returned in expires_in
 	refreshExp int // seconds
 }
 
-func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
-	return &AuthHandler{poolMgr: poolMgr, jwtService: jwtService, refreshExp: refreshExp}
+func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, accessExp, refreshExp int) *AuthHandler {
+	return &AuthHandler{poolMgr: poolMgr, jwtService: jwtService, accessExp: accessExp, refreshExp: refreshExp}
 }
 
 func (h *AuthHandler) Routes(r chi.Router) {
@@ -260,7 +261,7 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		TokenType:    "Bearer",
-		ExpiresIn:    3600,
+		ExpiresIn:    int64(h.accessExp),
 		User:         domain.UserInfo{ID: userID, Email: email, FullName: fullName},
 	}, nil
 }

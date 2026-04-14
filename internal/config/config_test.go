@@ -6,6 +6,9 @@ import (
 )
 
 func TestLoadDefaults(t *testing.T) {
+	// Guard against CI / local shell leakage of the env vars we care about.
+	os.Unsetenv("ACCESS_TTL")
+	os.Unsetenv("JWT_EXPIRATION")
 	cfg := Load()
 	if cfg.Port != "24000" {
 		t.Errorf("port: got %s, want 24000", cfg.Port)
@@ -18,6 +21,50 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.RefreshExpiration != 604800 {
 		t.Errorf("refreshExpiration: got %d", cfg.RefreshExpiration)
+	}
+	if cfg.AccessTTL != 3600 {
+		t.Errorf("accessTTL default: got %d, want 3600", cfg.AccessTTL)
+	}
+}
+
+func TestAccessTTL_ExplicitEnvWins(t *testing.T) {
+	t.Setenv("ACCESS_TTL", "1800")
+	cfg := Load()
+	if cfg.AccessTTL != 1800 {
+		t.Errorf("ACCESS_TTL env: got %d, want 1800", cfg.AccessTTL)
+	}
+}
+
+func TestAccessTTL_FallsBackToJWTExpiration(t *testing.T) {
+	os.Unsetenv("ACCESS_TTL")
+	t.Setenv("JWT_EXPIRATION", "7200")
+	cfg := Load()
+	if cfg.AccessTTL != 7200 {
+		t.Errorf("fallback to JWT_EXPIRATION: got %d, want 7200", cfg.AccessTTL)
+	}
+}
+
+func TestAccessTTL_InvalidFallsBackToDefault(t *testing.T) {
+	os.Unsetenv("JWT_EXPIRATION")
+	t.Setenv("ACCESS_TTL", "not-a-number")
+	cfg := Load()
+	if cfg.AccessTTL != 3600 {
+		t.Errorf("invalid ACCESS_TTL should fall back to 3600: got %d", cfg.AccessTTL)
+	}
+}
+
+func TestAccessTTL_ZeroOrNegativeGuarded(t *testing.T) {
+	os.Unsetenv("JWT_EXPIRATION")
+	t.Setenv("ACCESS_TTL", "0")
+	cfg := Load()
+	if cfg.AccessTTL != 3600 {
+		t.Errorf("ACCESS_TTL=0 must be guarded: got %d, want 3600", cfg.AccessTTL)
+	}
+
+	t.Setenv("ACCESS_TTL", "-5")
+	cfg = Load()
+	if cfg.AccessTTL != 3600 {
+		t.Errorf("ACCESS_TTL=-5 must be guarded: got %d, want 3600", cfg.AccessTTL)
 	}
 }
 

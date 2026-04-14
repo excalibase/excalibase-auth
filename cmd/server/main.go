@@ -44,7 +44,7 @@ func main() {
 	})
 
 	// Handler
-	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.RefreshExpiration)
+	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.AccessTTL, cfg.RefreshExpiration)
 
 	// Router
 	r := chi.NewRouter()

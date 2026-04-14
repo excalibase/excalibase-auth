@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -26,7 +27,7 @@ func setupUnitRouter(t *testing.T) chi.Router {
 	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
 	// Pool manager with unreachable vault — all DB operations will fail
 	mgr := pool.NewManager("http://127.0.0.1:1", "fake-pat", time.Hour)
-	h := NewAuthHandler(mgr, jwtSvc, 604800)
+	h := NewAuthHandler(mgr, jwtSvc, 900, 604800)
 
 	r := chi.NewRouter()
 	r.Route("/auth", h.Routes)
@@ -158,5 +159,40 @@ func TestValidate_InvalidToken(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+// generateAuthResponse must surface the configured access TTL, not the historical
+// hardcoded 3600. This is a direct unit test of the private helper; the pool fetch
+// is allowed to fail silently (refresh_tokens insert is skipped when pool==nil).
+func TestGenerateAuthResponse_ExpiresInMatchesConfig(t *testing.T) {
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	b, _ := x509.MarshalECPrivateKey(priv)
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b}))
+	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
+	mgr := pool.NewManager("http://127.0.0.1:1", "fake-pat", time.Hour)
+
+	const wantAccess = 900
+	h := NewAuthHandler(mgr, jwtSvc, wantAccess, 604800)
+
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("orgSlug", "test-org")
+	rctx.URLParams.Add("projectName", "test-project")
+	req := httptest.NewRequest("POST", "/", nil).WithContext(
+		context.WithValue(context.Background(), chi.RouteCtxKey, rctx),
+	)
+
+	resp, err := h.generateAuthResponse(req, "test-org/test-project", 42, "alice@example.com", "Alice")
+	if err != nil {
+		t.Fatalf("generateAuthResponse: %v", err)
+	}
+	if resp.ExpiresIn != int64(wantAccess) {
+		t.Errorf("ExpiresIn: got %d, want %d", resp.ExpiresIn, wantAccess)
+	}
+	if resp.TokenType != "Bearer" {
+		t.Errorf("TokenType: got %s, want Bearer", resp.TokenType)
+	}
+	if resp.AccessToken == "" {
+		t.Error("AccessToken should not be empty")
 	}
 }
