@@ -18,10 +18,27 @@ type poolEntry struct {
 	connStr   string // to detect credential rotation
 }
 
+// ProjectInfo mirrors the response of provisioning's
+// `GET /api/projects/{projectId}/info` — display names alongside opaque ids.
+// Cached per projectId for `infoTTL` so we don't hammer provisioning at every login.
+type ProjectInfo struct {
+	ProjectID   string `json:"projectId"`
+	ProjectName string `json:"projectName"`
+	OrgID       string `json:"orgId"`
+	OrgSlug     string `json:"orgSlug"`
+	OrgName     string `json:"orgName"`
+}
+
+type infoEntry struct {
+	info      ProjectInfo
+	createdAt time.Time
+}
+
 type Manager struct {
 	provisioningURL string
 	pat             string
 	pools           map[string]*poolEntry
+	infos           map[string]*infoEntry
 	mu              sync.RWMutex
 	ttl             time.Duration
 	httpClient      *http.Client
@@ -34,6 +51,7 @@ func NewManager(provisioningURL, pat string, ttl time.Duration) *Manager {
 		provisioningURL: provisioningURL,
 		pat:             pat,
 		pools:           make(map[string]*poolEntry),
+		infos:           make(map[string]*infoEntry),
 		ttl:             ttl,
 		httpClient:      &http.Client{Timeout: 10 * time.Second},
 		poolCreator:     defaultPoolCreator,
@@ -44,7 +62,10 @@ func (m *Manager) SetMigrator(fn func(ctx context.Context, connStr string) error
 	m.migrator = fn
 }
 
-func (m *Manager) GetPool(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
+// GetPool returns the pgx pool for a project. orgSlug + projectID together locate
+// the vault path (projects/{orgSlug}/{projectID}/credentials/auth_admin). Cache key
+// is projectID alone since provisioning mints it globally unique.
+func (m *Manager) GetPool(ctx context.Context, orgSlug, projectID string) (*pgxpool.Pool, error) {
 	m.mu.RLock()
 	entry, ok := m.pools[projectID]
 	m.mu.RUnlock()
@@ -53,11 +74,11 @@ func (m *Manager) GetPool(ctx context.Context, projectID string) (*pgxpool.Pool,
 		return entry.pool, nil
 	}
 
-	return m.createPool(ctx, projectID)
+	return m.createPool(ctx, orgSlug, projectID)
 }
 
-func (m *Manager) createPool(ctx context.Context, projectID string) (*pgxpool.Pool, error) {
-	creds, err := m.fetchCredentials(ctx, projectID)
+func (m *Manager) createPool(ctx context.Context, orgSlug, projectID string) (*pgxpool.Pool, error) {
+	creds, err := m.fetchCredentials(ctx, orgSlug, projectID)
 	if err != nil {
 		log.Printf("ERROR: fetch credentials for %s: %v", projectID, err)
 		return nil, fmt.Errorf("fetch credentials: %w", err)
@@ -103,9 +124,9 @@ func (m *Manager) createPool(ctx context.Context, projectID string) (*pgxpool.Po
 	return pool, nil
 }
 
-func (m *Manager) fetchCredentials(ctx context.Context, projectID string) (map[string]string, error) {
-	// projectID is "{orgSlug}/{projectName}" — vault path: projects/{orgSlug}/{projectName}/credentials/auth_admin
-	url := fmt.Sprintf("%s/vault/secrets/projects/%s/credentials/auth_admin", m.provisioningURL, projectID)
+func (m *Manager) fetchCredentials(ctx context.Context, orgSlug, projectID string) (map[string]string, error) {
+	// Vault path: projects/{orgSlug}/{projectID}/credentials/auth_admin
+	url := fmt.Sprintf("%s/vault/secrets/projects/%s/%s/credentials/auth_admin", m.provisioningURL, orgSlug, projectID)
 	log.Printf("INFO: fetching credentials from %s", url)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -128,6 +149,45 @@ func (m *Manager) fetchCredentials(ctx context.Context, projectID string) (map[s
 		return nil, fmt.Errorf("decode credentials: %w", err)
 	}
 	return creds, nil
+}
+
+// GetProjectInfo returns display-name metadata for a project (org name, project
+// name) by calling provisioning's /api/projects/{projectId}/info endpoint.
+// Cached per projectId for the manager's TTL so login-flow latency stays low.
+// Returns (zero value, error) on lookup failure — callers should treat info as
+// optional and fall through to URL-derived values.
+func (m *Manager) GetProjectInfo(ctx context.Context, projectID string) (ProjectInfo, error) {
+	m.mu.RLock()
+	if entry, ok := m.infos[projectID]; ok && time.Since(entry.createdAt) < m.ttl {
+		info := entry.info
+		m.mu.RUnlock()
+		return info, nil
+	}
+	m.mu.RUnlock()
+
+	url := fmt.Sprintf("%s/projects/%s/info", m.provisioningURL, projectID)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return ProjectInfo{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+m.pat)
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return ProjectInfo{}, fmt.Errorf("project info request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ProjectInfo{}, fmt.Errorf("project info returned %d", resp.StatusCode)
+	}
+	var info ProjectInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return ProjectInfo{}, fmt.Errorf("decode project info: %w", err)
+	}
+
+	m.mu.Lock()
+	m.infos[projectID] = &infoEntry{info: info, createdAt: time.Now()}
+	m.mu.Unlock()
+	return info, nil
 }
 
 func defaultPoolCreator(ctx context.Context, connStr string) (*pgxpool.Pool, error) {

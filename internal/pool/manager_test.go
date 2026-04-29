@@ -21,7 +21,7 @@ func TestFetchCredentials(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-pat" {
 			t.Errorf("expected Bearer test-pat, got %s", r.Header.Get("Authorization"))
 		}
-		if r.URL.Path != "/vault/secrets/projects/my-app/credentials/auth_admin" {
+		if r.URL.Path != "/vault/secrets/projects/my-org/my-app/credentials/auth_admin" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		json.NewEncoder(w).Encode(creds)
@@ -30,7 +30,7 @@ func TestFetchCredentials(t *testing.T) {
 
 	mgr := NewManager(server.URL, "test-pat", time.Hour)
 
-	got, err := mgr.fetchCredentials(context.Background(), "my-app")
+	got, err := mgr.fetchCredentials(context.Background(), "my-org", "my-app")
 	if err != nil {
 		t.Fatalf("fetchCredentials: %v", err)
 	}
@@ -61,8 +61,8 @@ func TestGetPoolCaches(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	mgr.GetPool(ctx, "project-1")
-	mgr.GetPool(ctx, "project-1") // should be cached
+	mgr.GetPool(ctx, "my-org", "project-1")
+	mgr.GetPool(ctx, "my-org", "project-1") // should be cached
 
 	if callCount != 1 {
 		t.Errorf("expected 1 vault call (cached), got %d", callCount)
@@ -86,9 +86,9 @@ func TestGetPoolTTLExpiry(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	mgr.GetPool(ctx, "project-1")
+	mgr.GetPool(ctx, "my-org", "project-1")
 	time.Sleep(5 * time.Millisecond)
-	mgr.GetPool(ctx, "project-1") // TTL expired, should re-fetch
+	mgr.GetPool(ctx, "my-org", "project-1") // TTL expired, should re-fetch
 
 	if callCount != 2 {
 		t.Errorf("expected 2 vault calls (TTL expired), got %d", callCount)
@@ -102,7 +102,7 @@ func TestFetchCredentials_VaultError(t *testing.T) {
 	defer server.Close()
 
 	mgr := NewManager(server.URL, "test-pat", time.Hour)
-	_, err := mgr.fetchCredentials(context.Background(), "bad-project")
+	_, err := mgr.fetchCredentials(context.Background(), "my-org", "bad-project")
 	if err == nil {
 		t.Fatal("expected error for vault 503")
 	}

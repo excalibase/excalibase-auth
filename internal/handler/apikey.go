@@ -43,7 +43,7 @@ func (h *AuthHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pool, err := h.poolMgr.GetPool(r.Context(), projectID)
+	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		httpError(w, errProjectDBUnavailable.Error(), 503)
 		return
@@ -90,7 +90,7 @@ func (h *AuthHandler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pool, err := h.poolMgr.GetPool(r.Context(), projectID)
+	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		httpError(w, errProjectDBUnavailable.Error(), 503)
 		return
@@ -145,7 +145,7 @@ func (h *AuthHandler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pool, err := h.poolMgr.GetPool(r.Context(), projectID)
+	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		httpError(w, errProjectDBUnavailable.Error(), 503)
 		return

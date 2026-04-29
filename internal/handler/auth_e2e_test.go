@@ -163,7 +163,7 @@ func TestIntegration_FullAuthFlow(t *testing.T) {
 	if validateResp["email"] != "alice@test.com" {
 		t.Errorf("email: got %v", validateResp["email"])
 	}
-	if validateResp["projectId"] != "test-org/test-project" {
+	if validateResp["projectId"] != "test-project" {
 		t.Errorf("projectId: got %v", validateResp["projectId"])
 	}
 

@@ -32,9 +32,10 @@ type JWKS struct {
 type Claims struct {
 	Sub         string `json:"sub"`
 	UserID      int64  `json:"userId"`
-	ProjectID   string `json:"projectId"` // "{orgSlug}/{projectName}" composite key
+	ProjectID   string `json:"projectId"` // opaque project ref minted by provisioning (e.g. "proj_a3k9fx7b2k")
 	OrgSlug     string `json:"orgSlug"`
-	ProjectName string `json:"projectName"`
+	ProjectName string `json:"projectName"` // display name (user-typed, e.g. "blog")
+	OrgName     string `json:"orgName"`     // display name (e.g. "Acme Corp")
 	Role        string `json:"role"`
 	// Scope distinguishes credential origin: "authenticated" (password login),
 	// "public" (publishable api key, browser-safe), or "service" (secret api key,
@@ -79,6 +80,7 @@ func (s *JWTService) Sign(claims Claims) (string, error) {
 		"projectId":   claims.ProjectID,
 		"orgSlug":     claims.OrgSlug,
 		"projectName": claims.ProjectName,
+		"orgName":     claims.OrgName,
 		"role":        claims.Role,
 		"iss":         s.issuer,
 		"iat":         now.Unix(),
@@ -155,6 +157,7 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	userID, _ := mapClaims["userId"].(float64)
 	orgSlug, _ := mapClaims["orgSlug"].(string)
 	projectName, _ := mapClaims["projectName"].(string)
+	orgName, _ := mapClaims["orgName"].(string)
 	sub, _ := mapClaims["sub"].(string)
 	projectID, _ := mapClaims["projectId"].(string)
 	role, _ := mapClaims["role"].(string)
@@ -166,6 +169,7 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 		ProjectID:   projectID,
 		OrgSlug:     orgSlug,
 		ProjectName: projectName,
+		OrgName:     orgName,
 		Role:        role,
 		Scope:       scope,
 		KeyID:       int64(keyID),

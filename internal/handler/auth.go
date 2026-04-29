@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -43,7 +44,8 @@ func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, accessEx
 }
 
 func (h *AuthHandler) Routes(r chi.Router) {
-	r.Route("/{orgSlug}/{projectName}", func(r chi.Router) {
+	r.Route("/{orgSlug}/{projectId}", func(r chi.Router) {
+		r.Use(middleware.TenantContext)
 		r.Post("/register", h.Register)
 		r.Post("/login", h.Login)
 		r.Post("/validate", h.Validate)
@@ -63,13 +65,18 @@ func (h *AuthHandler) Routes(r chi.Router) {
 	})
 }
 
-// projectKey returns "{orgSlug}/{projectName}" used as pool key and vault path segment.
+// projectKey returns the opaque projectId used as pool key and vault path segment.
+// Globally unique (provisioning mints it), so org scoping is handled by URL path, not the key.
 func projectKey(r *http.Request) string {
-	return chi.URLParam(r, "orgSlug") + "/" + chi.URLParam(r, "projectName")
+	pid := chi.URLParam(r, "projectId")
+	log.Printf("SENTINEL_RENAME_V3 projectKey returning projectId=%q orgSlug=%q", pid, chi.URLParam(r, "orgSlug"))
+	return pid
 }
 
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	projectID := projectKey(r)
+	tenantID, _ := middleware.TenantIDFromContext(r.Context())
+	orgSlug, _ := middleware.OrgSlugFromContext(r.Context())
 	var req domain.RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, "invalid request", 400)
@@ -80,7 +87,9 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pool, err := h.poolMgr.GetPool(r.Context(), projectID)
+	log.Printf("auth.register tenant=%s org=%s email=%s", tenantID, orgSlug, req.Email)
+
+	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		httpError(w, "failed to connect to project database", 503)
 		return
@@ -125,13 +134,17 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	projectID := projectKey(r)
+	tenantID, _ := middleware.TenantIDFromContext(r.Context())
+	orgSlug, _ := middleware.OrgSlugFromContext(r.Context())
 	var req domain.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, "invalid request", 400)
 		return
 	}
+	log.Printf("auth.login tenant=%s org=%s email=%s", tenantID, orgSlug, req.Email)
 	resp, code, err := h.exchangePassword(r, projectID, req.Email, req.Password)
 	if err != nil {
+		log.Printf("auth.login.fail tenant=%s org=%s email=%s code=%d err=%v", tenantID, orgSlug, req.Email, code, err)
 		httpError(w, err.Error(), code)
 		return
 	}
@@ -141,7 +154,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 // exchangePassword authenticates a user by email/password and returns a fresh
 // AuthResponse. Returns (nil, statusCode, err) on failure.
 func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, password string) (*domain.AuthResponse, int, error) {
-	pool, err := h.poolMgr.GetPool(r.Context(), projectID)
+	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return nil, 503, errProjectDBUnavailable
 	}
@@ -211,7 +224,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 // returns a fresh AuthResponse for the same user. Returns (nil, statusCode, err)
 // on failure.
 func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshToken string) (*domain.AuthResponse, int, error) {
-	pool, err := h.poolMgr.GetPool(r.Context(), projectID)
+	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return nil, 503, errProjectDBUnavailable
 	}
@@ -266,7 +279,7 @@ func (h *AuthHandler) exchangeAPIKey(r *http.Request, projectID, apiKey string) 
 	if apiKey == "" {
 		return nil, 400, errMissingAPIKey
 	}
-	pool, err := h.poolMgr.GetPool(r.Context(), projectID)
+	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return nil, 503, errProjectDBUnavailable
 	}
@@ -306,7 +319,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pool, err := h.poolMgr.GetPool(r.Context(), projectID)
+	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		httpError(w, "failed to connect to project database", 503)
 		return
@@ -318,7 +331,23 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, userID int64, email, fullName string) (*domain.AuthResponse, error) {
 	orgSlug := chi.URLParam(r, "orgSlug")
-	projectName := chi.URLParam(r, "projectName")
+
+	// Look up display names from provisioning (cached per projectId in poolMgr).
+	// Best-effort — if provisioning is unreachable, fall back to projectId/orgSlug
+	// so we never block login on a metadata lookup.
+	projectName := projectID
+	orgName := orgSlug
+	if info, err := h.poolMgr.GetProjectInfo(r.Context(), projectID); err == nil {
+		if info.ProjectName != "" {
+			projectName = info.ProjectName
+		}
+		if info.OrgName != "" {
+			orgName = info.OrgName
+		}
+		if info.OrgSlug != "" {
+			orgSlug = info.OrgSlug
+		}
+	}
 
 	accessToken, err := h.jwtService.Sign(auth.Claims{
 		Sub:         email,
@@ -326,6 +355,7 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 		ProjectID:   projectID,
 		OrgSlug:     orgSlug,
 		ProjectName: projectName,
+		OrgName:     orgName,
 		Role:        "user",
 	})
 	if err != nil {
@@ -335,7 +365,7 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 	refreshToken := uuid.New().String()
 	expiryDate := time.Now().Add(time.Duration(h.refreshExp) * time.Second)
 
-	pool, _ := h.poolMgr.GetPool(r.Context(), projectID)
+	pool, _ := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if pool != nil {
 		pool.Exec(r.Context(),
 			"INSERT INTO refresh_tokens (token, user_id, expiry_date, created_at, revoked) VALUES ($1, $2, $3, NOW(), false)",
@@ -361,7 +391,20 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 // authorization checks have something coarser than scope to act on.
 func (h *AuthHandler) generateAPIKeyAuthResponse(r *http.Request, projectID string, userID, keyID int64, keyType string) (*domain.AuthResponse, error) {
 	orgSlug := chi.URLParam(r, "orgSlug")
-	projectName := chi.URLParam(r, "projectName")
+
+	projectName := projectID
+	orgName := orgSlug
+	if info, err := h.poolMgr.GetProjectInfo(r.Context(), projectID); err == nil {
+		if info.ProjectName != "" {
+			projectName = info.ProjectName
+		}
+		if info.OrgName != "" {
+			orgName = info.OrgName
+		}
+		if info.OrgSlug != "" {
+			orgSlug = info.OrgSlug
+		}
+	}
 
 	scope := "public"
 	role := "user"
@@ -376,6 +419,7 @@ func (h *AuthHandler) generateAPIKeyAuthResponse(r *http.Request, projectID stri
 		ProjectID:   projectID,
 		OrgSlug:     orgSlug,
 		ProjectName: projectName,
+		OrgName:     orgName,
 		Role:        role,
 		Scope:       scope,
 		KeyID:       keyID,
