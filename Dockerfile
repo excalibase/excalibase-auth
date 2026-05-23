@@ -6,11 +6,12 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /bin/excalibase-auth ./cmd/server/
 
-FROM alpine:3.20
+# distroless/static: minimal runtime, no shell, runs as nonroot, ships ca-certificates.
+FROM gcr.io/distroless/static:nonroot
 
-RUN apk add --no-cache ca-certificates
 COPY --from=build /bin/excalibase-auth /bin/excalibase-auth
 
+USER nonroot:nonroot
 EXPOSE 24000
 
 ENTRYPOINT ["/bin/excalibase-auth"]
