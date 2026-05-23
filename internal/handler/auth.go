@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/excalibase/auth/internal/auth"
@@ -87,7 +88,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("auth.register tenant=%s org=%s email=%s", tenantID, orgSlug, req.Email)
+	log.Printf("auth.register tenant=%s org=%s email=%s", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email))
 
 	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
@@ -141,10 +142,10 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "invalid request", 400)
 		return
 	}
-	log.Printf("auth.login tenant=%s org=%s email=%s", tenantID, orgSlug, req.Email)
+	log.Printf("auth.login tenant=%s org=%s email=%s", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email))
 	resp, code, err := h.exchangePassword(r, projectID, req.Email, req.Password)
 	if err != nil {
-		log.Printf("auth.login.fail tenant=%s org=%s email=%s code=%d err=%v", tenantID, orgSlug, req.Email, code, err)
+		log.Printf("auth.login.fail tenant=%s org=%s email=%s code=%d err=%v", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email), code, err)
 		httpError(w, err.Error(), code)
 		return
 	}
@@ -484,4 +485,13 @@ func httpError(w http.ResponseWriter, msg string, code int) {
 		"error":  msg,
 		"status": code,
 	})
+}
+
+// safeLog strips CR/LF/TAB from a string so user-controlled values can't inject
+// fake log lines (CWE-117 log injection). Apply to any string sourced from a
+// request header, path param, or body before passing to log.Printf.
+var logSanitizer = strings.NewReplacer("\r", "_", "\n", "_", "\t", "_")
+
+func safeLog(s string) string {
+	return logSanitizer.Replace(s)
 }
