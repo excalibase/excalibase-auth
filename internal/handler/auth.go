@@ -357,6 +357,10 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 		ProjectName: projectName,
 		OrgName:     orgName,
 		Role:        "user",
+		// Password-flow tokens are end-user identities. Edge functions branch
+		// on this header (X-Excalibase-Scope) to distinguish anon traffic
+		// (scope=public via service-key flow) from logged-in users.
+		Scope: "authenticated",
 	})
 	if err != nil {
 		return nil, err
