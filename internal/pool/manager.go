@@ -125,8 +125,12 @@ func (m *Manager) createPool(ctx context.Context, orgSlug, projectID string) (*p
 }
 
 func (m *Manager) fetchCredentials(ctx context.Context, orgSlug, projectID string) (map[string]string, error) {
-	// Vault path: projects/{orgSlug}/{projectID}/credentials/auth_admin
-	url := fmt.Sprintf("%s/vault/secrets/projects/%s/%s/credentials/auth_admin", m.provisioningURL, orgSlug, projectID)
+	// Vault path: projects/{projectID}/credentials/auth_admin
+	// orgSlug param kept for backward-compat with callers; vault paths are
+	// project-scoped only (provisioning refactor 2026-05). Drop the org
+	// dimension to match what provisioning writes.
+	_ = orgSlug
+	url := fmt.Sprintf("%s/vault/secrets/projects/%s/credentials/auth_admin", m.provisioningURL, projectID)
 	log.Printf("INFO: fetching credentials from %s", url)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

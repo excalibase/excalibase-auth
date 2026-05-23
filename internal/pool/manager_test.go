@@ -21,7 +21,7 @@ func TestFetchCredentials(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-pat" {
 			t.Errorf("expected Bearer test-pat, got %s", r.Header.Get("Authorization"))
 		}
-		if r.URL.Path != "/vault/secrets/projects/my-org/my-app/credentials/auth_admin" {
+		if r.URL.Path != "/vault/secrets/projects/my-app/credentials/auth_admin" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		json.NewEncoder(w).Encode(creds)
