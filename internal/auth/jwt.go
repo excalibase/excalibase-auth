@@ -154,6 +154,17 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 		return nil, fmt.Errorf("invalid token claims")
 	}
 
+	// Issuer binding. Only enforced when an issuer is configured so deployments
+	// that never set one keep their existing behavior. When configured, reject
+	// any token whose `iss` claim doesn't match the service's issuer — this stops
+	// tokens minted by a different issuer from being accepted here.
+	if s.issuer != "" {
+		iss, _ := mapClaims["iss"].(string)
+		if iss != s.issuer {
+			return nil, fmt.Errorf("invalid issuer")
+		}
+	}
+
 	userID, _ := mapClaims["userId"].(float64)
 	orgSlug, _ := mapClaims["orgSlug"].(string)
 	projectName, _ := mapClaims["projectName"].(string)

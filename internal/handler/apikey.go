@@ -23,6 +23,14 @@ func (h *AuthHandler) APIKeyRoutes(r chi.Router) {
 	r.Delete("/{id}", h.RevokeAPIKey)
 }
 
+// canManageAPIKeys reports whether the token scope is permitted to manage api
+// keys. Publishable / browser ("public") tokens are read-only credentials for
+// edge traffic and must never create, list, or revoke keys. Only first-party
+// authenticated users and trusted service tokens may.
+func canManageAPIKeys(scope string) bool {
+	return scope == "authenticated" || scope == "service"
+}
+
 // CreateAPIKey generates a new api key for the project, stores its hash, and
 // returns the plaintext exactly once.
 func (h *AuthHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -30,6 +38,14 @@ func (h *AuthHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if claims == nil {
 		httpError(w, "missing claims", 401)
+		return
+	}
+	if claims.ProjectID != projectID {
+		httpError(w, "token project mismatch", http.StatusForbidden)
+		return
+	}
+	if !canManageAPIKeys(claims.Scope) {
+		httpError(w, "insufficient scope to manage api keys", http.StatusForbidden)
 		return
 	}
 
@@ -85,8 +101,17 @@ func (h *AuthHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 // plaintext are never included in the response.
 func (h *AuthHandler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	projectID := projectKey(r)
-	if middleware.ClaimsFromContext(r.Context()) == nil {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims == nil {
 		httpError(w, "missing claims", 401)
+		return
+	}
+	if claims.ProjectID != projectID {
+		httpError(w, "token project mismatch", http.StatusForbidden)
+		return
+	}
+	if !canManageAPIKeys(claims.Scope) {
+		httpError(w, "insufficient scope to manage api keys", http.StatusForbidden)
 		return
 	}
 
@@ -135,6 +160,14 @@ func (h *AuthHandler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if claims == nil {
 		httpError(w, "missing claims", 401)
+		return
+	}
+	if claims.ProjectID != projectID {
+		httpError(w, "token project mismatch", http.StatusForbidden)
+		return
+	}
+	if !canManageAPIKeys(claims.Scope) {
+		httpError(w, "insufficient scope to manage api keys", http.StatusForbidden)
 		return
 	}
 
