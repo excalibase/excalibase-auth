@@ -8,7 +8,30 @@ import (
 	"encoding/pem"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
+
+// EXC-320: the verifier must pin ES256 and reject alg-confusion / alg:none.
+func TestVerify_RejectsNonES256Algorithms(t *testing.T) {
+	svc, _ := NewJWTService(testKeyPEM(t), "excalibase", 3600)
+	claims := jwt.MapClaims{
+		"sub": "u@test.com", "userId": 1, "projectId": "p", "iss": "excalibase",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}
+
+	hs, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).
+		SignedString([]byte("0123456789abcdef0123456789abcdef"))
+	if _, err := svc.Verify(hs); err == nil {
+		t.Fatal("expected HS256 token to be rejected by ES256-pinned verifier")
+	}
+
+	none, _ := jwt.NewWithClaims(jwt.SigningMethodNone, claims).
+		SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if _, err := svc.Verify(none); err == nil {
+		t.Fatal("expected alg:none token to be rejected")
+	}
+}
 
 func testKeyPEM(t *testing.T) string {
 	t.Helper()

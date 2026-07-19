@@ -139,12 +139,14 @@ func padBytes(b []byte, size int) []byte {
 var _ = (*big.Int)(nil)
 
 func (s *JWTService) Verify(tokenString string) (*Claims, error) {
+	// Pin ES256 explicitly via WithValidMethods — a bare *SigningMethodECDSA check
+	// would also accept ES384/ES512, and this closes any alg-confusion ambiguity.
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodECDSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return s.publicKey, nil
-	})
+	}, jwt.WithValidMethods([]string{"ES256"}))
 	if err != nil {
 		return nil, fmt.Errorf("parse token: %w", err)
 	}
