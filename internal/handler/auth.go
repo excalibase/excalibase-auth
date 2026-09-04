@@ -11,6 +11,7 @@ import (
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/domain"
+	"github.com/excalibase/auth/internal/metrics"
 	"github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/excalibase/auth/internal/service"
@@ -129,6 +130,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	metrics.Signups.Inc()
 	w.WriteHeader(201)
 	writeJSON(w, resp)
 }
@@ -145,10 +147,12 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	log.Printf("auth.login tenant=%s org=%s email=%s", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email))
 	resp, code, err := h.exchangePassword(r, projectID, req.Email, req.Password)
 	if err != nil {
+		metrics.LoginFailures.Inc()
 		log.Printf("auth.login.fail tenant=%s org=%s email=%s code=%d err=%v", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email), code, err)
 		httpError(w, err.Error(), code)
 		return
 	}
+	metrics.Logins.Inc()
 	writeJSON(w, resp)
 }
 

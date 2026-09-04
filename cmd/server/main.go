@@ -11,6 +11,7 @@ import (
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/config"
 	"github.com/excalibase/auth/internal/handler"
+	"github.com/excalibase/auth/internal/metrics"
 	custommw "github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/migrate"
 	"github.com/excalibase/auth/internal/pool"
@@ -52,6 +53,9 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(custommw.SecurityHeaders)
 	r.Use(custommw.CORS(cfg.CORSOrigins))
+	r.Use(metrics.Middleware)
+
+	r.Handle("/metrics", metrics.Handler())
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
