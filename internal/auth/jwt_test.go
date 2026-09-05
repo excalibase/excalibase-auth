@@ -8,7 +8,30 @@ import (
 	"encoding/pem"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
+
+// EXC-320: the verifier must pin ES256 and reject alg-confusion / alg:none.
+func TestVerify_RejectsNonES256Algorithms(t *testing.T) {
+	svc, _ := NewJWTService(testKeyPEM(t), "excalibase", 3600)
+	claims := jwt.MapClaims{
+		"sub": "u@test.com", "userId": 1, "projectId": "p", "iss": "excalibase",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}
+
+	hs, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).
+		SignedString([]byte("0123456789abcdef0123456789abcdef"))
+	if _, err := svc.Verify(hs); err == nil {
+		t.Fatal("expected HS256 token to be rejected by ES256-pinned verifier")
+	}
+
+	none, _ := jwt.NewWithClaims(jwt.SigningMethodNone, claims).
+		SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if _, err := svc.Verify(none); err == nil {
+		t.Fatal("expected alg:none token to be rejected")
+	}
+}
 
 func testKeyPEM(t *testing.T) string {
 	t.Helper()
@@ -95,6 +118,44 @@ func TestWrongKey(t *testing.T) {
 }
 
 func _ () { _ = time.Now() } // keep time import used
+
+// A token signed by an issuer different from the verifier's configured issuer
+// must be rejected. We sign with svcA (issuer "issuer-a") and verify with svcB
+// (issuer "issuer-b") using the SAME key, so the signature is valid and only the
+// issuer differs — isolating the issuer check from the signature check.
+func TestVerify_RejectsWrongIssuer(t *testing.T) {
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	b, _ := x509.MarshalECPrivateKey(priv)
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b}))
+
+	svcA, _ := NewJWTService(keyPEM, "issuer-a", 3600)
+	svcB, _ := NewJWTService(keyPEM, "issuer-b", 3600)
+
+	token, err := svcA.Sign(Claims{Sub: "u@test.com", UserID: 1, ProjectID: "p"})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if _, err := svcB.Verify(token); err == nil {
+		t.Fatal("expected error verifying a token with a mismatched issuer")
+	}
+}
+
+// When no issuer is configured (empty string), the issuer check must be skipped
+// so deployments that never set an issuer keep working.
+func TestVerify_SkipsIssuerCheckWhenUnconfigured(t *testing.T) {
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	b, _ := x509.MarshalECPrivateKey(priv)
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b}))
+
+	// Signer stamps iss="something"; verifier has empty issuer → must accept.
+	signer, _ := NewJWTService(keyPEM, "something", 3600)
+	verifier, _ := NewJWTService(keyPEM, "", 3600)
+
+	token, _ := signer.Sign(Claims{Sub: "u@test.com", UserID: 1, ProjectID: "p"})
+	if _, err := verifier.Verify(token); err != nil {
+		t.Fatalf("expected token to verify when issuer unconfigured, got %v", err)
+	}
+}
 
 // --- Phase 3: scope + keyId round-trip ---
 

@@ -139,12 +139,14 @@ func padBytes(b []byte, size int) []byte {
 var _ = (*big.Int)(nil)
 
 func (s *JWTService) Verify(tokenString string) (*Claims, error) {
+	// Pin ES256 explicitly via WithValidMethods — a bare *SigningMethodECDSA check
+	// would also accept ES384/ES512, and this closes any alg-confusion ambiguity.
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodECDSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return s.publicKey, nil
-	})
+	}, jwt.WithValidMethods([]string{"ES256"}))
 	if err != nil {
 		return nil, fmt.Errorf("parse token: %w", err)
 	}
@@ -152,6 +154,17 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	mapClaims, ok := token.Claims.(jwt.MapClaims)
 	if !ok || !token.Valid {
 		return nil, fmt.Errorf("invalid token claims")
+	}
+
+	// Issuer binding. Only enforced when an issuer is configured so deployments
+	// that never set one keep their existing behavior. When configured, reject
+	// any token whose `iss` claim doesn't match the service's issuer — this stops
+	// tokens minted by a different issuer from being accepted here.
+	if s.issuer != "" {
+		iss, _ := mapClaims["iss"].(string)
+		if iss != s.issuer {
+			return nil, fmt.Errorf("invalid issuer")
+		}
 	}
 
 	userID, _ := mapClaims["userId"].(float64)

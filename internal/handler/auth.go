@@ -197,6 +197,14 @@ func (h *AuthHandler) Validate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bind the token to the project in the URL. A signature-valid token for
+	// project A must not validate against project B's endpoint — otherwise
+	// /validate becomes a cross-project oracle.
+	if claims.ProjectID != projectKey(r) {
+		writeJSON(w, map[string]interface{}{"valid": false, "error": "token project mismatch"})
+		return
+	}
+
 	writeJSON(w, map[string]interface{}{
 		"valid":     true,
 		"email":     claims.Sub,
