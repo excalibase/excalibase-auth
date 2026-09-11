@@ -34,12 +34,28 @@ func Load() Config {
 	return Config{
 		Port:              envOr("PORT", "24000"),
 		ProvisioningURL:   envOr("PROVISIONING_URL", "http://localhost:24005/api"),
-		ProvisioningPAT:   os.Getenv("PROVISIONING_PAT"),
+		ProvisioningPAT:   provisioningPAT(),
 		JWTExpiration:     jwtExp,
 		AccessTTL:         accessTTL,
 		RefreshExpiration: envInt("REFRESH_EXPIRATION", 604800),
 		CORSOrigins:       parseCORSOrigins(envOr("CORS_ORIGINS", "https://app.excalibase.io")),
 	}
+}
+
+// provisioningPAT resolves the provisioning PAT from PROVISIONING_PAT, falling
+// back to the trimmed contents of the file at PROVISIONING_PAT_FILE. The file
+// path lets a bootstrap step hand the PAT to this distroless (shell-less)
+// service via a shared volume instead of injecting env after start.
+func provisioningPAT() string {
+	if v := os.Getenv("PROVISIONING_PAT"); v != "" {
+		return v
+	}
+	if path := os.Getenv("PROVISIONING_PAT_FILE"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return ""
 }
 
 func parseCORSOrigins(raw string) []string {
