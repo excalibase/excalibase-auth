@@ -11,10 +11,12 @@ import (
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/domain"
+	"github.com/excalibase/auth/internal/email"
 	"github.com/excalibase/auth/internal/metrics"
 	"github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/excalibase/auth/internal/service"
+	"github.com/excalibase/auth/internal/throttle"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -34,16 +36,42 @@ var (
 	errUnsupportedGrant     = errors.New("unsupported grant_type")
 )
 
+// verificationSentMessage is the single answer /resend-verification gives for
+// every address, whether or not an account exists behind it.
+const verificationSentMessage = "If the account exists and is unverified, a verification email has been sent"
+
 type AuthHandler struct {
 	poolMgr    *pool.Manager
 	jwtService *auth.JWTService
 	accessExp  int                    // seconds — access token lifetime returned in expires_in
 	refreshExp int                    // seconds
 	limits     *middleware.RateLimits // nil disables throttling
+
+	emailSender    email.Sender
+	siteURL        string // fallback base for email links (AUTH_SITE_URL)
+	resendThrottle *throttle.Throttle
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, accessExp, refreshExp int) *AuthHandler {
-	return &AuthHandler{poolMgr: poolMgr, jwtService: jwtService, accessExp: accessExp, refreshExp: refreshExp}
+	return &AuthHandler{
+		poolMgr:    poolMgr,
+		jwtService: jwtService,
+		accessExp:  accessExp,
+		refreshExp: refreshExp,
+		// Default to dropping mail so a deployment without an email path still
+		// registers users rather than failing closed on an unset dependency.
+		emailSender:    email.NoopSender{},
+		resendThrottle: throttle.New(resendVerificationLimit, resendVerificationWindow),
+	}
+}
+
+// SetEmail wires the transactional mailer and the fallback site URL used to
+// build links when a project carries no site URL of its own.
+func (h *AuthHandler) SetEmail(sender email.Sender, siteURL string) {
+	if sender != nil {
+		h.emailSender = sender
+	}
+	h.siteURL = strings.TrimRight(siteURL, "/")
 }
 
 // WithRateLimits enables throttling of the credential routes. It returns the
@@ -63,6 +91,11 @@ func (h *AuthHandler) Routes(r chi.Router) {
 		// draws from the same per-IP budget as /token.
 		r.With(h.limit(rateLimitToken)).Post("/refresh", h.Refresh)
 		r.Post("/logout", h.Logout)
+		// Email verification (EXC-11). GET serves the link in the email; POST
+		// serves front ends that post the token themselves.
+		r.Get("/verify-email", h.VerifyEmail)
+		r.Post("/verify-email", h.VerifyEmail)
+		r.Post("/resend-verification", h.ResendVerification)
 		// OAuth2-shaped unified endpoint. Legacy routes above still work and
 		// share the same exchange helpers — no HTTP re-dispatch.
 		r.With(h.limit(rateLimitToken)).Post("/token", h.Token)
@@ -155,13 +188,31 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.generateAuthResponse(r, projectID, userID, req.Email, req.FullName)
+	metrics.Signups.Inc()
+
+	// EXC-11: the account starts unverified (column default) and we mail the
+	// proof-of-address link before answering.
+	settings := h.settingsFor(r.Context(), projectID)
+	h.sendVerification(r.Context(), pool, projectID, userID, req.Email, settings.siteURL)
+
+	if settings.requireEmailVerification {
+		// Returning a session here would hand out exactly the access the
+		// project just said must be earned by proving the address.
+		w.WriteHeader(201)
+		writeJSON(w, map[string]interface{}{
+			"emailVerificationRequired": true,
+			"message":                   verificationSentMessage,
+			"user":                      domain.UserInfo{ID: userID, Email: req.Email, FullName: req.FullName},
+		})
+		return
+	}
+
+	resp, err := h.generateAuthResponse(r, projectID, userID, req.Email, req.FullName, false)
 	if err != nil {
 		httpError(w, "failed to generate tokens", 500)
 		return
 	}
 
-	metrics.Signups.Inc()
 	w.WriteHeader(201)
 	writeJSON(w, resp)
 }
@@ -197,9 +248,9 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 
 	var user domain.User
 	err = pool.QueryRow(r.Context(),
-		"SELECT id, email, password, full_name, role, enabled FROM users WHERE email = $1",
+		"SELECT id, email, password, full_name, role, enabled, email_verified FROM users WHERE email = $1",
 		email,
-	).Scan(&user.ID, &user.Email, &user.Password, &user.FullName, &user.Role, &user.Enabled)
+	).Scan(&user.ID, &user.Email, &user.Password, &user.FullName, &user.Role, &user.Enabled, &user.EmailVerified)
 	if err != nil {
 		return nil, 401, errInvalidCredentials
 	}
@@ -209,10 +260,15 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 	if !auth.CheckPassword(password, user.Password) {
 		return nil, 401, errInvalidCredentials
 	}
+	// EXC-11: checked only after the password, so this never tells an
+	// unauthenticated caller whether an address is registered.
+	if !user.EmailVerified && h.settingsFor(r.Context(), projectID).requireEmailVerification {
+		return nil, 403, errEmailNotVerified
+	}
 
 	pool.Exec(r.Context(), "UPDATE users SET last_login_at = NOW() WHERE id = $1", user.ID)
 
-	resp, err := h.generateAuthResponse(r, projectID, user.ID, user.Email, user.FullName)
+	resp, err := h.generateAuthResponse(r, projectID, user.ID, user.Email, user.FullName, user.EmailVerified)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -293,16 +349,17 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 	pool.Exec(r.Context(), "UPDATE refresh_tokens SET revoked = true WHERE id = $1", tokenID)
 
 	var email, fullName string
+	var emailVerified bool
 	if err := pool.QueryRow(r.Context(),
-		"SELECT email, full_name FROM users WHERE id = $1", userID,
-	).Scan(&email, &fullName); err != nil {
+		"SELECT email, full_name, email_verified FROM users WHERE id = $1", userID,
+	).Scan(&email, &fullName, &emailVerified); err != nil {
 		// Refresh token row exists but the underlying user is gone (CASCADE
 		// should normally clean these up, but defend against drift). Treat as
 		// invalid rather than minting a JWT for a ghost user.
 		return nil, 401, errInvalidRefreshToken
 	}
 
-	resp, err := h.generateAuthResponse(r, projectID, userID, email, fullName)
+	resp, err := h.generateAuthResponse(r, projectID, userID, email, fullName, emailVerified)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -373,7 +430,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"message": "Logged out successfully"})
 }
 
-func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, userID int64, email, fullName string) (*domain.AuthResponse, error) {
+func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, userID int64, email, fullName string, emailVerified bool) (*domain.AuthResponse, error) {
 	orgSlug := chi.URLParam(r, "orgSlug")
 
 	// Look up display names from provisioning (cached per projectId in poolMgr).
@@ -404,7 +461,8 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 		// Password-flow tokens are end-user identities. Edge functions branch
 		// on this header (X-Excalibase-Scope) to distinguish anon traffic
 		// (scope=public via service-key flow) from logged-in users.
-		Scope: "authenticated",
+		Scope:         "authenticated",
+		EmailVerified: emailVerified,
 	})
 	if err != nil {
 		return nil, err

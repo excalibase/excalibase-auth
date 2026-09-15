@@ -10,6 +10,7 @@ import (
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/config"
+	"github.com/excalibase/auth/internal/email"
 	"github.com/excalibase/auth/internal/handler"
 	"github.com/excalibase/auth/internal/metrics"
 	custommw "github.com/excalibase/auth/internal/middleware"
@@ -37,6 +38,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to init JWT service: %v", err)
 	}
+	jwtService.SetAudiencePrefix(cfg.AudiencePrefix)
 
 	// Pool manager (multi-tenant connection cache)
 	poolMgr := pool.NewManager(cfg.ProvisioningURL, cfg.ProvisioningPAT, 1*time.Hour)
@@ -51,6 +53,10 @@ func main() {
 	} else {
 		log.Printf("rate limiting disabled (RATE_LIMIT_ENABLED=false)")
 	}
+
+	// Transactional mail goes out through provisioning, which owns the provider
+	// and the templates; auth carries no mail SDK of its own.
+	authHandler.SetEmail(email.NewClient(cfg.ProvisioningURL, cfg.ProvisioningPAT), cfg.SiteURL)
 
 	// Router
 	r := chi.NewRouter()

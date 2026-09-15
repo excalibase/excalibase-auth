@@ -27,6 +27,13 @@ type ProjectInfo struct {
 	OrgID       string `json:"orgId"`
 	OrgSlug     string `json:"orgSlug"`
 	OrgName     string `json:"orgName"`
+	// RequireEmailVerification gates login on a proven email address. Absent
+	// from older control planes, and false by default, so enabling it is always
+	// an explicit per-project decision.
+	RequireEmailVerification bool `json:"requireEmailVerification"`
+	// SiteURL is the project's own front end, used as the base for links in
+	// verification and reset emails. Falls back to AUTH_SITE_URL when empty.
+	SiteURL string `json:"siteUrl"`
 }
 
 type infoEntry struct {

@@ -182,7 +182,7 @@ func TestGenerateAuthResponse_ExpiresInMatchesConfig(t *testing.T) {
 		context.WithValue(context.Background(), chi.RouteCtxKey, rctx),
 	)
 
-	resp, err := h.generateAuthResponse(req, "test-org/test-project", 42, "alice@example.com", "Alice")
+	resp, err := h.generateAuthResponse(req, "test-org/test-project", 42, "alice@example.com", "Alice", false)
 	if err != nil {
 		t.Fatalf("generateAuthResponse: %v", err)
 	}
