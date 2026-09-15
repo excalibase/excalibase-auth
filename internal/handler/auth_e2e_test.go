@@ -37,7 +37,10 @@ func setupIntegration(t *testing.T) (*httptest.Server, func()) {
 	return fx.srv, cleanup
 }
 
-func setupIntegrationFixture(t *testing.T) (*integrationFixture, func()) {
+// handlerOption customises the AuthHandler under test (e.g. rate limits).
+type handlerOption func(*AuthHandler) *AuthHandler
+
+func setupIntegrationFixture(t *testing.T, opts ...handlerOption) (*integrationFixture, func()) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -86,6 +89,9 @@ func setupIntegrationFixture(t *testing.T) (*integrationFixture, func()) {
 
 	// 5. Auth handler + router
 	authHandler := NewAuthHandler(poolMgr, jwtSvc, 3600, 604800)
+	for _, opt := range opts {
+		authHandler = opt(authHandler)
+	}
 	r := chi.NewRouter()
 	r.Route("/auth", authHandler.Routes)
 	srv := httptest.NewServer(r)
@@ -711,4 +717,3 @@ func TestIntegration_TokenGrant_APIKey(t *testing.T) {
 	}
 	resp.Body.Close()
 }
-

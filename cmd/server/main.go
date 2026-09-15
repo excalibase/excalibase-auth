@@ -46,6 +46,11 @@ func main() {
 
 	// Handler
 	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.AccessTTL, cfg.RefreshExpiration)
+	if cfg.RateLimit.Enabled {
+		authHandler.WithRateLimits(custommw.NewRateLimits(custommw.RateLimitConfigFrom(cfg.RateLimit)))
+	} else {
+		log.Printf("rate limiting disabled (RATE_LIMIT_ENABLED=false)")
+	}
 
 	// Router
 	r := chi.NewRouter()

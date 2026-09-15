@@ -9,3 +9,12 @@ data:
   PROVISIONING_URL: {{ .Values.provisioning.url | quote }}
   JWT_EXPIRATION: {{ .Values.app.jwtExpiration | quote }}
   REFRESH_EXPIRATION: {{ .Values.app.refreshExpiration | quote }}
+  RATE_LIMIT_ENABLED: {{ .Values.rateLimit.enabled | quote }}
+  RATE_LIMIT_WINDOW_SECONDS: {{ .Values.rateLimit.windowSeconds | quote }}
+  RATE_LIMIT_REGISTER_PER_IP: {{ .Values.rateLimit.registerPerIP | quote }}
+  RATE_LIMIT_LOGIN_PER_IP: {{ .Values.rateLimit.loginPerIP | quote }}
+  RATE_LIMIT_TOKEN_PER_IP: {{ .Values.rateLimit.tokenPerIP | quote }}
+  RATE_LIMIT_REGISTER_PER_PROJECT: {{ .Values.rateLimit.registerPerProject | quote }}
+  RATE_LIMIT_LOGIN_FAILURES: {{ .Values.rateLimit.loginFailures | quote }}
+  RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS: {{ .Values.rateLimit.loginFailureWindowSeconds | quote }}
+  TRUSTED_PROXY_CIDRS: {{ .Values.rateLimit.trustedProxyCIDRs | quote }}

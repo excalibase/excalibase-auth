@@ -37,6 +37,8 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 - `internal/migrate` — golang-migrate runner with embedded SQL files (`internal/migrate/migrations/`). Provides `Run(connStr)` and `Down(connStr)`.
 - `internal/auth` — JWT signing/verification using ECDSA (ES256). Private key fetched from vault at startup.
 - `internal/handler` — HTTP handlers for register, login, validate, refresh, logout. All routes scoped under `/auth/{projectId}/`.
+- `internal/ratelimit` — keyed token-bucket limiter (in-memory, per replica) plus client-IP resolution behind trusted proxies and hashed identity keys.
+- `internal/middleware` — CORS, security headers, tenant context, JWT guard, and the per-route rate-limit middleware (`RateLimits`) wired into the handler via `WithRateLimits`.
 - `internal/domain` — Domain types and DTOs.
 - `internal/config` — Env-based config.
 
@@ -51,6 +53,12 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 | `PORT` | `24000` | No |
 | `JWT_EXPIRATION` | `86400` (seconds) | No |
 | `REFRESH_EXPIRATION` | `604800` (seconds) | No |
+| `RATE_LIMIT_ENABLED` | `true` | No |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | No |
+| `RATE_LIMIT_REGISTER_PER_IP` / `_LOGIN_PER_IP` / `_TOKEN_PER_IP` | `5` / `10` / `30` | No |
+| `RATE_LIMIT_REGISTER_PER_PROJECT` | `60` | No |
+| `RATE_LIMIT_LOGIN_FAILURES` / `_LOGIN_FAILURE_WINDOW_SECONDS` | `5` / `900` | No |
+| `TRUSTED_PROXY_CIDRS` | — (XFF never trusted) | No |
 
 ## Testing Strategy
 

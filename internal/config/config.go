@@ -2,9 +2,12 @@ package config
 
 import (
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/excalibase/auth/internal/ratelimit"
 )
 
 type Config struct {
@@ -15,6 +18,24 @@ type Config struct {
 	AccessTTL         int // seconds — access-token lifetime used by /token + legacy endpoints
 	RefreshExpiration int // seconds
 	CORSOrigins       []string
+	RateLimit         RateLimit
+}
+
+// RateLimit holds the credential-endpoint throttling knobs. Per-IP and
+// per-project budgets are "N requests per WindowSeconds"; the login failure
+// lock is "LoginFailures failed attempts per LoginFailureWindowSeconds" keyed
+// on the hashed identity. TrustedProxyCIDRs lists the proxies whose
+// X-Forwarded-For header may be believed; empty means never.
+type RateLimit struct {
+	Enabled                   bool
+	WindowSeconds             int
+	RegisterPerIP             int
+	LoginPerIP                int
+	TokenPerIP                int
+	RegisterPerProject        int
+	LoginFailures             int
+	LoginFailureWindowSeconds int
+	TrustedProxyCIDRs         []*net.IPNet
 }
 
 func Load() Config {
@@ -39,7 +60,32 @@ func Load() Config {
 		AccessTTL:         accessTTL,
 		RefreshExpiration: envInt("REFRESH_EXPIRATION", 604800),
 		CORSOrigins:       parseCORSOrigins(envOr("CORS_ORIGINS", "https://app.excalibase.io")),
+		RateLimit:         loadRateLimit(),
 	}
+}
+
+func loadRateLimit() RateLimit {
+	return RateLimit{
+		Enabled:                   envBool("RATE_LIMIT_ENABLED", true),
+		WindowSeconds:             envInt("RATE_LIMIT_WINDOW_SECONDS", 60),
+		RegisterPerIP:             envInt("RATE_LIMIT_REGISTER_PER_IP", 5),
+		LoginPerIP:                envInt("RATE_LIMIT_LOGIN_PER_IP", 10),
+		TokenPerIP:                envInt("RATE_LIMIT_TOKEN_PER_IP", 30),
+		RegisterPerProject:        envInt("RATE_LIMIT_REGISTER_PER_PROJECT", 60),
+		LoginFailures:             envInt("RATE_LIMIT_LOGIN_FAILURES", 5),
+		LoginFailureWindowSeconds: envInt("RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS", 900),
+		TrustedProxyCIDRs:         trustedProxyCIDRs(),
+	}
+}
+
+// trustedProxyCIDRs fails fast on a malformed list: silently trusting nothing
+// would collapse every client behind the ingress into one shared bucket.
+func trustedProxyCIDRs() []*net.IPNet {
+	nets, err := ratelimit.ParseCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		log.Fatalf("TRUSTED_PROXY_CIDRS: %v", err)
+	}
+	return nets
 }
 
 // provisioningPAT resolves the provisioning PAT from PROVISIONING_PAT, falling
@@ -82,6 +128,17 @@ func parseCORSOrigins(raw string) []string {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// envBool accepts the strconv.ParseBool spellings (true/false/1/0/t/f/...);
+// anything else keeps the fallback.
+func envBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
 	}
 	return fallback
 }
