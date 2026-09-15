@@ -16,6 +16,7 @@ import (
 	custommw "github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/migrate"
 	"github.com/excalibase/auth/internal/pool"
+	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -23,12 +24,18 @@ import (
 func main() {
 	cfg := config.Load()
 
-	if cfg.ProvisioningPAT == "" {
-		log.Fatal("PROVISIONING_PAT environment variable is required")
+	// The token file is rotated in place without a restart, so the token is read
+	// per call rather than captured here. When PROVISIONING_PAT_FILE is set it
+	// wins over PROVISIONING_PAT (which then only seeds the value until the
+	// first successful read); with neither set, Get fails fast below instead of
+	// letting an empty token reach a request.
+	tokens := token.NewFileSource(cfg.ProvisioningPATFile, cfg.ProvisioningPAT)
+	if _, err := tokens.Get(); err != nil {
+		log.Fatalf("provisioning token: %v (set PROVISIONING_PAT or PROVISIONING_PAT_FILE)", err)
 	}
 
 	// Fetch signing key from vault
-	privateKeyPEM, err := fetchSigningKey(cfg.ProvisioningURL, cfg.ProvisioningPAT)
+	privateKeyPEM, err := fetchSigningKey(cfg.ProvisioningURL, tokens)
 	if err != nil {
 		log.Fatalf("Failed to fetch signing key from vault: %v", err)
 	}
@@ -41,7 +48,7 @@ func main() {
 	jwtService.SetAudiencePrefix(cfg.AudiencePrefix)
 
 	// Pool manager (multi-tenant connection cache)
-	poolMgr := pool.NewManager(cfg.ProvisioningURL, cfg.ProvisioningPAT, 1*time.Hour)
+	poolMgr := pool.NewManager(cfg.ProvisioningURL, tokens, 1*time.Hour)
 	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error {
 		return migrate.Run(connStr)
 	})
@@ -55,8 +62,10 @@ func main() {
 	}
 
 	// Transactional mail goes out through provisioning, which owns the provider
-	// and the templates; auth carries no mail SDK of its own.
-	authHandler.SetEmail(email.NewClient(cfg.ProvisioningURL, cfg.ProvisioningPAT), cfg.SiteURL)
+	// and the templates; auth carries no mail SDK of its own. email.Client
+	// consults tokens on every Send, so it also survives a PROVISIONING_PAT_FILE
+	// rotation without a restart, same as the vault fetch and pool manager above.
+	authHandler.SetEmail(email.NewClient(cfg.ProvisioningURL, tokens), cfg.SiteURL)
 
 	// Router
 	r := chi.NewRouter()
@@ -86,13 +95,17 @@ func main() {
 	}
 }
 
-func fetchSigningKey(provisioningURL, pat string) (string, error) {
+func fetchSigningKey(provisioningURL string, tokens token.Source) (string, error) {
 	url := provisioningURL + "/vault/secrets/pki/signing/private"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+pat)
+	tok, err := tokens.Get()
+	if err != nil {
+		return "", fmt.Errorf("provisioning token: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)

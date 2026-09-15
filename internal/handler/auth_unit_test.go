@@ -15,6 +15,7 @@ import (
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/pool"
+	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -26,7 +27,7 @@ func setupUnitRouter(t *testing.T) chi.Router {
 
 	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
 	// Pool manager with unreachable vault — all DB operations will fail
-	mgr := pool.NewManager("http://127.0.0.1:1", "fake-pat", time.Hour)
+	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
 	h := NewAuthHandler(mgr, jwtSvc, 900, 604800)
 
 	r := chi.NewRouter()
@@ -170,7 +171,7 @@ func TestGenerateAuthResponse_ExpiresInMatchesConfig(t *testing.T) {
 	b, _ := x509.MarshalECPrivateKey(priv)
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b}))
 	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
-	mgr := pool.NewManager("http://127.0.0.1:1", "fake-pat", time.Hour)
+	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
 
 	const wantAccess = 900
 	h := NewAuthHandler(mgr, jwtSvc, wantAccess, 604800)

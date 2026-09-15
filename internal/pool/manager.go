@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/excalibase/auth/internal/token"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,9 +42,15 @@ type infoEntry struct {
 	createdAt time.Time
 }
 
+// authorizationHeader is the header carrying the provisioning service token.
+const authorizationHeader = "Authorization"
+
+// bearerPrefix prefixes the provisioning token in the Authorization header.
+const bearerPrefix = "Bearer "
+
 type Manager struct {
 	provisioningURL string
-	pat             string
+	tokens          token.Source
 	pools           map[string]*poolEntry
 	infos           map[string]*infoEntry
 	mu              sync.RWMutex
@@ -53,10 +60,12 @@ type Manager struct {
 	migrator        func(ctx context.Context, connStr string) error // optional, runs on first connect
 }
 
-func NewManager(provisioningURL, pat string, ttl time.Duration) *Manager {
+// NewManager builds a pool manager. tokens is consulted at request time so a
+// provisioning token rotated on disk takes effect without a restart.
+func NewManager(provisioningURL string, tokens token.Source, ttl time.Duration) *Manager {
 	return &Manager{
 		provisioningURL: provisioningURL,
-		pat:             pat,
+		tokens:          tokens,
 		pools:           make(map[string]*poolEntry),
 		infos:           make(map[string]*infoEntry),
 		ttl:             ttl,
@@ -143,7 +152,11 @@ func (m *Manager) fetchCredentials(ctx context.Context, orgSlug, projectID strin
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+m.pat)
+	tok, err := m.tokens.Get()
+	if err != nil {
+		return nil, fmt.Errorf("provisioning token: %w", err)
+	}
+	req.Header.Set(authorizationHeader, bearerPrefix+tok)
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
@@ -181,7 +194,11 @@ func (m *Manager) GetProjectInfo(ctx context.Context, projectID string) (Project
 	if err != nil {
 		return ProjectInfo{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+m.pat)
+	tok, err := m.tokens.Get()
+	if err != nil {
+		return ProjectInfo{}, fmt.Errorf("provisioning token: %w", err)
+	}
+	req.Header.Set(authorizationHeader, bearerPrefix+tok)
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
 		return ProjectInfo{}, fmt.Errorf("project info request: %w", err)

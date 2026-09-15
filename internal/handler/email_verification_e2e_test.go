@@ -146,7 +146,7 @@ func setupVerifyFixture(t *testing.T, requireVerification bool) (*verifyFixture,
 	privPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privBytes}))
 	jwtSvc, _ := auth.NewJWTService(privPEM, "excalibase", 3600)
 
-	poolMgr := pool.NewManager(provisioning.URL, "test-pat", time.Hour)
+	poolMgr := pool.NewManager(provisioning.URL, token.Literal("test-pat"), time.Hour)
 	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error { return migrate.Run(connStr) })
 
 	sender := &stubSender{}

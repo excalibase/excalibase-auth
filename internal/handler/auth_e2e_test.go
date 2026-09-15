@@ -20,6 +20,7 @@ import (
 	"github.com/excalibase/auth/internal/migrate"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/excalibase/auth/internal/service"
+	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
@@ -82,7 +83,7 @@ func setupIntegrationFixture(t *testing.T, opts ...handlerOption) (*integrationF
 	jwtSvc, _ := auth.NewJWTService(privPEM, "excalibase", 3600)
 
 	// 4. Pool manager with auto-migration
-	poolMgr := pool.NewManager(vaultServer.URL, "test-pat", 1*time.Hour)
+	poolMgr := pool.NewManager(vaultServer.URL, token.Literal("test-pat"), 1*time.Hour)
 	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error {
 		return migrate.Run(connStr)
 	})

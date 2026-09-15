@@ -14,6 +14,7 @@ import (
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/pool"
+	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -29,7 +30,7 @@ func setupAuthzRouter(t *testing.T) (chi.Router, *auth.JWTService) {
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b}))
 
 	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
-	mgr := pool.NewManager("http://127.0.0.1:1", "fake-pat", time.Hour)
+	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
 	h := NewAuthHandler(mgr, jwtSvc, 900, 604800)
 
 	r := chi.NewRouter()
