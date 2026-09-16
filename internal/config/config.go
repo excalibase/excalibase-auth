@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/ratelimit"
 )
 
@@ -19,6 +20,11 @@ type Config struct {
 	RefreshExpiration int // seconds
 	CORSOrigins       []string
 	RateLimit         RateLimit
+	// AudiencePrefix is prepended to the projectId to build the `aud` claim.
+	AudiencePrefix string
+	// SiteURL is the fallback base URL for links in transactional emails, used
+	// when provisioning's project info carries no site URL of its own.
+	SiteURL string
 }
 
 // RateLimit holds the credential-endpoint throttling knobs. Per-IP and
@@ -61,6 +67,8 @@ func Load() Config {
 		RefreshExpiration: envInt("REFRESH_EXPIRATION", 604800),
 		CORSOrigins:       parseCORSOrigins(envOr("CORS_ORIGINS", "https://app.excalibase.io")),
 		RateLimit:         loadRateLimit(),
+		AudiencePrefix:    envOr("AUTH_AUD_PREFIX", auth.DefaultAudiencePrefix),
+		SiteURL:           strings.TrimRight(os.Getenv("AUTH_SITE_URL"), "/"),
 	}
 }
 
