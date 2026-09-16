@@ -50,6 +50,7 @@ type AuthHandler struct {
 	emailSender    email.Sender
 	siteURL        string // fallback base for email links (AUTH_SITE_URL)
 	resendThrottle *throttle.Throttle
+	forgotThrottle *throttle.Throttle
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, accessExp, refreshExp int) *AuthHandler {
@@ -62,6 +63,7 @@ func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, accessEx
 		// registers users rather than failing closed on an unset dependency.
 		emailSender:    email.NoopSender{},
 		resendThrottle: throttle.New(resendVerificationLimit, resendVerificationWindow),
+		forgotThrottle: throttle.New(forgotPasswordLimit, forgotPasswordWindow),
 	}
 }
 
@@ -96,6 +98,9 @@ func (h *AuthHandler) Routes(r chi.Router) {
 		r.Get("/verify-email", h.VerifyEmail)
 		r.Post("/verify-email", h.VerifyEmail)
 		r.Post("/resend-verification", h.ResendVerification)
+		// Password reset (EXC-12).
+		r.Post("/forgot-password", h.ForgotPassword)
+		r.Post("/reset-password", h.ResetPassword)
 		// OAuth2-shaped unified endpoint. Legacy routes above still work and
 		// share the same exchange helpers — no HTTP re-dispatch.
 		r.With(h.limit(rateLimitToken)).Post("/token", h.Token)
@@ -148,7 +153,11 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "invalid request", 400)
 		return
 	}
-	if req.Email == "" || req.Password == "" || req.FullName == "" {
+	if req.Email == "" || req.FullName == "" {
+		httpError(w, "email, password, and fullName are required", 400)
+		return
+	}
+	if err := validatePassword(req.Password); err != nil {
 		httpError(w, "email, password, and fullName are required", 400)
 		return
 	}
