@@ -43,6 +43,13 @@ var (
 		Name: "auth_login_failures_total",
 		Help: "Total failed login attempts.",
 	})
+
+	// RateLimited counts requests rejected with 429 by the credential-endpoint
+	// limiter, labeled by the logical route (register, login, token).
+	RateLimited = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "auth_rate_limited_total",
+		Help: "Total requests rejected by rate limiting, labeled by route.",
+	}, []string{"route"})
 )
 
 // Handler serves the Prometheus exposition format for scraping.

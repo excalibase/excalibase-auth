@@ -48,3 +48,15 @@ func TestMiddleware_IncrementsHTTPCounter(t *testing.T) {
 		t.Errorf("http counter delta: got %v, want 1", after-before)
 	}
 }
+
+func TestRateLimited_ExposedPerRoute(t *testing.T) {
+	RateLimited.WithLabelValues("login").Inc()
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+	Handler().ServeHTTP(rr, req)
+
+	if !strings.Contains(rr.Body.String(), `auth_rate_limited_total{route="login"}`) {
+		t.Errorf("/metrics output missing auth_rate_limited_total{route=\"login\"}")
+	}
+}

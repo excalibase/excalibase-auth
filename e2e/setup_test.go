@@ -76,6 +76,13 @@ func TestMain(m *testing.M) {
 		"PROVISIONING_PAT=e2e-test-pat",
 		"JWT_EXPIRATION=3600",
 		"REFRESH_EXPIRATION=604800",
+		// Every E2E request comes from 127.0.0.1; keep the limiter wired but
+		// raise the budgets so the suite is not throttled by its own volume.
+		"RATE_LIMIT_REGISTER_PER_IP=1000",
+		"RATE_LIMIT_LOGIN_PER_IP=1000",
+		"RATE_LIMIT_TOKEN_PER_IP=1000",
+		"RATE_LIMIT_REGISTER_PER_PROJECT=1000",
+		"RATE_LIMIT_LOGIN_FAILURES=1000",
 	)
 	authProcess.Stdout = os.Stdout
 	authProcess.Stderr = os.Stderr

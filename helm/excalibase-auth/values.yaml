@@ -69,6 +69,32 @@ app:
   refreshExpiration: 604800
 
 # ---------------------------------------------------------------------------
+# Rate limiting for /register, /login, /token (and the legacy /refresh alias)
+#
+# Counters live in each pod's memory, so every budget below is enforced per
+# replica: with N replicas behind the Service a single client can spend up
+# to N x the value. Divide by your replica count (or autoscaling.maxReplicas)
+# when tuning, or add an edge limiter on the ingress for a hard global cap.
+# ---------------------------------------------------------------------------
+rateLimit:
+  enabled: true
+  # Length of the per-IP / per-project window in seconds
+  windowSeconds: 60
+  # Requests per client IP per window
+  registerPerIP: 5
+  loginPerIP: 10
+  tokenPerIP: 30
+  # Registrations per project per window, across all IPs
+  registerPerProject: 60
+  # Failed logins per identity (hashed email) before a 429 lock
+  loginFailures: 5
+  loginFailureWindowSeconds: 900
+  # Comma-separated CIDRs whose X-Forwarded-For header is believed. Leave
+  # empty to always use the TCP peer address. Set this to your ingress /
+  # load-balancer pod CIDR, never to 0.0.0.0/0.
+  trustedProxyCIDRs: ""
+
+# ---------------------------------------------------------------------------
 # Resources
 # ---------------------------------------------------------------------------
 resources:

@@ -37,25 +37,35 @@ var (
 type AuthHandler struct {
 	poolMgr    *pool.Manager
 	jwtService *auth.JWTService
-	accessExp  int // seconds — access token lifetime returned in expires_in
-	refreshExp int // seconds
+	accessExp  int                    // seconds — access token lifetime returned in expires_in
+	refreshExp int                    // seconds
+	limits     *middleware.RateLimits // nil disables throttling
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, accessExp, refreshExp int) *AuthHandler {
 	return &AuthHandler{poolMgr: poolMgr, jwtService: jwtService, accessExp: accessExp, refreshExp: refreshExp}
 }
 
+// WithRateLimits enables throttling of the credential routes. It returns the
+// receiver so construction reads as a chain.
+func (h *AuthHandler) WithRateLimits(limits *middleware.RateLimits) *AuthHandler {
+	h.limits = limits
+	return h
+}
+
 func (h *AuthHandler) Routes(r chi.Router) {
 	r.Route("/{orgSlug}/{projectId}", func(r chi.Router) {
 		r.Use(middleware.TenantContext)
-		r.Post("/register", h.Register)
-		r.Post("/login", h.Login)
+		r.With(h.limit(rateLimitRegister)).Post("/register", h.Register)
+		r.With(h.limit(rateLimitLogin)).Post("/login", h.Login)
 		r.Post("/validate", h.Validate)
-		r.Post("/refresh", h.Refresh)
+		// /refresh is the legacy alias of grant_type=refresh_token, so it
+		// draws from the same per-IP budget as /token.
+		r.With(h.limit(rateLimitToken)).Post("/refresh", h.Refresh)
 		r.Post("/logout", h.Logout)
 		// OAuth2-shaped unified endpoint. Legacy routes above still work and
 		// share the same exchange helpers — no HTTP re-dispatch.
-		r.Post("/token", h.Token)
+		r.With(h.limit(rateLimitToken)).Post("/token", h.Token)
 
 		// API key management — protected by JWT. Mounting RequireJWT here at
 		// the route registration site (instead of inside apikey.go) makes the
@@ -65,6 +75,27 @@ func (h *AuthHandler) Routes(r chi.Router) {
 			r.Route("/api-keys", h.APIKeyRoutes)
 		})
 	})
+}
+
+// rateLimitRoute selects one of the RateLimits middlewares by method
+// expression so Routes can stay declarative.
+type rateLimitRoute func(*middleware.RateLimits, http.Handler) http.Handler
+
+var (
+	rateLimitRegister rateLimitRoute = (*middleware.RateLimits).Register
+	rateLimitLogin    rateLimitRoute = (*middleware.RateLimits).Login
+	rateLimitToken    rateLimitRoute = (*middleware.RateLimits).Token
+)
+
+// limit returns the chosen limiter middleware, or a pass-through when
+// throttling is disabled.
+func (h *AuthHandler) limit(route rateLimitRoute) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if h.limits == nil {
+			return next
+		}
+		return route(h.limits, next)
+	}
 }
 
 // projectKey returns the opaque projectId used as pool key and vault path segment.

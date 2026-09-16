@@ -167,6 +167,37 @@ All configuration is via environment variables:
 | `PORT` | `24000` | HTTP server port |
 | `JWT_EXPIRATION` | `86400` | Access token TTL in seconds (default: 24h) |
 | `REFRESH_EXPIRATION` | `604800` | Refresh token TTL in seconds (default: 7d) |
+| `RATE_LIMIT_ENABLED` | `true` | Throttle the credential endpoints (see below) |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Window for the per-IP and per-project budgets |
+| `RATE_LIMIT_REGISTER_PER_IP` | `5` | `/register` requests per client IP per window |
+| `RATE_LIMIT_LOGIN_PER_IP` | `10` | `/login` requests per client IP per window |
+| `RATE_LIMIT_TOKEN_PER_IP` | `30` | `/token` (and legacy `/refresh`) requests per client IP per window |
+| `RATE_LIMIT_REGISTER_PER_PROJECT` | `60` | `/register` requests per project per window, across all IPs |
+| `RATE_LIMIT_LOGIN_FAILURES` | `5` | Failed logins per identity before the identity is locked |
+| `RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window over which login failures are counted |
+| `TRUSTED_PROXY_CIDRS` | — (empty) | Comma-separated CIDRs allowed to set `X-Forwarded-For` |
+
+### Rate Limiting
+
+`/register`, `/login`, `/token` and the legacy `/refresh` alias are throttled with keyed token buckets:
+
+| Scope | Key | Default |
+|-------|-----|---------|
+| Per client IP | resolved address | 5/min register, 10/min login, 30/min token+refresh |
+| Per project | `{projectId}` from the URL | 60/min register |
+| Per identity | SHA-256 of the lower-cased email (never logged or stored in clear) | 5 failed logins per 15 min, on `/login` and `/token` with `grant_type=password`; a successful login clears the counter |
+
+A throttled request gets `429` with a `Retry-After` header and the body:
+
+```json
+{"error": "rate_limited", "retryAfter": 12}
+```
+
+Every rejection increments `auth_rate_limited_total{route="register|login|token"}` on `/metrics`.
+
+**Client address behind a proxy.** The TCP peer address is used unless it falls inside `TRUSTED_PROXY_CIDRS`, in which case `X-Forwarded-For` is walked from the right and the first hop that is not a trusted proxy wins. A client sending its own `X-Forwarded-For` therefore cannot pick its bucket. Set the variable to the ingress or load-balancer address range only; leaving it empty is safe but collapses all clients behind a proxy into one bucket, and a malformed value fails startup.
+
+**Multi-replica semantics.** Counters live in each pod's memory. The service has no shared store (its only database is the per-tenant pool the limiter is protecting), so with N replicas a client can spend up to N times each budget. Divide the values by the replica count when tuning, or put a coarse global limiter on the ingress.
 
 ## Architecture
 

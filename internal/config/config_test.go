@@ -102,3 +102,78 @@ func TestEnvIntInvalid(t *testing.T) {
 		t.Errorf("should fallback to default, got %d", cfg.JWTExpiration)
 	}
 }
+
+func TestRateLimitDefaults(t *testing.T) {
+	for _, key := range []string{
+		"RATE_LIMIT_ENABLED", "RATE_LIMIT_WINDOW_SECONDS", "RATE_LIMIT_REGISTER_PER_IP",
+		"RATE_LIMIT_LOGIN_PER_IP", "RATE_LIMIT_TOKEN_PER_IP", "RATE_LIMIT_REGISTER_PER_PROJECT",
+		"RATE_LIMIT_LOGIN_FAILURES", "RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS", "TRUSTED_PROXY_CIDRS",
+	} {
+		os.Unsetenv(key)
+	}
+	cfg := Load()
+	rl := cfg.RateLimit
+	if !rl.Enabled {
+		t.Error("rate limiting must be enabled by default")
+	}
+	if rl.WindowSeconds != 60 || rl.RegisterPerIP != 5 || rl.LoginPerIP != 10 || rl.TokenPerIP != 30 {
+		t.Errorf("per-ip defaults: got %+v", rl)
+	}
+	if rl.RegisterPerProject != 60 {
+		t.Errorf("register per project: got %d, want 60", rl.RegisterPerProject)
+	}
+	if rl.LoginFailures != 5 || rl.LoginFailureWindowSeconds != 900 {
+		t.Errorf("login failure defaults: got %d/%d, want 5/900", rl.LoginFailures, rl.LoginFailureWindowSeconds)
+	}
+	if len(rl.TrustedProxyCIDRs) != 0 {
+		t.Errorf("no proxies trusted by default, got %v", rl.TrustedProxyCIDRs)
+	}
+}
+
+func TestRateLimitFromEnv(t *testing.T) {
+	t.Setenv("RATE_LIMIT_ENABLED", "false")
+	t.Setenv("RATE_LIMIT_WINDOW_SECONDS", "120")
+	t.Setenv("RATE_LIMIT_REGISTER_PER_IP", "7")
+	t.Setenv("RATE_LIMIT_LOGIN_PER_IP", "8")
+	t.Setenv("RATE_LIMIT_TOKEN_PER_IP", "9")
+	t.Setenv("RATE_LIMIT_REGISTER_PER_PROJECT", "70")
+	t.Setenv("RATE_LIMIT_LOGIN_FAILURES", "3")
+	t.Setenv("RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS", "600")
+	t.Setenv("TRUSTED_PROXY_CIDRS", "10.0.0.0/8, 192.168.0.0/16")
+
+	rl := Load().RateLimit
+	if rl.Enabled {
+		t.Error("RATE_LIMIT_ENABLED=false must disable")
+	}
+	if rl.WindowSeconds != 120 || rl.RegisterPerIP != 7 || rl.LoginPerIP != 8 || rl.TokenPerIP != 9 {
+		t.Errorf("per-ip env: got %+v", rl)
+	}
+	if rl.RegisterPerProject != 70 || rl.LoginFailures != 3 || rl.LoginFailureWindowSeconds != 600 {
+		t.Errorf("project/failure env: got %+v", rl)
+	}
+	if len(rl.TrustedProxyCIDRs) != 2 {
+		t.Errorf("trusted cidrs: got %v, want 2 entries", rl.TrustedProxyCIDRs)
+	}
+}
+
+func TestEnvBool(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "", want: true},
+		{raw: "true", want: true},
+		{raw: "1", want: true},
+		{raw: "false", want: false},
+		{raw: "0", want: false},
+		{raw: "garbage", want: true},
+	}
+	for _, tt := range tests {
+		t.Run("value="+tt.raw, func(t *testing.T) {
+			t.Setenv("RATE_LIMIT_ENABLED", tt.raw)
+			if got := envBool("RATE_LIMIT_ENABLED", true); got != tt.want {
+				t.Errorf("envBool(%q): got %v, want %v", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
