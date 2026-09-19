@@ -162,7 +162,8 @@ All configuration is via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROVISIONING_PAT` | — (required) | Personal access token for vault API access |
+| `PROVISIONING_PAT` | — (required unless `PROVISIONING_PAT_FILE` is set) | Access token for vault API access |
+| `PROVISIONING_PAT_FILE` | — | Path to a token file rotated in place; re-read on each provisioning call, no restart needed. If both this and `PROVISIONING_PAT` are set, the file wins; `PROVISIONING_PAT` is only the seed value used until the file is first read. With neither set, or a file that is empty/unreadable and has never yielded a value, startup and every provisioning call fail with an explicit error rather than sending an empty bearer token. |
 | `PROVISIONING_URL` | `http://localhost:24005/api` | Provisioning service base URL |
 | `PORT` | `24000` | HTTP server port |
 | `JWT_EXPIRATION` | `86400` | Access token TTL in seconds (default: 24h) |

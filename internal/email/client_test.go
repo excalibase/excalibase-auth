@@ -3,10 +3,15 @@ package email
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/excalibase/auth/internal/token"
 )
 
 type capturedRequest struct {
@@ -41,7 +46,7 @@ func TestSend_PostsToInternalEndpointWithServicePAT(t *testing.T) {
 	srv := newStubProvisioning(t, http.StatusAccepted, &captured)
 	defer srv.Close()
 
-	if err := NewClient(srv.URL, "service-pat").Send(context.Background(), testMessage()); err != nil {
+	if err := NewClient(srv.URL, token.Literal("service-pat")).Send(context.Background(), testMessage()); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -68,7 +73,7 @@ func TestNewClient_TrimsPublicAPIBaseSoInternalRoutesResolve(t *testing.T) {
 	defer srv.Close()
 
 	// PROVISIONING_URL points at the public API base; /internal/* is at the root.
-	if err := NewClient(srv.URL+"/api", "pat").Send(context.Background(), testMessage()); err != nil {
+	if err := NewClient(srv.URL+"/api", token.Literal("pat")).Send(context.Background(), testMessage()); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if captured.path != "/internal/email/send" {
@@ -90,7 +95,7 @@ func TestSend_ErrorsOnNon2xxWithoutLeakingRecipientOrToken(t *testing.T) {
 	srv := newStubProvisioning(t, http.StatusInternalServerError, &captured)
 	defer srv.Close()
 
-	err := NewClient(srv.URL, "service-pat").Send(context.Background(), testMessage())
+	err := NewClient(srv.URL, token.Literal("service-pat")).Send(context.Background(), testMessage())
 	if err == nil {
 		t.Fatal("expected an error for a 500 response")
 	}
@@ -101,7 +106,7 @@ func TestSend_ErrorsOnNon2xxWithoutLeakingRecipientOrToken(t *testing.T) {
 }
 
 func TestSend_ErrorsWhenProvisioningUnreachable(t *testing.T) {
-	err := NewClient("http://127.0.0.1:1", "service-pat").Send(context.Background(), testMessage())
+	err := NewClient("http://127.0.0.1:1", token.Literal("service-pat")).Send(context.Background(), testMessage())
 	if err == nil {
 		t.Fatal("expected an error when provisioning is unreachable")
 	}
@@ -117,6 +122,66 @@ func TestNoopSender_Succeeds(t *testing.T) {
 }
 
 func TestClientAndNoopImplementSender(t *testing.T) {
-	var _ Sender = NewClient("http://example.test", "pat")
+	var _ Sender = NewClient("http://example.test", token.Literal("pat"))
 	var _ Sender = NoopSender{}
+}
+
+// TestSend_UsesCurrentTokenFromSourceAfterRotation proves email delivery
+// survives the weekly PROVISIONING_PAT_FILE rotation CronJob without an auth
+// restart: the client must ask its token.Source for the current value on
+// every Send, not capture one at construction time.
+func TestSend_UsesCurrentTokenFromSourceAfterRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pat")
+	if err := os.WriteFile(path, []byte("first-pat\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	var captured capturedRequest
+	srv := newStubProvisioning(t, http.StatusAccepted, &captured)
+	defer srv.Close()
+
+	// interval 0: every Get re-checks the file, so the test never sleeps.
+	client := NewClient(srv.URL, token.NewFileSource(path, "", token.WithInterval(0)))
+
+	if err := client.Send(context.Background(), testMessage()); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	if captured.authz != "Bearer first-pat" {
+		t.Errorf("first send authorization: got %q, want %q", captured.authz, "Bearer first-pat")
+	}
+
+	if err := os.WriteFile(path, []byte("rotated-pat-value\n"), 0o600); err != nil {
+		t.Fatalf("rotate token file: %v", err)
+	}
+
+	if err := client.Send(context.Background(), testMessage()); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+	if captured.authz != "Bearer rotated-pat-value" {
+		t.Errorf("second send authorization: got %q, want %q", captured.authz, "Bearer rotated-pat-value")
+	}
+}
+
+// TestSend_TokenSourceErrorFailsSendWithoutBearer proves that when the token
+// source has nothing usable (file missing/empty/unreadable with no prior good
+// value, or neither PROVISIONING_PAT nor PROVISIONING_PAT_FILE configured),
+// Send fails explicitly instead of posting a request with an empty bearer
+// token.
+func TestSend_TokenSourceErrorFailsSendWithoutBearer(t *testing.T) {
+	var captured capturedRequest
+	srv := newStubProvisioning(t, http.StatusAccepted, &captured)
+	defer srv.Close()
+
+	client := NewClient(srv.URL, token.Literal(""))
+
+	err := client.Send(context.Background(), testMessage())
+	if err == nil {
+		t.Fatal("expected an error when the token source has no token")
+	}
+	if !errors.Is(err, token.ErrNoToken) {
+		t.Errorf("err: got %v, want wrapping token.ErrNoToken", err)
+	}
+	if captured.path != "" {
+		t.Errorf("no request should have reached provisioning, got path %q authz %q", captured.path, captured.authz)
+	}
 }

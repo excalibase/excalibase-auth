@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -175,5 +176,28 @@ func TestEnvBool(t *testing.T) {
 				t.Errorf("envBool(%q): got %v, want %v", tt.raw, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestLoadExposesProvisioningPATFile checks that Load only surfaces the raw
+// PROVISIONING_PAT_FILE path; reading its contents (and re-reading on
+// rotation) is internal/token's job, not config's, so ProvisioningPAT stays
+// whatever PROVISIONING_PAT itself was (empty here).
+func TestLoadExposesProvisioningPATFile(t *testing.T) {
+	os.Unsetenv("PROVISIONING_PAT")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pat")
+	if err := os.WriteFile(path, []byte(" excb_from_file \n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	t.Setenv("PROVISIONING_PAT_FILE", path)
+
+	cfg := Load()
+
+	if cfg.ProvisioningPATFile != path {
+		t.Errorf("ProvisioningPATFile: got %q, want %q", cfg.ProvisioningPATFile, path)
+	}
+	if cfg.ProvisioningPAT != "" {
+		t.Errorf("ProvisioningPAT: got %q, want empty — config no longer reads the file itself", cfg.ProvisioningPAT)
 	}
 }

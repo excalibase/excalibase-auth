@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/excalibase/auth/internal/token"
 )
 
 func newInfoServer(t *testing.T, body string, hits *int) *httptest.Server {
@@ -23,7 +25,7 @@ func TestGetProjectInfo_DecodesVerificationSettings(t *testing.T) {
 	srv := newInfoServer(t, `{"projectId":"p1","projectName":"Blog","requireEmailVerification":true,"siteUrl":"https://blog.test/"}`, &hits)
 	defer srv.Close()
 
-	info, err := NewManager(srv.URL, "pat", time.Hour).GetProjectInfo(context.Background(), "p1")
+	info, err := NewManager(srv.URL, token.Literal("pat"), time.Hour).GetProjectInfo(context.Background(), "p1")
 	if err != nil {
 		t.Fatalf("GetProjectInfo: %v", err)
 	}
@@ -40,7 +42,7 @@ func TestGetProjectInfo_VerificationDefaultsOffWhenAbsent(t *testing.T) {
 	srv := newInfoServer(t, `{"projectId":"p1","projectName":"Blog"}`, &hits)
 	defer srv.Close()
 
-	info, err := NewManager(srv.URL, "pat", time.Hour).GetProjectInfo(context.Background(), "p1")
+	info, err := NewManager(srv.URL, token.Literal("pat"), time.Hour).GetProjectInfo(context.Background(), "p1")
 	if err != nil {
 		t.Fatalf("GetProjectInfo: %v", err)
 	}

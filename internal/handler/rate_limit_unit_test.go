@@ -17,6 +17,7 @@ import (
 	"github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/excalibase/auth/internal/ratelimit"
+	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -53,7 +54,7 @@ func setupRateLimitedRouter(t *testing.T) (chi.Router, *manualClock) {
 	b, _ := x509.MarshalECPrivateKey(priv)
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b}))
 	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
-	mgr := pool.NewManager("http://127.0.0.1:1", "fake-pat", time.Hour)
+	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
 
 	clock := &manualClock{now: time.Unix(1_700_000_000, 0)}
 	limits := middleware.NewRateLimits(middleware.RateLimitConfig{

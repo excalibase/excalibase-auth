@@ -48,7 +48,8 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 
 | Variable | Default | Required |
 |---|---|---|
-| `PROVISIONING_PAT` | — | Yes |
+| `PROVISIONING_PAT` | — | Yes, unless `PROVISIONING_PAT_FILE` is set. If both are set, the file wins (env only seeds the value until first read). Neither set, or an unreadable/empty file with no prior good value: fails fast with an explicit error, never an empty bearer token. |
+| `PROVISIONING_PAT_FILE` | — | Path to a rotatable token file, re-read on each provisioning call |
 | `PROVISIONING_URL` | `http://localhost:24005/api` | No |
 | `PORT` | `24000` | No |
 | `JWT_EXPIRATION` | `86400` (seconds) | No |

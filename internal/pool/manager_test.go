@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/excalibase/auth/internal/token"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -28,7 +31,7 @@ func TestFetchCredentials(t *testing.T) {
 	}))
 	defer server.Close()
 
-	mgr := NewManager(server.URL, "test-pat", time.Hour)
+	mgr := NewManager(server.URL, token.Literal("test-pat"), time.Hour)
 
 	got, err := mgr.fetchCredentials(context.Background(), "my-org", "my-app")
 	if err != nil {
@@ -53,7 +56,7 @@ func TestGetPoolCaches(t *testing.T) {
 	}))
 	defer server.Close()
 
-	mgr := NewManager(server.URL, "test-pat", time.Hour)
+	mgr := NewManager(server.URL, token.Literal("test-pat"), time.Hour)
 	// Mock pool creator since we can't connect to real PG
 	mgr.poolCreator = func(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
 		// Return nil pool — we're testing cache logic, not PG connection
@@ -80,7 +83,7 @@ func TestGetPoolTTLExpiry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	mgr := NewManager(server.URL, "test-pat", 1*time.Millisecond) // very short TTL
+	mgr := NewManager(server.URL, token.Literal("test-pat"), 1*time.Millisecond) // very short TTL
 	mgr.poolCreator = func(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
 		return nil, nil
 	}
@@ -101,9 +104,71 @@ func TestFetchCredentials_VaultError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	mgr := NewManager(server.URL, "test-pat", time.Hour)
+	mgr := NewManager(server.URL, token.Literal("test-pat"), time.Hour)
 	_, err := mgr.fetchCredentials(context.Background(), "my-org", "bad-project")
 	if err == nil {
 		t.Fatal("expected error for vault 503")
+	}
+}
+
+func TestFetchCredentials_UsesRotatedTokenFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pat")
+	if err := os.WriteFile(path, []byte("first-pat\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		json.NewEncoder(w).Encode(map[string]string{"host": "10.0.0.5"})
+	}))
+	defer server.Close()
+
+	// interval 0: every call re-checks the file, so the test never sleeps.
+	mgr := NewManager(server.URL, token.NewFileSource(path, "", token.WithInterval(0)), time.Hour)
+
+	if _, err := mgr.fetchCredentials(context.Background(), "my-org", "my-app"); err != nil {
+		t.Fatalf("first fetch: %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte("rotated-pat-value\n"), 0o600); err != nil {
+		t.Fatalf("rotate token file: %v", err)
+	}
+
+	if _, err := mgr.fetchCredentials(context.Background(), "my-org", "my-app"); err != nil {
+		t.Fatalf("second fetch: %v", err)
+	}
+
+	want := []string{"Bearer first-pat", "Bearer rotated-pat-value"}
+	if len(seen) != len(want) {
+		t.Fatalf("requests: got %d, want %d", len(seen), len(want))
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Errorf("request %d authorization: got %q, want %q", i, seen[i], want[i])
+		}
+	}
+}
+
+func TestGetProjectInfo_UsesCurrentToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pat")
+	if err := os.WriteFile(path, []byte("info-pat"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	got := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(ProjectInfo{ProjectID: "my-app", OrgSlug: "my-org"})
+	}))
+	defer server.Close()
+
+	mgr := NewManager(server.URL, token.NewFileSource(path, "", token.WithInterval(0)), time.Hour)
+	if _, err := mgr.GetProjectInfo(context.Background(), "my-app"); err != nil {
+		t.Fatalf("GetProjectInfo: %v", err)
+	}
+
+	if got != "Bearer info-pat" {
+		t.Errorf("authorization: got %q, want %q", got, "Bearer info-pat")
 	}
 }

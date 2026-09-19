@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/excalibase/auth/internal/token"
 )
 
 // Template names. These must match the templates provisioning renders in
@@ -53,21 +55,24 @@ func (NoopSender) Send(context.Context, Message) error { return nil }
 // Client posts messages to provisioning's internal email endpoint.
 type Client struct {
 	baseURL    string
-	pat        string
+	tokens     token.Source
 	httpClient *http.Client
 }
 
 // NewClient builds a client for provisioning's internal email endpoint.
+// tokens is consulted on every Send, not just at construction, so a
+// provisioning token rotated on disk (PROVISIONING_PAT_FILE) takes effect for
+// outgoing mail without restarting auth.
 //
 // PROVISIONING_URL points at the public API base (".../api"), but provisioning
 // mounts its service-to-service `/internal/*` routes at the service root, so
 // the trailing "/api" is trimmed here rather than pushed onto every caller.
-func NewClient(provisioningURL, pat string) *Client {
+func NewClient(provisioningURL string, tokens token.Source) *Client {
 	base := strings.TrimRight(provisioningURL, "/")
 	base = strings.TrimSuffix(base, "/api")
 	return &Client{
 		baseURL:    base,
-		pat:        pat,
+		tokens:     tokens,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
@@ -76,6 +81,13 @@ func NewClient(provisioningURL, pat string) *Client {
 // up in logs, so they name the template and status but never the recipient
 // address or the link (which embeds a single-use secret).
 func (c *Client) Send(ctx context.Context, msg Message) error {
+	// Resolved before building the request so a missing/unreadable token never
+	// reaches provisioning as an empty bearer token.
+	tok, err := c.tokens.Get()
+	if err != nil {
+		return fmt.Errorf("send %s: provisioning token: %w", msg.Template, err)
+	}
+
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("encode %s message", msg.Template)
@@ -86,7 +98,7 @@ func (c *Client) Send(ctx context.Context, msg Message) error {
 		return fmt.Errorf("build %s request", msg.Template)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Authorization", "Bearer "+tok)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
