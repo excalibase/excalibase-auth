@@ -52,7 +52,8 @@ func main() {
 	})
 
 	// Handler
-	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.RefreshExpiration)
+	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.RefreshExpiration).
+		WithTrustedProxies(cfg.RateLimit.TrustedProxyCIDRs)
 	if cfg.RateLimit.Enabled {
 		authHandler.WithRateLimits(custommw.NewRateLimits(custommw.RateLimitConfigFrom(cfg.RateLimit)))
 	} else {

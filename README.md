@@ -196,7 +196,7 @@ A throttled request gets `429` with a `Retry-After` header and the body:
 
 Every rejection increments `auth_rate_limited_total{route="register|login|token"}` on `/metrics`.
 
-**Client address behind a proxy.** The TCP peer address is used unless it falls inside `TRUSTED_PROXY_CIDRS`, in which case `X-Forwarded-For` is walked from the right and the first hop that is not a trusted proxy wins. A client sending its own `X-Forwarded-For` therefore cannot pick its bucket. Set the variable to the ingress or load-balancer address range only; leaving it empty is safe but collapses all clients behind a proxy into one bucket, and a malformed value fails startup.
+**Client address behind a proxy.** The TCP peer address is used unless it falls inside `TRUSTED_PROXY_CIDRS`, in which case `X-Forwarded-For` is walked from the right and the first hop that is not a trusted proxy wins. A client sending its own `X-Forwarded-For` therefore cannot pick its bucket. The forgot-password per-IP cap resolves the client the same way. Set the variable to the ingress or load-balancer address range only; leaving it empty is safe but collapses all clients behind a proxy into one bucket, and a malformed value fails startup.
 
 **Multi-replica semantics.** Counters live in each pod's memory. The service has no shared store (its only database is the per-tenant pool the limiter is protecting), so with N replicas a client can spend up to N times each budget. Divide the values by the replica count when tuning, or put a coarse global limiter on the ingress.
 

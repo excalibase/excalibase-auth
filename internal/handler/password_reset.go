@@ -5,15 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/email"
+	"github.com/excalibase/auth/internal/ratelimit"
 	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -55,22 +54,6 @@ func validatePassword(password string) error {
 	return nil
 }
 
-// clientIP returns the caller's address for rate-limiting purposes, preferring
-// the first hop in X-Forwarded-For when the service runs behind a proxy.
-func clientIP(r *http.Request) string {
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		first, _, _ := strings.Cut(forwarded, ",")
-		if first = strings.TrimSpace(first); first != "" {
-			return first
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-
 func resetLink(siteURL, plaintext string) string {
 	return siteURL + "/reset-password?token=" + url.QueryEscape(plaintext)
 }
@@ -95,7 +78,7 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	// Counted before the lookup so throttling behaves identically for addresses
 	// that exist and addresses that don't.
 	addressKey := token.Hash(projectID + "|" + req.Email)
-	ipKey := token.Hash(projectID + "|ip|" + clientIP(r))
+	ipKey := token.Hash(projectID + "|ip|" + ratelimit.ClientIP(r, h.trustedProxies))
 	if !h.forgotThrottle.Allow(addressKey) || !h.forgotThrottle.Allow(ipKey) {
 		httpError(w, errTooManyRequests.Error(), 429)
 		return

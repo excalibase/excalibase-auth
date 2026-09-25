@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -150,7 +151,10 @@ func setupVerifyFixture(t *testing.T, requireVerification bool) (*verifyFixture,
 	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error { return migrate.Run(connStr) })
 
 	sender := &stubSender{}
-	h := NewAuthHandler(poolMgr, jwtSvc, 604800)
+	// The test client reaches the server over loopback, standing in for the
+	// ingress whose X-Forwarded-For the per-IP throttles believe.
+	_, loopback, _ := net.ParseCIDR("127.0.0.1/32")
+	h := NewAuthHandler(poolMgr, jwtSvc, 604800).WithTrustedProxies([]*net.IPNet{loopback})
 	h.SetEmail(sender, "https://fallback.test")
 
 	r := chi.NewRouter()

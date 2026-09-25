@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 
@@ -45,6 +46,8 @@ type AuthHandler struct {
 	jwtService *auth.JWTService
 	refreshExp int                    // seconds
 	limits     *middleware.RateLimits // nil disables throttling
+	// trustedProxies are the peers whose X-Forwarded-For is believed; none by default.
+	trustedProxies []*net.IPNet
 
 	emailSender    email.Sender
 	siteURL        string // fallback base for email links (AUTH_SITE_URL)
@@ -132,6 +135,13 @@ func (h *AuthHandler) limit(route rateLimitRoute) func(http.Handler) http.Handle
 		}
 		return route(h.limits, next)
 	}
+}
+
+// WithTrustedProxies sets the proxies whose X-Forwarded-For header the handler's
+// own per-IP throttles believe.
+func (h *AuthHandler) WithTrustedProxies(trusted []*net.IPNet) *AuthHandler {
+	h.trustedProxies = trusted
+	return h
 }
 
 // projectKey returns the opaque projectId used as pool key and vault path segment.
