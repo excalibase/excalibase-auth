@@ -62,8 +62,8 @@ app:
   # Server port (must match service.port)
   port: 24000
 
-  # JWT access token expiration in seconds (default: 24h)
-  jwtExpiration: 86400
+  # Access token lifetime in seconds (default: 1h)
+  accessTTL: 3600
 
   # Refresh token expiration in seconds (default: 7d)
   refreshExpiration: 604800

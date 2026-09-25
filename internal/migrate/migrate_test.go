@@ -2,6 +2,8 @@ package migrate
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"testing"
 	"time"
@@ -148,5 +150,48 @@ func TestMigrate_UpDown_Roundtrip(t *testing.T) {
 	}
 	if !tableExists(t, connStr, "auth", "refresh_tokens") {
 		t.Error("expected auth.refresh_tokens table after roundtrip")
+	}
+}
+
+func TestMigrate_RefreshTokensHashedInPlace(t *testing.T) {
+	connStr, cleanup := setupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := ensureAuthSchema(connStr); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	m, err := newMigrate(connStr)
+	if err != nil {
+		t.Fatalf("newMigrate: %v", err)
+	}
+	if err := m.Migrate(4); err != nil {
+		t.Fatalf("migrate to 4: %v", err)
+	}
+	db, err := pgxpool.New(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO auth.users (id, email, password, full_name) VALUES (1, 'a@test.com', 'x', 'A');
+		INSERT INTO auth.refresh_tokens (token, user_id, expiry_date) VALUES ('legacy-token', 1, NOW() + INTERVAL '1 day');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := Run(connStr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	sum := sha256.Sum256([]byte("legacy-token"))
+	var familyID string
+	if err := db.QueryRow(ctx,
+		"SELECT family_id::text FROM auth.refresh_tokens WHERE token_hash = $1", hex.EncodeToString(sum[:]),
+	).Scan(&familyID); err != nil {
+		t.Fatalf("legacy token must be findable by its hash: %v", err)
+	}
+	if familyID == "" {
+		t.Error("legacy token must be given a family")
 	}
 }

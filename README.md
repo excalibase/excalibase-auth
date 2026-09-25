@@ -166,7 +166,7 @@ All configuration is via environment variables:
 | `PROVISIONING_PAT_FILE` | — | Path to a token file rotated in place; re-read on each provisioning call, no restart needed. If both this and `PROVISIONING_PAT` are set, the file wins; `PROVISIONING_PAT` is only the seed value used until the file is first read. With neither set, or a file that is empty/unreadable and has never yielded a value, startup and every provisioning call fail with an explicit error rather than sending an empty bearer token. |
 | `PROVISIONING_URL` | `http://localhost:24005/api` | Provisioning service base URL |
 | `PORT` | `24000` | HTTP server port |
-| `JWT_EXPIRATION` | `86400` | Access token TTL in seconds (default: 24h) |
+| `ACCESS_TTL` | `3600` | Access token lifetime in seconds (the signed `exp` and the advertised `expires_in`) |
 | `REFRESH_EXPIRATION` | `604800` | Refresh token TTL in seconds (default: 7d) |
 | `RATE_LIMIT_ENABLED` | `true` | Throttle the credential endpoints (see below) |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Window for the per-IP and per-project budgets |
@@ -196,7 +196,7 @@ A throttled request gets `429` with a `Retry-After` header and the body:
 
 Every rejection increments `auth_rate_limited_total{route="register|login|token"}` on `/metrics`.
 
-**Client address behind a proxy.** The TCP peer address is used unless it falls inside `TRUSTED_PROXY_CIDRS`, in which case `X-Forwarded-For` is walked from the right and the first hop that is not a trusted proxy wins. A client sending its own `X-Forwarded-For` therefore cannot pick its bucket. Set the variable to the ingress or load-balancer address range only; leaving it empty is safe but collapses all clients behind a proxy into one bucket, and a malformed value fails startup.
+**Client address behind a proxy.** The TCP peer address is used unless it falls inside `TRUSTED_PROXY_CIDRS`, in which case `X-Forwarded-For` is walked from the right and the first hop that is not a trusted proxy wins. A client sending its own `X-Forwarded-For` therefore cannot pick its bucket. The forgot-password per-IP cap resolves the client the same way. Set the variable to the ingress or load-balancer address range only; leaving it empty is safe but collapses all clients behind a proxy into one bucket, and a malformed value fails startup.
 
 **Multi-replica semantics.** Counters live in each pod's memory. The service has no shared store (its only database is the per-tenant pool the limiter is protecting), so with N replicas a client can spend up to N times each budget. Divide the values by the replica count when tuning, or put a coarse global limiter on the ingress.
 
@@ -250,9 +250,10 @@ last_login_at TIMESTAMPTZ
 
 -- auth.refresh_tokens
 id BIGSERIAL PRIMARY KEY
-token VARCHAR(255) UNIQUE NOT NULL
+token_hash CHAR(64) UNIQUE NOT NULL  -- SHA-256 of the token; the plaintext is never stored
+family_id UUID NOT NULL               -- one login; replaying a rotated token revokes the family
 user_id BIGINT REFERENCES users(id) ON DELETE CASCADE
-expiry_date TIMESTAMPTZ NOT NULL
+expiry_date TIMESTAMPTZ NOT NULL      -- set at login; rotation keeps it
 created_at TIMESTAMPTZ
 revoked BOOLEAN DEFAULT false
 ```

@@ -18,8 +18,7 @@ type Config struct {
 	// ProvisioningPATFile is the path the PAT is delivered at, re-read on each
 	// provisioning call so in-place rotation needs no restart.
 	ProvisioningPATFile string
-	JWTExpiration       int // seconds — legacy alias, kept for back-compat
-	AccessTTL           int // seconds — access-token lifetime used by /token + legacy endpoints
+	AccessTTL           int // seconds — signed lifetime of every access token
 	RefreshExpiration   int // seconds
 	CORSOrigins         []string
 	RateLimit           RateLimit
@@ -51,15 +50,7 @@ type RateLimit struct {
 const patFileEnv = "PROVISIONING_PAT_FILE"
 
 func Load() Config {
-	jwtExp := envInt("JWT_EXPIRATION", 86400)
-	// AccessTTL fallback chain: ACCESS_TTL env → JWT_EXPIRATION (if explicitly set
-	// by the operator) → 3600. Fresh installs get the new secure 1h default; legacy
-	// deployments that pinned JWT_EXPIRATION keep their historical value.
-	defaultAccess := 3600
-	if os.Getenv("JWT_EXPIRATION") != "" {
-		defaultAccess = jwtExp
-	}
-	accessTTL := envInt("ACCESS_TTL", defaultAccess)
+	accessTTL := envInt("ACCESS_TTL", 3600)
 	if accessTTL <= 0 {
 		// Guard against ACCESS_TTL=0 / negative producing an immediately-expired JWT.
 		accessTTL = 3600
@@ -69,7 +60,6 @@ func Load() Config {
 		ProvisioningURL:     envOr("PROVISIONING_URL", "http://localhost:24005/api"),
 		ProvisioningPAT:     os.Getenv("PROVISIONING_PAT"),
 		ProvisioningPATFile: os.Getenv(patFileEnv),
-		JWTExpiration:       jwtExp,
 		AccessTTL:           accessTTL,
 		RefreshExpiration:   envInt("REFRESH_EXPIRATION", 604800),
 		CORSOrigins:         parseCORSOrigins(envOr("CORS_ORIGINS", "https://app.excalibase.io")),

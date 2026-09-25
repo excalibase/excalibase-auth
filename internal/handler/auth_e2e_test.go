@@ -89,7 +89,7 @@ func setupIntegrationFixture(t *testing.T, opts ...handlerOption) (*integrationF
 	})
 
 	// 5. Auth handler + router
-	authHandler := NewAuthHandler(poolMgr, jwtSvc, 3600, 604800)
+	authHandler := NewAuthHandler(poolMgr, jwtSvc, 604800)
 	for _, opt := range opts {
 		authHandler = opt(authHandler)
 	}
@@ -384,15 +384,16 @@ func TestIntegration_APIKeyCRUD_InvalidKeyType(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
-	srv, cleanup := setupIntegration(t)
+	fx, cleanup := setupIntegrationFixture(t)
 	defer cleanup()
+	srv := fx.srv
 
-	userJWT := registerAndGetJWT(t, srv, "grace@test.com", "Grace")
+	operatorToken := operatorJWT(t, fx)
 
 	body, _ := json.Marshal(map[string]string{"name": "bad", "keyType": "admin"})
 	req, _ := http.NewRequest("POST", srv.URL+"/auth/test-org/test-project/api-keys/", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+userJWT)
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 400 {
 		t.Errorf("invalid keyType: got %d, want 400", resp.StatusCode)
@@ -404,27 +405,21 @@ func TestIntegration_APIKeyCRUD_ListShape(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
-	srv, cleanup := setupIntegration(t)
+	fx, cleanup := setupIntegrationFixture(t)
 	defer cleanup()
+	srv := fx.srv
 
-	userJWT := registerAndGetJWT(t, srv, "henry@test.com", "Henry")
+	operatorToken := operatorJWT(t, fx)
 
 	// Create two keys (publishable + secret) so we can verify both types appear.
 	for _, kt := range []string{"publishable", "secret"} {
-		b, _ := json.Marshal(map[string]string{"name": kt + "-key", "keyType": kt})
-		req, _ := http.NewRequest("POST", srv.URL+"/auth/test-org/test-project/api-keys/", bytes.NewReader(b))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+userJWT)
-		resp, _ := http.DefaultClient.Do(req)
-		if resp.StatusCode != 201 {
-			t.Fatalf("create %s: got %d", kt, resp.StatusCode)
-		}
-		resp.Body.Close()
+		resp := sendAuthed(t, srv, "POST", apiKeysPath, operatorToken, map[string]string{"name": kt + "-key", "keyType": kt})
+		expectStatus(t, resp, 201, "create "+kt)
 	}
 
 	// List and verify shape
 	req, _ := http.NewRequest("GET", srv.URL+"/auth/test-org/test-project/api-keys/", nil)
-	req.Header.Set("Authorization", "Bearer "+userJWT)
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 200 {
 		t.Fatalf("list: got %d", resp.StatusCode)
@@ -432,22 +427,26 @@ func TestIntegration_APIKeyCRUD_ListShape(t *testing.T) {
 	var listResp map[string]interface{}
 	decodeJSON(resp, &listResp)
 	keys := listResp["keys"].([]interface{})
-	if len(keys) != 2 {
-		t.Fatalf("expected 2 keys, got %d", len(keys))
+	if len(keys) != 3 {
+		t.Fatalf("expected 3 keys (operator + 2 created), got %d", len(keys))
 	}
 
 	// Every key must have id, keyPrefix, keyType, name, createdAt — never plaintext or hash.
 	for _, raw := range keys {
-		k := raw.(map[string]interface{})
-		for _, req := range []string{"id", "keyPrefix", "keyType", "name", "createdAt"} {
-			if _, ok := k[req]; !ok {
-				t.Errorf("list entry missing required field %q: %v", req, k)
-			}
+		assertAPIKeyListEntry(t, raw.(map[string]interface{}))
+	}
+}
+
+func assertAPIKeyListEntry(t *testing.T, k map[string]interface{}) {
+	t.Helper()
+	for _, field := range []string{"id", "keyPrefix", "keyType", "name", "createdAt"} {
+		if _, ok := k[field]; !ok {
+			t.Errorf("list entry missing required field %q: %v", field, k)
 		}
-		for _, forbidden := range []string{"plaintext", "keyHash", "key_hash"} {
-			if _, ok := k[forbidden]; ok {
-				t.Errorf("list entry leaked forbidden field %q", forbidden)
-			}
+	}
+	for _, forbidden := range []string{"plaintext", "keyHash", "key_hash"} {
+		if _, ok := k[forbidden]; ok {
+			t.Errorf("list entry leaked forbidden field %q", forbidden)
 		}
 	}
 }
@@ -456,16 +455,17 @@ func TestIntegration_APIKeyCRUD_RevokeIdempotent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
-	srv, cleanup := setupIntegration(t)
+	fx, cleanup := setupIntegrationFixture(t)
 	defer cleanup()
+	srv := fx.srv
 
-	userJWT := registerAndGetJWT(t, srv, "ivy@test.com", "Ivy")
+	operatorToken := operatorJWT(t, fx)
 
 	// Create a key and capture its id
 	body, _ := json.Marshal(map[string]string{"name": "idem", "keyType": "publishable"})
 	req, _ := http.NewRequest("POST", srv.URL+"/auth/test-org/test-project/api-keys/", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+userJWT)
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
 	resp, _ := http.DefaultClient.Do(req)
 	var createResp map[string]interface{}
 	decodeJSON(resp, &createResp)
@@ -474,7 +474,7 @@ func TestIntegration_APIKeyCRUD_RevokeIdempotent(t *testing.T) {
 	// First DELETE → 204
 	req, _ = http.NewRequest("DELETE",
 		fmt.Sprintf("%s/auth/test-org/test-project/api-keys/%d", srv.URL, id), nil)
-	req.Header.Set("Authorization", "Bearer "+userJWT)
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != 204 {
 		t.Errorf("first revoke: got %d, want 204", resp.StatusCode)
@@ -484,7 +484,7 @@ func TestIntegration_APIKeyCRUD_RevokeIdempotent(t *testing.T) {
 	// Second DELETE on the same id → 200 with status=already_revoked_or_missing (idempotent)
 	req, _ = http.NewRequest("DELETE",
 		fmt.Sprintf("%s/auth/test-org/test-project/api-keys/%d", srv.URL, id), nil)
-	req.Header.Set("Authorization", "Bearer "+userJWT)
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != 200 {
 		t.Errorf("second revoke: got %d, want 200 (idempotent)", resp.StatusCode)
@@ -497,7 +497,7 @@ func TestIntegration_APIKeyCRUD_RevokeIdempotent(t *testing.T) {
 
 	// Revoking a non-existent id also returns 200 with the same status
 	req, _ = http.NewRequest("DELETE", srv.URL+"/auth/test-org/test-project/api-keys/999999", nil)
-	req.Header.Set("Authorization", "Bearer "+userJWT)
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != 200 {
 		t.Errorf("missing-id revoke: got %d, want 200", resp.StatusCode)
@@ -506,7 +506,7 @@ func TestIntegration_APIKeyCRUD_RevokeIdempotent(t *testing.T) {
 
 	// Bad id (non-numeric) is a 400
 	req, _ = http.NewRequest("DELETE", srv.URL+"/auth/test-org/test-project/api-keys/not-a-number", nil)
-	req.Header.Set("Authorization", "Bearer "+userJWT)
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != 400 {
 		t.Errorf("bad id: got %d, want 400", resp.StatusCode)
@@ -530,32 +530,24 @@ func registerAndGetJWT(t *testing.T, srv *httptest.Server, email, name string) s
 	return r["accessToken"].(string)
 }
 
-// Full api-key CRUD + grant journey via real HTTP.
-// register → login → POST /api-keys → use plaintext via /token → revoke → /token rejects.
+// Full api-key CRUD + grant journey via real HTTP, as the project operator.
+// POST /api-keys → use plaintext via /token → revoke → /token rejects.
 func TestIntegration_APIKeyCRUDAndExchange(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
-	srv, cleanup := setupIntegration(t)
+	fx, cleanup := setupIntegrationFixture(t)
 	defer cleanup()
+	srv := fx.srv
 
-	// 1. Register & capture the user JWT.
-	resp := postJSON(srv, "/auth/test-org/test-project/register", map[string]string{
-		"email": "frank@test.com", "password": "password123", "fullName": "Frank",
-	})
-	if resp.StatusCode != 201 {
-		t.Fatalf("register: got %d", resp.StatusCode)
-	}
-	var registerResp map[string]interface{}
-	decodeJSON(resp, &registerResp)
-	userJWT := registerResp["accessToken"].(string)
+	operatorToken := operatorJWT(t, fx)
 
-	// 2. POST /api-keys (authenticated) returns plaintext once.
+	// 2. POST /api-keys returns plaintext once.
 	createBody, _ := json.Marshal(map[string]string{"name": "ci-key", "keyType": "publishable"})
 	req, _ := http.NewRequest("POST", srv.URL+"/auth/test-org/test-project/api-keys/", bytes.NewReader(createBody))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+userJWT)
-	resp, _ = http.DefaultClient.Do(req)
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
+	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != 201 {
 		var body map[string]interface{}
 		decodeJSON(resp, &body)
@@ -571,7 +563,7 @@ func TestIntegration_APIKeyCRUDAndExchange(t *testing.T) {
 
 	// 3. GET /api-keys lists the new key but never the hash or plaintext.
 	req, _ = http.NewRequest("GET", srv.URL+"/auth/test-org/test-project/api-keys/", nil)
-	req.Header.Set("Authorization", "Bearer "+userJWT)
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != 200 {
 		t.Fatalf("list api keys: got %d", resp.StatusCode)
@@ -579,8 +571,8 @@ func TestIntegration_APIKeyCRUDAndExchange(t *testing.T) {
 	var listResp map[string]interface{}
 	decodeJSON(resp, &listResp)
 	keys := listResp["keys"].([]interface{})
-	if len(keys) != 1 {
-		t.Fatalf("expected 1 key, got %d", len(keys))
+	if len(keys) != 2 {
+		t.Fatalf("expected 2 keys (operator + created), got %d", len(keys))
 	}
 	first := keys[0].(map[string]interface{})
 	if _, present := first["plaintext"]; present {
@@ -603,7 +595,7 @@ func TestIntegration_APIKeyCRUDAndExchange(t *testing.T) {
 	// 5. DELETE /api-keys/{id} revokes via the HTTP path.
 	req, _ = http.NewRequest("DELETE",
 		fmt.Sprintf("%s/auth/test-org/test-project/api-keys/%d", srv.URL, apiKeyID), nil)
-	req.Header.Set("Authorization", "Bearer "+userJWT)
+	req.Header.Set("Authorization", "Bearer "+operatorToken)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != 204 {
 		t.Errorf("revoke: got %d, want 204", resp.StatusCode)

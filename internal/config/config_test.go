@@ -9,16 +9,12 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	// Guard against CI / local shell leakage of the env vars we care about.
 	os.Unsetenv("ACCESS_TTL")
-	os.Unsetenv("JWT_EXPIRATION")
 	cfg := Load()
 	if cfg.Port != "24000" {
 		t.Errorf("port: got %s, want 24000", cfg.Port)
 	}
 	if cfg.ProvisioningURL != "http://localhost:24005/api" {
 		t.Errorf("provisioningURL: got %s", cfg.ProvisioningURL)
-	}
-	if cfg.JWTExpiration != 86400 {
-		t.Errorf("jwtExpiration: got %d", cfg.JWTExpiration)
 	}
 	if cfg.RefreshExpiration != 604800 {
 		t.Errorf("refreshExpiration: got %d", cfg.RefreshExpiration)
@@ -36,17 +32,18 @@ func TestAccessTTL_ExplicitEnvWins(t *testing.T) {
 	}
 }
 
-func TestAccessTTL_FallsBackToJWTExpiration(t *testing.T) {
+// JWT_EXPIRATION once set the signed lifetime behind ACCESS_TTL's back; it must
+// have no say any more.
+func TestAccessTTL_IgnoresJWTExpiration(t *testing.T) {
 	os.Unsetenv("ACCESS_TTL")
-	t.Setenv("JWT_EXPIRATION", "7200")
+	t.Setenv("JWT_EXPIRATION", "86400")
 	cfg := Load()
-	if cfg.AccessTTL != 7200 {
-		t.Errorf("fallback to JWT_EXPIRATION: got %d, want 7200", cfg.AccessTTL)
+	if cfg.AccessTTL != 3600 {
+		t.Errorf("JWT_EXPIRATION must not change the access TTL: got %d, want 3600", cfg.AccessTTL)
 	}
 }
 
 func TestAccessTTL_InvalidFallsBackToDefault(t *testing.T) {
-	os.Unsetenv("JWT_EXPIRATION")
 	t.Setenv("ACCESS_TTL", "not-a-number")
 	cfg := Load()
 	if cfg.AccessTTL != 3600 {
@@ -55,7 +52,6 @@ func TestAccessTTL_InvalidFallsBackToDefault(t *testing.T) {
 }
 
 func TestAccessTTL_ZeroOrNegativeGuarded(t *testing.T) {
-	os.Unsetenv("JWT_EXPIRATION")
 	t.Setenv("ACCESS_TTL", "0")
 	cfg := Load()
 	if cfg.AccessTTL != 3600 {
@@ -85,22 +81,18 @@ func TestLoadFromEnv(t *testing.T) {
 }
 
 func TestEnvIntValid(t *testing.T) {
-	os.Setenv("JWT_EXPIRATION", "7200")
-	defer os.Unsetenv("JWT_EXPIRATION")
-
+	t.Setenv("REFRESH_EXPIRATION", "7200")
 	cfg := Load()
-	if cfg.JWTExpiration != 7200 {
-		t.Errorf("jwtExpiration: got %d", cfg.JWTExpiration)
+	if cfg.RefreshExpiration != 7200 {
+		t.Errorf("refreshExpiration: got %d", cfg.RefreshExpiration)
 	}
 }
 
 func TestEnvIntInvalid(t *testing.T) {
-	os.Setenv("JWT_EXPIRATION", "not-a-number")
-	defer os.Unsetenv("JWT_EXPIRATION")
-
+	t.Setenv("REFRESH_EXPIRATION", "not-a-number")
 	cfg := Load()
-	if cfg.JWTExpiration != 86400 {
-		t.Errorf("should fallback to default, got %d", cfg.JWTExpiration)
+	if cfg.RefreshExpiration != 604800 {
+		t.Errorf("should fallback to default, got %d", cfg.RefreshExpiration)
 	}
 }
 

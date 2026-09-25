@@ -105,6 +105,11 @@ func (s *JWTService) SetAudiencePrefix(prefix string) {
 	}
 }
 
+// TTL is the access-token lifetime in seconds that Sign stamps into `exp`.
+func (s *JWTService) TTL() int {
+	return s.expSeconds
+}
+
 // AudienceFor returns the `aud` entry a token for projectID must carry.
 func (s *JWTService) AudienceFor(projectID string) string {
 	return s.audPrefix + projectID

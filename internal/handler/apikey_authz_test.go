@@ -31,7 +31,7 @@ func setupAuthzRouter(t *testing.T) (chi.Router, *auth.JWTService) {
 
 	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
 	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
-	h := NewAuthHandler(mgr, jwtSvc, 900, 604800)
+	h := NewAuthHandler(mgr, jwtSvc, 604800)
 
 	r := chi.NewRouter()
 	r.Route("/auth", h.Routes)
@@ -53,25 +53,27 @@ func mintToken(t *testing.T, svc *auth.JWTService, projectID, scope string) stri
 	return tok
 }
 
-// (a) A token whose ProjectID matches the URL project must pass the authz checks
-// and reach the DB layer (503 here, since the test vault is unreachable). It must
-// NOT be rejected with 401/403.
-func TestAPIKey_Create_SameProjectPassesAuthz(t *testing.T) {
+// An end user's password-login token must not manage keys for its own project:
+// signup is open, so this would hand anyone a route to a service credential.
+func TestAPIKey_AuthenticatedScopeForbidden(t *testing.T) {
 	r, svc := setupAuthzRouter(t)
 	token := mintToken(t, svc, "test-project", "authenticated")
 
-	body := `{"name":"ci","keyType":"publishable"}`
-	req := httptest.NewRequest("POST", "/auth/test-org/test-project/api-keys/", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code == 401 || w.Code == 403 {
-		t.Fatalf("same-project authenticated token must pass authz, got %d", w.Code)
+	cases := []struct{ method, path, body string }{
+		{"POST", "/auth/test-org/test-project/api-keys/", `{"name":"ci","keyType":"secret"}`},
+		{"GET", "/auth/test-org/test-project/api-keys/", ""},
+		{"DELETE", "/auth/test-org/test-project/api-keys/42", ""},
 	}
-	if w.Code != 503 {
-		t.Errorf("expected 503 (authz passed, DB unreachable), got %d", w.Code)
+	for _, tc := range cases {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != 403 {
+			t.Errorf("%s %s with an end-user token: got %d, want 403", tc.method, tc.path, w.Code)
+		}
 	}
 }
 
@@ -168,6 +170,9 @@ func TestAPIKey_Create_ServiceScopeSameProjectPassesAuthz(t *testing.T) {
 
 	if w.Code == 401 || w.Code == 403 {
 		t.Fatalf("service-scope same-project token must pass authz, got %d", w.Code)
+	}
+	if w.Code != 503 {
+		t.Errorf("expected 503 (authz passed, DB unreachable), got %d", w.Code)
 	}
 }
 

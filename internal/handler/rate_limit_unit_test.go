@@ -67,7 +67,7 @@ func setupRateLimitedRouter(t *testing.T) (chi.Router, *manualClock) {
 		FailureWindow:      15 * time.Minute,
 	}, ratelimit.WithClock(clock.Now))
 
-	h := NewAuthHandler(mgr, jwtSvc, 900, 604800).WithRateLimits(limits)
+	h := NewAuthHandler(mgr, jwtSvc, 604800).WithRateLimits(limits)
 	r := chi.NewRouter()
 	r.Route("/auth", h.Routes)
 	return r, clock

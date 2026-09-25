@@ -23,12 +23,11 @@ func (h *AuthHandler) APIKeyRoutes(r chi.Router) {
 	r.Delete("/{id}", h.RevokeAPIKey)
 }
 
-// canManageAPIKeys reports whether the token scope is permitted to manage api
-// keys. Publishable / browser ("public") tokens are read-only credentials for
-// edge traffic and must never create, list, or revoke keys. Only first-party
-// authenticated users and trusted service tokens may.
+// canManageAPIKeys reports whether the token scope may manage api keys. Only the
+// project operator's service credential may: signup is open, so an end user's
+// "authenticated" token must never reach a service key.
 func canManageAPIKeys(scope string) bool {
-	return scope == "authenticated" || scope == "service"
+	return scope == "service"
 }
 
 // CreateAPIKey generates a new api key for the project, stores its hash, and
@@ -76,10 +75,10 @@ func (h *AuthHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		createdAt time.Time
 	)
 	err = pool.QueryRow(r.Context(),
-		`INSERT INTO auth.api_keys (key_hash, key_prefix, key_type, name, created_by)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO auth.api_keys (key_hash, key_prefix, key_type, name)
+		 VALUES ($1, $2, $3, $4)
 		 RETURNING id, created_at`,
-		hash, prefix, req.KeyType, req.Name, claims.UserID,
+		hash, prefix, req.KeyType, req.Name,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		httpError(w, "failed to persist api key", 500)
@@ -153,7 +152,7 @@ func (h *AuthHandler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"keys": keys})
 }
 
-// RevokeAPIKey soft-deletes a key by setting revoked_at and revoked_by.
+// RevokeAPIKey soft-deletes a key by setting revoked_at.
 // Idempotent: revoking an already-revoked key returns 204 without error.
 func (h *AuthHandler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	projectID := projectKey(r)
@@ -186,9 +185,9 @@ func (h *AuthHandler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	tag, err := pool.Exec(r.Context(),
 		`UPDATE auth.api_keys
-		 SET revoked_at = NOW(), revoked_by = $1
-		 WHERE id = $2 AND revoked_at IS NULL`,
-		claims.UserID, id,
+		 SET revoked_at = NOW()
+		 WHERE id = $1 AND revoked_at IS NULL`,
+		id,
 	)
 	if err != nil {
 		httpError(w, "failed to revoke api key", 500)

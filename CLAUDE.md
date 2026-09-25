@@ -52,7 +52,7 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 | `PROVISIONING_PAT_FILE` | — | Path to a rotatable token file, re-read on each provisioning call |
 | `PROVISIONING_URL` | `http://localhost:24005/api` | No |
 | `PORT` | `24000` | No |
-| `JWT_EXPIRATION` | `86400` (seconds) | No |
+| `ACCESS_TTL` | `3600` (seconds) | No |
 | `REFRESH_EXPIRATION` | `604800` (seconds) | No |
 | `RATE_LIMIT_ENABLED` | `true` | No |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | No |
