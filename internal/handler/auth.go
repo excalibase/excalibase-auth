@@ -407,6 +407,11 @@ func (h *AuthHandler) exchangeAPIKey(r *http.Request, projectID, apiKey string) 
 	if err != nil {
 		return nil, 401, errInvalidAPIKey
 	}
+	// A secret key owned by an end user predates operator-only key management
+	// and must never yield a service token.
+	if keyType == string(service.KeyTypeSecret) && createdBy != nil {
+		return nil, 401, errInvalidAPIKey
+	}
 
 	pool.Exec(r.Context(), "UPDATE auth.api_keys SET last_used_at = NOW() WHERE id = $1", keyID)
 
