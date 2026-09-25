@@ -250,9 +250,10 @@ last_login_at TIMESTAMPTZ
 
 -- auth.refresh_tokens
 id BIGSERIAL PRIMARY KEY
-token VARCHAR(255) UNIQUE NOT NULL
+token_hash CHAR(64) UNIQUE NOT NULL  -- SHA-256 of the token; the plaintext is never stored
+family_id UUID NOT NULL               -- one login; replaying a rotated token revokes the family
 user_id BIGINT REFERENCES users(id) ON DELETE CASCADE
-expiry_date TIMESTAMPTZ NOT NULL
+expiry_date TIMESTAMPTZ NOT NULL      -- set at login; rotation keeps it
 created_at TIMESTAMPTZ
 revoked BOOLEAN DEFAULT false
 ```

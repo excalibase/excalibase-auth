@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/domain"
@@ -17,8 +16,9 @@ import (
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/excalibase/auth/internal/service"
 	"github.com/excalibase/auth/internal/throttle"
+	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // Shared sentinel errors so HTTP handlers and the unified /token dispatch
@@ -327,46 +327,49 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// exchangeRefreshToken validates a refresh token, revokes it (rotation), and
-// returns a fresh AuthResponse for the same user. Returns (nil, statusCode, err)
-// on failure.
+// exchangeRefreshToken rotates a refresh token: the presented one is revoked
+// and a successor in the same session is issued with a fresh access token.
 func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshToken string) (*domain.AuthResponse, int, error) {
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	ctx := r.Context()
+	pool, err := h.poolMgr.GetPool(ctx, chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return nil, 503, errProjectDBUnavailable
 	}
+	hash := token.Hash(refreshToken)
 
-	var tokenID, userID int64
-	var revoked bool
-	var expiryDate time.Time
-	err = pool.QueryRow(r.Context(),
-		"SELECT id, user_id, revoked, expiry_date FROM refresh_tokens WHERE token = $1",
-		refreshToken,
-	).Scan(&tokenID, &userID, &revoked, &expiryDate)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return nil, 401, errInvalidRefreshToken
+		return nil, 503, errProjectDBUnavailable
 	}
-	if revoked {
-		return nil, 401, errRefreshTokenRevoked
+	defer tx.Rollback(ctx)
+
+	rotated, err := consumeRefreshToken(ctx, tx, hash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		tx.Rollback(ctx)
+		code, rejectErr := rejectDeadRefreshToken(ctx, pool, hash)
+		return nil, code, rejectErr
 	}
-	if time.Now().After(expiryDate) {
-		return nil, 401, errRefreshTokenExpired
+	if err != nil {
+		return nil, 500, errRefreshTokenStore
 	}
 
-	pool.Exec(r.Context(), "UPDATE refresh_tokens SET revoked = true WHERE id = $1", tokenID)
-
-	var email, fullName string
+	var user domain.UserInfo
 	var emailVerified bool
-	if err := pool.QueryRow(r.Context(),
-		"SELECT email, full_name, email_verified FROM users WHERE id = $1", userID,
-	).Scan(&email, &fullName, &emailVerified); err != nil {
-		// Refresh token row exists but the underlying user is gone (CASCADE
-		// should normally clean these up, but defend against drift). Treat as
-		// invalid rather than minting a JWT for a ghost user.
+	if err := tx.QueryRow(ctx,
+		"SELECT id, email, full_name, email_verified FROM users WHERE id = $1", rotated.userID,
+	).Scan(&user.ID, &user.Email, &user.FullName, &emailVerified); err != nil {
 		return nil, 401, errInvalidRefreshToken
 	}
 
-	resp, err := h.generateAuthResponse(r, projectID, userID, email, fullName, emailVerified)
+	successor, err := storeRefreshToken(ctx, tx, user.ID, rotated.session)
+	if err != nil {
+		return nil, 500, errRefreshTokenStore
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, 500, errRefreshTokenStore
+	}
+
+	resp, err := h.sessionResponse(r, projectID, user, emailVerified, successor)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -438,11 +441,31 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pool.Exec(r.Context(), "UPDATE refresh_tokens SET revoked = true WHERE token = $1", req.RefreshToken)
+	if _, err := pool.Exec(r.Context(),
+		"UPDATE auth.refresh_tokens SET revoked = true WHERE token_hash = $1", token.Hash(req.RefreshToken),
+	); err != nil {
+		httpError(w, "failed to log out", 500)
+		return
+	}
 	writeJSON(w, map[string]string{"message": "Logged out successfully"})
 }
 
+// generateAuthResponse starts a new session for the user.
 func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, userID int64, email, fullName string, emailVerified bool) (*domain.AuthResponse, error) {
+	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	if err != nil {
+		return nil, err
+	}
+	refreshToken, err := storeRefreshToken(r.Context(), pool, userID, h.newRefreshSession())
+	if err != nil {
+		return nil, err
+	}
+	return h.sessionResponse(r, projectID, domain.UserInfo{ID: userID, Email: email, FullName: fullName}, emailVerified, refreshToken)
+}
+
+// sessionResponse signs an end-user access token and pairs it with the
+// session's refresh token.
+func (h *AuthHandler) sessionResponse(r *http.Request, projectID string, user domain.UserInfo, emailVerified bool, refreshToken string) (*domain.AuthResponse, error) {
 	orgSlug := chi.URLParam(r, "orgSlug")
 
 	// Look up display names from provisioning (cached per projectId in poolMgr).
@@ -463,8 +486,8 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 	}
 
 	accessToken, err := h.jwtService.Sign(auth.Claims{
-		Sub:         email,
-		UserID:      userID,
+		Sub:         user.Email,
+		UserID:      user.ID,
 		ProjectID:   projectID,
 		OrgSlug:     orgSlug,
 		ProjectName: projectName,
@@ -480,23 +503,12 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 		return nil, err
 	}
 
-	refreshToken := uuid.New().String()
-	expiryDate := time.Now().Add(time.Duration(h.refreshExp) * time.Second)
-
-	pool, _ := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
-	if pool != nil {
-		pool.Exec(r.Context(),
-			"INSERT INTO refresh_tokens (token, user_id, expiry_date, created_at, revoked) VALUES ($1, $2, $3, NOW(), false)",
-			refreshToken, userID, expiryDate,
-		)
-	}
-
 	return &domain.AuthResponse{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		TokenType:    "Bearer",
 		ExpiresIn:    int64(h.jwtService.TTL()),
-		User:         domain.UserInfo{ID: userID, Email: email, FullName: fullName},
+		User:         user,
 	}, nil
 }
 
