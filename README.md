@@ -166,7 +166,7 @@ All configuration is via environment variables:
 | `PROVISIONING_PAT_FILE` | — | Path to a token file rotated in place; re-read on each provisioning call, no restart needed. If both this and `PROVISIONING_PAT` are set, the file wins; `PROVISIONING_PAT` is only the seed value used until the file is first read. With neither set, or a file that is empty/unreadable and has never yielded a value, startup and every provisioning call fail with an explicit error rather than sending an empty bearer token. |
 | `PROVISIONING_URL` | `http://localhost:24005/api` | Provisioning service base URL |
 | `PORT` | `24000` | HTTP server port |
-| `JWT_EXPIRATION` | `86400` | Access token TTL in seconds (default: 24h) |
+| `ACCESS_TTL` | `3600` | Access token lifetime in seconds (the signed `exp` and the advertised `expires_in`) |
 | `REFRESH_EXPIRATION` | `604800` | Refresh token TTL in seconds (default: 7d) |
 | `RATE_LIMIT_ENABLED` | `true` | Throttle the credential endpoints (see below) |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | Window for the per-IP and per-project budgets |

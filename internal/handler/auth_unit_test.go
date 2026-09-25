@@ -6,6 +6,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/excalibase/auth/internal/auth"
+	"github.com/excalibase/auth/internal/domain"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
@@ -28,7 +31,7 @@ func setupUnitRouter(t *testing.T) chi.Router {
 	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
 	// Pool manager with unreachable vault — all DB operations will fail
 	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
-	h := NewAuthHandler(mgr, jwtSvc, 900, 604800)
+	h := NewAuthHandler(mgr, jwtSvc, 604800)
 
 	r := chi.NewRouter()
 	r.Route("/auth", h.Routes)
@@ -163,37 +166,57 @@ func TestValidate_InvalidToken(t *testing.T) {
 	}
 }
 
-// generateAuthResponse must surface the configured access TTL, not the historical
-// hardcoded 3600. This is a direct unit test of the private helper; the pool fetch
-// is allowed to fail silently (refresh_tokens insert is skipped when pool==nil).
-func TestGenerateAuthResponse_ExpiresInMatchesConfig(t *testing.T) {
+// The token's real lifetime and the advertised expires_in must both be the
+// signer's access TTL, for the password and api-key grants alike.
+func TestAuthResponses_ExpMatchesAdvertisedTTL(t *testing.T) {
 	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	b, _ := x509.MarshalECPrivateKey(priv)
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b}))
-	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
+	const accessTTL = 900
+	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", accessTTL)
 	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
-
-	const wantAccess = 900
-	h := NewAuthHandler(mgr, jwtSvc, wantAccess, 604800)
+	h := NewAuthHandler(mgr, jwtSvc, 604800)
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("orgSlug", "test-org")
-	rctx.URLParams.Add("projectName", "test-project")
 	req := httptest.NewRequest("POST", "/", nil).WithContext(
 		context.WithValue(context.Background(), chi.RouteCtxKey, rctx),
 	)
 
-	resp, err := h.generateAuthResponse(req, "test-org/test-project", 42, "alice@example.com", "Alice", false)
+	password, err := h.generateAuthResponse(req, "test-project", 42, "alice@example.com", "Alice", false)
 	if err != nil {
 		t.Fatalf("generateAuthResponse: %v", err)
 	}
-	if resp.ExpiresIn != int64(wantAccess) {
-		t.Errorf("ExpiresIn: got %d, want %d", resp.ExpiresIn, wantAccess)
+	apiKey, err := h.generateAPIKeyAuthResponse(req, "test-project", 0, 7, "publishable")
+	if err != nil {
+		t.Fatalf("generateAPIKeyAuthResponse: %v", err)
 	}
-	if resp.TokenType != "Bearer" {
-		t.Errorf("TokenType: got %s, want Bearer", resp.TokenType)
+	for name, resp := range map[string]*domain.AuthResponse{"password": password, "api key": apiKey} {
+		if resp.ExpiresIn != accessTTL {
+			t.Errorf("%s expires_in: got %d, want %d", name, resp.ExpiresIn, accessTTL)
+		}
+		if lifetime := tokenLifetime(t, resp.AccessToken); lifetime != accessTTL {
+			t.Errorf("%s exp - iat: got %d, want %d", name, lifetime, accessTTL)
+		}
 	}
-	if resp.AccessToken == "" {
-		t.Error("AccessToken should not be empty")
+}
+
+func tokenLifetime(t *testing.T, tok string) int64 {
+	t.Helper()
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		t.Fatalf("not a JWT: %q", tok)
 	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+		Iat int64 `json:"iat"`
+	}
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	return claims.Exp - claims.Iat
 }

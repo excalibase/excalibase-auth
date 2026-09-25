@@ -40,12 +40,10 @@ func main() {
 		log.Fatalf("Failed to fetch signing key from vault: %v", err)
 	}
 
-	// JWT service
-	jwtService, err := auth.NewJWTService(privateKeyPEM, "excalibase", cfg.JWTExpiration)
+	jwtService, err := newSigner(privateKeyPEM, cfg)
 	if err != nil {
 		log.Fatalf("Failed to init JWT service: %v", err)
 	}
-	jwtService.SetAudiencePrefix(cfg.AudiencePrefix)
 
 	// Pool manager (multi-tenant connection cache)
 	poolMgr := pool.NewManager(cfg.ProvisioningURL, tokens, 1*time.Hour)
@@ -54,7 +52,7 @@ func main() {
 	})
 
 	// Handler
-	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.AccessTTL, cfg.RefreshExpiration)
+	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.RefreshExpiration)
 	if cfg.RateLimit.Enabled {
 		authHandler.WithRateLimits(custommw.NewRateLimits(custommw.RateLimitConfigFrom(cfg.RateLimit)))
 	} else {
@@ -93,6 +91,15 @@ func main() {
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+func newSigner(privateKeyPEM string, cfg config.Config) (*auth.JWTService, error) {
+	signer, err := auth.NewJWTService(privateKeyPEM, "excalibase", cfg.AccessTTL)
+	if err != nil {
+		return nil, err
+	}
+	signer.SetAudiencePrefix(cfg.AudiencePrefix)
+	return signer, nil
 }
 
 func fetchSigningKey(provisioningURL string, tokens token.Source) (string, error) {

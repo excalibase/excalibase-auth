@@ -74,7 +74,7 @@ func TestMain(m *testing.M) {
 		"PORT=24100",
 		"PROVISIONING_URL="+mockVault.URL,
 		"PROVISIONING_PAT=e2e-test-pat",
-		"JWT_EXPIRATION=3600",
+		"ACCESS_TTL=3600",
 		"REFRESH_EXPIRATION=604800",
 		// Every E2E request comes from 127.0.0.1; keep the limiter wired but
 		// raise the budgets so the suite is not throttled by its own volume.

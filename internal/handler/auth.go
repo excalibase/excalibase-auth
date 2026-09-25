@@ -43,7 +43,6 @@ const verificationSentMessage = "If the account exists and is unverified, a veri
 type AuthHandler struct {
 	poolMgr    *pool.Manager
 	jwtService *auth.JWTService
-	accessExp  int                    // seconds — access token lifetime returned in expires_in
 	refreshExp int                    // seconds
 	limits     *middleware.RateLimits // nil disables throttling
 
@@ -53,11 +52,10 @@ type AuthHandler struct {
 	forgotThrottle *throttle.Throttle
 }
 
-func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, accessExp, refreshExp int) *AuthHandler {
+func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
 	return &AuthHandler{
 		poolMgr:    poolMgr,
 		jwtService: jwtService,
-		accessExp:  accessExp,
 		refreshExp: refreshExp,
 		// Default to dropping mail so a deployment without an email path still
 		// registers users rather than failing closed on an unset dependency.
@@ -497,7 +495,7 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		TokenType:    "Bearer",
-		ExpiresIn:    int64(h.accessExp),
+		ExpiresIn:    int64(h.jwtService.TTL()),
 		User:         domain.UserInfo{ID: userID, Email: email, FullName: fullName},
 	}, nil
 }
@@ -550,7 +548,7 @@ func (h *AuthHandler) generateAPIKeyAuthResponse(r *http.Request, projectID stri
 	return &domain.AuthResponse{
 		AccessToken: accessToken,
 		TokenType:   "Bearer",
-		ExpiresIn:   int64(h.accessExp),
+		ExpiresIn:   int64(h.jwtService.TTL()),
 	}, nil
 }
 

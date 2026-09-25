@@ -89,7 +89,7 @@ func setupIntegrationFixture(t *testing.T, opts ...handlerOption) (*integrationF
 	})
 
 	// 5. Auth handler + router
-	authHandler := NewAuthHandler(poolMgr, jwtSvc, 3600, 604800)
+	authHandler := NewAuthHandler(poolMgr, jwtSvc, 604800)
 	for _, opt := range opts {
 		authHandler = opt(authHandler)
 	}

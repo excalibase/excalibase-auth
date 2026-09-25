@@ -7,7 +7,7 @@ metadata:
 data:
   PORT: {{ .Values.app.port | quote }}
   PROVISIONING_URL: {{ .Values.provisioning.url | quote }}
-  JWT_EXPIRATION: {{ .Values.app.jwtExpiration | quote }}
+  ACCESS_TTL: {{ .Values.app.accessTTL | quote }}
   REFRESH_EXPIRATION: {{ .Values.app.refreshExpiration | quote }}
   RATE_LIMIT_ENABLED: {{ .Values.rateLimit.enabled | quote }}
   RATE_LIMIT_WINDOW_SECONDS: {{ .Values.rateLimit.windowSeconds | quote }}

@@ -150,7 +150,7 @@ func setupVerifyFixture(t *testing.T, requireVerification bool) (*verifyFixture,
 	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error { return migrate.Run(connStr) })
 
 	sender := &stubSender{}
-	h := NewAuthHandler(poolMgr, jwtSvc, 3600, 604800)
+	h := NewAuthHandler(poolMgr, jwtSvc, 604800)
 	h.SetEmail(sender, "https://fallback.test")
 
 	r := chi.NewRouter()

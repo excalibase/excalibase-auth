@@ -31,7 +31,7 @@ func setupAuthzRouter(t *testing.T) (chi.Router, *auth.JWTService) {
 
 	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
 	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
-	h := NewAuthHandler(mgr, jwtSvc, 900, 604800)
+	h := NewAuthHandler(mgr, jwtSvc, 604800)
 
 	r := chi.NewRouter()
 	r.Route("/auth", h.Routes)
