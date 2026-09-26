@@ -3,9 +3,11 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
+	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/domain"
 	"github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/service"
@@ -23,11 +25,23 @@ func (h *AuthHandler) APIKeyRoutes(r chi.Router) {
 	r.Delete("/{id}", h.RevokeAPIKey)
 }
 
-// canManageAPIKeys reports whether the token scope may manage api keys. Only the
-// project operator's service credential may: signup is open, so an end user's
+// canManageAPIKeys reports whether the token may manage the project's api keys:
+// the project's own secret-key session, or the short key-admin token the
+// control plane signs for a developer. Signup is open, so an end user's
 // "authenticated" token must never reach a service key.
-func canManageAPIKeys(scope string) bool {
-	return scope == "service"
+func canManageAPIKeys(claims *auth.Claims, projectID string) bool {
+	if claims.TokenUse == auth.TokenUseKeyAdmin {
+		return isKeyAdminFor(claims, projectID)
+	}
+	return claims.IsAccess() && claims.Scope == "service"
+}
+
+func isKeyAdminFor(claims *auth.Claims, projectID string) bool {
+	lifetime := time.Duration(claims.ExpiresAt-claims.IssuedAt) * time.Second
+	if claims.IssuedAt == 0 || lifetime <= 0 || lifetime > auth.MaxKeyAdminLifetime {
+		return false
+	}
+	return slices.Contains(claims.Audience, auth.KeyAdminAudience(projectID))
 }
 
 // CreateAPIKey generates a new api key for the project, stores its hash, and
@@ -43,7 +57,7 @@ func (h *AuthHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "token project mismatch", http.StatusForbidden)
 		return
 	}
-	if !canManageAPIKeys(claims.Scope) {
+	if !canManageAPIKeys(claims, projectID) {
 		httpError(w, "insufficient scope to manage api keys", http.StatusForbidden)
 		return
 	}
@@ -109,7 +123,7 @@ func (h *AuthHandler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "token project mismatch", http.StatusForbidden)
 		return
 	}
-	if !canManageAPIKeys(claims.Scope) {
+	if !canManageAPIKeys(claims, projectID) {
 		httpError(w, "insufficient scope to manage api keys", http.StatusForbidden)
 		return
 	}
@@ -165,7 +179,7 @@ func (h *AuthHandler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "token project mismatch", http.StatusForbidden)
 		return
 	}
-	if !canManageAPIKeys(claims.Scope) {
+	if !canManageAPIKeys(claims, projectID) {
 		httpError(w, "insufficient scope to manage api keys", http.StatusForbidden)
 		return
 	}
