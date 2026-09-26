@@ -39,42 +39,43 @@ func hostCIDR(ip string) string {
 }
 
 // ClientIP returns the address to rate-limit on. RemoteAddr is authoritative
-// unless it belongs to a trusted proxy, in which case X-Forwarded-For is
-// walked from the right (the hop appended by our nearest proxy) towards the
-// left, skipping further trusted proxies; the first untrusted hop is the
-// client. Values injected by the client at the left of the list are therefore
-// never trusted. Any parse failure falls back to RemoteAddr.
+// unless it belongs to a trusted proxy, in which case X-Forwarded-For (every
+// header line, in order) is walked from the right (the hop appended by our
+// nearest proxy) towards the left, skipping further trusted proxies; the first
+// untrusted hop is the client. Entries left of it are client-written and never
+// read. An unparseable hop before that point falls back to RemoteAddr.
 func ClientIP(r *http.Request, trusted []*net.IPNet) string {
 	remote := remoteIP(r.RemoteAddr)
 	if len(trusted) == 0 || !contains(trusted, net.ParseIP(remote)) {
 		return remote
 	}
-	hops := forwardedHops(r.Header.Get("X-Forwarded-For"))
-	if len(hops) == 0 {
+	hops := forwardedHops(r.Header.Values("X-Forwarded-For"))
+	var leftmost net.IP
+	for i := len(hops) - 1; i >= 0; i-- {
+		ip := net.ParseIP(hops[i])
+		if ip == nil {
+			return remote
+		}
+		if !contains(trusted, ip) {
+			return ip.String()
+		}
+		leftmost = ip
+	}
+	if leftmost == nil {
 		return remote
 	}
-	for i := len(hops) - 1; i >= 0; i-- {
-		if !contains(trusted, hops[i]) {
-			return hops[i].String()
-		}
-	}
-	return hops[0].String()
+	return leftmost.String()
 }
 
-// forwardedHops parses an X-Forwarded-For value. It returns nil if any entry
-// fails to parse so a partially forged header cannot steer the result.
-func forwardedHops(header string) []net.IP {
-	if strings.TrimSpace(header) == "" {
-		return nil
-	}
-	parts := strings.Split(header, ",")
-	hops := make([]net.IP, 0, len(parts))
-	for _, part := range parts {
-		ip := net.ParseIP(strings.TrimSpace(part))
-		if ip == nil {
-			return nil
+// forwardedHops splits X-Forwarded-For header lines into trimmed entries.
+func forwardedHops(lines []string) []string {
+	var hops []string
+	for _, line := range lines {
+		for _, part := range strings.Split(line, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				hops = append(hops, part)
+			}
 		}
-		hops = append(hops, ip)
 	}
 	return hops
 }

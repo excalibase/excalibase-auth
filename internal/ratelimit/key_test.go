@@ -88,6 +88,20 @@ func TestClientIP(t *testing.T) {
 			want:       "10.1.1.1",
 		},
 		{
+			name:       "trusted proxy: forged unparseable entries left of the proxy's hop are never read",
+			remoteAddr: "10.1.1.1:80",
+			xff:        "not-an-ip, 198.51.100.9",
+			trusted:    trusted,
+			want:       "198.51.100.9",
+		},
+		{
+			name:       "trusted proxy: unparseable hop right of every untrusted one falls back to RemoteAddr",
+			remoteAddr: "10.1.1.1:80",
+			xff:        "198.51.100.9, not-an-ip",
+			trusted:    trusted,
+			want:       "10.1.1.1",
+		},
+		{
 			name:       "trusted proxy: empty XFF uses RemoteAddr",
 			remoteAddr: "10.1.1.1:80",
 			xff:        "",
@@ -120,6 +134,23 @@ func TestClientIP(t *testing.T) {
 				t.Errorf("ClientIP: got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A proxy that appends (HAProxy option forwardfor) adds its own header line
+// after the client's, so reading only the first line would hand the key to
+// the client.
+func TestClientIP_ReadsEveryForwardedForLine(t *testing.T) {
+	trusted, err := ParseCIDRs("10.0.0.0/8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.RemoteAddr = "10.1.1.1:80"
+	req.Header.Add("X-Forwarded-For", "1.2.3.4")
+	req.Header.Add("X-Forwarded-For", "198.51.100.9")
+	if got := ClientIP(req, trusted); got != "198.51.100.9" {
+		t.Errorf("ClientIP: got %q, want the proxy-appended 198.51.100.9", got)
 	}
 }
 
