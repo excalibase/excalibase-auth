@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -27,6 +28,8 @@ type Config struct {
 	// SiteURL is the fallback base URL for links in transactional emails, used
 	// when provisioning's project info carries no site URL of its own.
 	SiteURL string
+	// TenantDBSSLMode is the sslmode auth opens every tenant database with.
+	TenantDBSSLMode string
 }
 
 // RateLimit holds the credential-endpoint throttling knobs. Per-IP and
@@ -66,6 +69,28 @@ func Load() Config {
 		RateLimit:           loadRateLimit(),
 		AudiencePrefix:      envOr("AUTH_AUD_PREFIX", auth.DefaultAudiencePrefix),
 		SiteURL:             strings.TrimRight(os.Getenv("AUTH_SITE_URL"), "/"),
+		TenantDBSSLMode:     tenantDBSSLMode(),
+	}
+}
+
+func tenantDBSSLMode() string {
+	mode, err := parseTenantDBSSLMode(os.Getenv("TENANT_DB_SSLMODE"))
+	if err != nil {
+		log.Fatalf("TENANT_DB_SSLMODE: %v", err)
+	}
+	return mode
+}
+
+// parseTenantDBSSLMode defaults to require. prefer and allow are refused:
+// both fall back to plaintext without saying so.
+func parseTenantDBSSLMode(raw string) (string, error) {
+	switch raw {
+	case "":
+		return "require", nil
+	case "disable", "require", "verify-ca", "verify-full":
+		return raw, nil
+	default:
+		return "", fmt.Errorf("%q is not one of disable, require, verify-ca, verify-full", raw)
 	}
 }
 

@@ -58,6 +58,16 @@ type Manager struct {
 	httpClient      *http.Client
 	poolCreator     func(ctx context.Context, connStr string) (*pgxpool.Pool, error)
 	migrator        func(ctx context.Context, connStr string) error // optional, runs on first connect
+	sslMode         string
+}
+
+// defaultTenantSSLMode: a tenant database requires TLS (EXC-410), so a
+// connection that cannot encrypt must fail rather than fall back.
+const defaultTenantSSLMode = "require"
+
+// SetSSLMode sets the sslmode every tenant connection is opened with.
+func (m *Manager) SetSSLMode(mode string) {
+	m.sslMode = mode
 }
 
 // NewManager builds a pool manager. tokens is consulted at request time so a
@@ -71,6 +81,7 @@ func NewManager(provisioningURL string, tokens token.Source, ttl time.Duration) 
 		ttl:             ttl,
 		httpClient:      &http.Client{Timeout: 10 * time.Second},
 		poolCreator:     defaultPoolCreator,
+		sslMode:         defaultTenantSSLMode,
 	}
 }
 
@@ -103,8 +114,8 @@ func (m *Manager) createPool(ctx context.Context, orgSlug, projectID string) (*p
 	log.Printf("INFO: got credentials for %s: host=%s port=%s user=%s db=%s",
 		projectID, creds["host"], creds["port"], creds["username"], creds["database"])
 
-	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable search_path=auth",
-		creds["host"], creds["port"], creds["username"], creds["password"], creds["database"])
+	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s search_path=auth",
+		creds["host"], creds["port"], creds["username"], creds["password"], creds["database"], m.sslMode)
 
 	// If credentials haven't changed, just refresh the timestamp (keep existing pool)
 	m.mu.RLock()
