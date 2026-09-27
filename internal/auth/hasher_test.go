@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -34,13 +36,16 @@ func TestCheckVerifiesItsOwnHash(t *testing.T) {
 }
 
 // Hashes live in the tenant's own database, which its developer can write, so
-// a stored hash must not be able to name the cost of its own verification.
+// a stored hash must not be able to name a cost above the highest this
+// service has ever run at (see maxAcceptedMemory/Time/Threads) — that ceiling
+// stays fixed even as the configured profile changes, see
+// TestCheckStillVerifiesAHashEncodedAtTheOldCostlierProfile below.
 func TestCheckRefusesHashesCostlierThanOurs(t *testing.T) {
 	salt := "c2FsdHNhbHRzYWx0c2FsdA"
 	key := "a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2U"
 	cases := map[string]string{
 		"4 GiB of memory":     "m=4194304,t=2,p=1",
-		"more memory":         "m=19457,t=2,p=1",
+		"more memory":         "m=65537,t=2,p=1",
 		"more passes":         "m=19456,t=200,p=1",
 		"more lanes":          "m=19456,t=2,p=255",
 		"zero lanes (panics)": "m=19456,t=2,p=0",
@@ -55,6 +60,44 @@ func TestCheckRefusesHashesCostlierThanOurs(t *testing.T) {
 				t.Fatalf("ok=%v err=%v, want a plain refusal", ok, err)
 			}
 		})
+	}
+}
+
+// hashWithParams encodes password at an explicit argon2id cost, standing in
+// for a hash written before a parameter change (see EXC-459 below).
+func (h *Hasher) hashWithParams(ctx context.Context, password string, time, memory uint32, threads uint8) (string, error) {
+	salt := make([]byte, argon2SaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	release, err := h.acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	key := h.derive([]byte(password), salt, time, memory, threads, argon2KeyLen)
+	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		19, memory, time, threads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key),
+	), nil
+}
+
+// EXC-459 lowered the running profile from m=64 MiB,t=3,p=4 to OWASP's
+// m=19 MiB,t=2,p=1. There are no live tenants to migrate, but a hash already
+// encoded at the old, costlier profile must still verify: Argon2 stores its
+// own parameters, and downgrading the default must not strand it.
+func TestCheckStillVerifiesAHashEncodedAtTheOldCostlierProfile(t *testing.T) {
+	oldHash, err := NewHasher(1, time.Second).hashWithParams(context.Background(), "correct-horse", 3, 64*1024, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(oldHash, "$argon2id$v=19$m=19456,t=2,p=1$") {
+		t.Fatalf("test hash was not encoded at the old profile: %s", oldHash)
+	}
+	ok, err := NewHasher(1, time.Second).Check(context.Background(), "correct-horse", oldHash)
+	if err != nil || !ok {
+		t.Fatalf("old-profile hash: ok=%v err=%v", ok, err)
 	}
 }
 

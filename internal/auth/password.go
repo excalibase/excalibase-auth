@@ -32,6 +32,17 @@ const (
 
 	maxStoredKeyLen  = 64
 	maxStoredSaltLen = 64
+
+	// maxAcceptedMemory/Time/Threads is the highest argon2id cost this
+	// service has ever run at (its pre-EXC-459 profile: m=64 MiB, t=3, p=4).
+	// Check compares a stored hash against this fixed ceiling, not against
+	// the currently configured profile, so lowering the default cost never
+	// strands a hash written under a costlier one. A tenant-writable row
+	// naming a cost above this ceiling is still refused unread: that is the
+	// resource-exhaustion case this guard exists for.
+	maxAcceptedMemory  = 64 * 1024 // KiB
+	maxAcceptedTime    = 3
+	maxAcceptedThreads = 4
 )
 
 // ErrHashBusy means every hashing slot stayed taken for the whole wait.
@@ -154,7 +165,7 @@ func parseArgon2id(encoded string) (storedHash, bool) {
 }
 
 func withinOurCost(s storedHash) bool {
-	return s.memory >= 1 && s.memory <= argon2Memory &&
-		s.time >= 1 && s.time <= argon2Time &&
-		s.threads >= 1 && s.threads <= argon2Threads
+	return s.memory >= 1 && s.memory <= maxAcceptedMemory &&
+		s.time >= 1 && s.time <= maxAcceptedTime &&
+		s.threads >= 1 && s.threads <= maxAcceptedThreads
 }
