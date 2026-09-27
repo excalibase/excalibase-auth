@@ -40,7 +40,30 @@ const DefaultAudiencePrefix = "excalibase:"
 const (
 	TokenUseAccess  = "access"
 	TokenUseRefresh = "refresh"
+	// TokenUseKeyAdmin marks the short token the control plane signs to
+	// manage a project's api keys on a developer's behalf. It is accepted by
+	// the api-key routes only.
+	TokenUseKeyAdmin = "key_admin"
 )
+
+// keyAdminAudiencePrefix is deliberately not the engine's "excalibase:"
+// prefix, so the engine's audience check refuses a key-admin token.
+const keyAdminAudiencePrefix = "excalibase-auth:"
+
+// MaxKeyAdminLifetime bounds a key-admin token; the control plane signs one
+// per request.
+const MaxKeyAdminLifetime = 60 * time.Second
+
+// KeyAdminAudience is the only audience a key-admin token for projectID may carry.
+func KeyAdminAudience(projectID string) string {
+	return keyAdminAudiencePrefix + projectID
+}
+
+// IsAccess reports whether the claims are an access token: token_use
+// "access", or absent on tokens minted before the claim existed.
+func (c *Claims) IsAccess() bool {
+	return c.TokenUse == "" || c.TokenUse == TokenUseAccess
+}
 
 type Claims struct {
 	Sub         string `json:"sub"`
@@ -66,6 +89,9 @@ type Claims struct {
 	// EmailVerified mirrors auth.users.email_verified so resource servers can
 	// gate on it without a round trip to the auth service.
 	EmailVerified bool `json:"email_verified"`
+	// IssuedAt and ExpiresAt are read back by Verify (unix seconds).
+	IssuedAt  int64 `json:"-"`
+	ExpiresAt int64 `json:"-"`
 }
 
 type JWTService struct {
@@ -247,7 +273,11 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	keyID, _ := mapClaims["keyId"].(float64)
 	tokenUse, _ := mapClaims["token_use"].(string)
 	emailVerified, _ := mapClaims["email_verified"].(bool)
+	issuedAt, _ := mapClaims["iat"].(float64)
+	expiresAt, _ := mapClaims["exp"].(float64)
 	return &Claims{
+		IssuedAt:      int64(issuedAt),
+		ExpiresAt:     int64(expiresAt),
 		Audience:      audienceClaim(mapClaims["aud"]),
 		TokenUse:      tokenUse,
 		EmailVerified: emailVerified,

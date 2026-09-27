@@ -304,6 +304,10 @@ func (h *AuthHandler) Validate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{"valid": false, "error": err.Error()})
 		return
 	}
+	if !claims.IsAccess() {
+		writeJSON(w, map[string]interface{}{"valid": false, "error": "not an access token"})
+		return
+	}
 
 	// Bind the token to the project in the URL. A signature-valid token for
 	// project A must not validate against project B's endpoint — otherwise
