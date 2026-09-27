@@ -98,6 +98,7 @@ type verifyFixture struct {
 	srv    *httptest.Server
 	sender *stubSender
 	db     *pgxpool.Pool
+	hashes *switchableHasher
 }
 
 // setupVerifyFixture boots Postgres plus a provisioning stub whose /info
@@ -156,7 +157,8 @@ func setupVerifyFixture(t *testing.T, requireVerification bool) (*verifyFixture,
 	// The test client reaches the server over loopback, standing in for the
 	// ingress whose X-Forwarded-For the per-IP throttles believe.
 	_, loopback, _ := net.ParseCIDR("127.0.0.1/32")
-	h := NewAuthHandler(poolMgr, jwtSvc, 604800).WithTrustedProxies([]*net.IPNet{loopback})
+	hashes := &switchableHasher{real: auth.NewHasher(2, time.Second)}
+	h := NewAuthHandler(poolMgr, jwtSvc, 604800).WithTrustedProxies([]*net.IPNet{loopback}).WithHasher(hashes)
 	h.SetEmail(sender, "https://fallback.test")
 
 	r := chi.NewRouter()
@@ -174,7 +176,7 @@ func setupVerifyFixture(t *testing.T, requireVerification bool) (*verifyFixture,
 		provisioning.Close()
 		pgContainer.Terminate(ctx)
 	}
-	return &verifyFixture{srv: srv, sender: sender, db: db}, cleanup
+	return &verifyFixture{srv: srv, sender: sender, db: db, hashes: hashes}, cleanup
 }
 
 func (f *verifyFixture) register(t *testing.T, userEmail string) *http.Response {

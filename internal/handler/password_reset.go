@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/email"
 	"github.com/excalibase/auth/internal/ratelimit"
 	"github.com/excalibase/auth/internal/token"
@@ -153,13 +152,24 @@ func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Peeked, not consumed: an unknown link costs no hash, and a hash refused
+	// for capacity leaves the link usable.
+	if _, err := passwordResetTokens.peek(r.Context(), db, req.Token); err != nil {
+		httpError(w, errTokenNotRedeemable.Error(), 400)
+		return
+	}
+	hash, err := h.hasher.Hash(r.Context(), req.NewPassword)
+	if err != nil {
+		writeHashFailure(w, err)
+		return
+	}
 	userID, err := passwordResetTokens.redeem(r.Context(), db, req.Token)
 	if err != nil {
 		httpError(w, errTokenNotRedeemable.Error(), 400)
 		return
 	}
 
-	if err := applyNewPassword(r.Context(), db, userID, req.NewPassword); err != nil {
+	if err := applyNewPassword(r.Context(), db, userID, hash); err != nil {
 		httpError(w, "failed to reset password", 500)
 		return
 	}
@@ -168,18 +178,14 @@ func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"message": "Password has been reset"})
 }
 
-// applyNewPassword stores the new credential and revokes every refresh token
-// the account holds.
-func applyNewPassword(ctx context.Context, db *pgxpool.Pool, userID int64, password string) error {
-	hash, err := auth.HashPassword(password)
-	if err != nil {
-		return err
-	}
+// applyNewPassword stores the new credential hash and revokes every refresh
+// token the account holds.
+func applyNewPassword(ctx context.Context, db *pgxpool.Pool, userID int64, hash string) error {
 	if _, err := db.Exec(ctx,
 		"UPDATE auth.users SET password = $1, updated_at = NOW() WHERE id = $2", hash, userID); err != nil {
 		return err
 	}
-	_, err = db.Exec(ctx,
+	_, err := db.Exec(ctx,
 		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false", userID)
 	return err
 }

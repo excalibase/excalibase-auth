@@ -94,6 +94,11 @@ rateLimit:
   # load-balancer pod CIDR, never to 0.0.0.0/0.
   trustedProxyCIDRs: ""
 
+# Password hashes (argon2id, 19 MiB each) allowed in flight at once; more wait
+# up to a second, then get 503. Auth refuses to start if these need more than
+# half of resources.limits.memory, so raise both together.
+passwordHashConcurrency: 2
+
 # ---------------------------------------------------------------------------
 # Resources
 # ---------------------------------------------------------------------------

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"runtime/debug"
 	"time"
 
 	"github.com/excalibase/auth/internal/auth"
@@ -53,8 +55,13 @@ func main() {
 	})
 
 	// Handler
+	hasher, err := configureHashing(cfg.PasswordHashConcurrency, config.CgroupMemoryMax)
+	if err != nil {
+		log.Fatalf("password hashing: %v", err)
+	}
 	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.RefreshExpiration).
-		WithTrustedProxies(cfg.RateLimit.TrustedProxyCIDRs)
+		WithTrustedProxies(cfg.RateLimit.TrustedProxyCIDRs).
+		WithHasher(hasher)
 	if cfg.RateLimit.Enabled {
 		authHandler.WithRateLimits(custommw.NewRateLimits(custommw.RateLimitConfigFrom(cfg.RateLimit)))
 	} else {
@@ -137,4 +144,21 @@ func fetchSigningKey(provisioningURL string, tokens token.Source) (string, error
 		return "", fmt.Errorf("signing key not found in vault response")
 	}
 	return key, nil
+}
+
+// configureHashing sizes the password hasher against the container's memory
+// limit and, unless GOMEMLIMIT is set, keeps Go's heap below that limit so the
+// collector runs before the kernel OOM-kills the pod.
+func configureHashing(slots int, memoryMaxPath string) (*auth.Hasher, error) {
+	limit, err := config.MemoryLimitBytes(memoryMaxPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := auth.CheckHashBudget(slots, limit); err != nil {
+		return nil, fmt.Errorf("PASSWORD_HASH_CONCURRENCY: %w", err)
+	}
+	if limit > 0 && os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(limit * 9 / 10)
+	}
+	return auth.NewHasher(slots, auth.DefaultHashWait), nil
 }

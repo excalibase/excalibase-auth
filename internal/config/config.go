@@ -30,6 +30,8 @@ type Config struct {
 	SiteURL string
 	// TenantDBSSLMode is the sslmode auth opens every tenant database with.
 	TenantDBSSLMode string
+	// PasswordHashConcurrency is how many argon2id hashes may run at once.
+	PasswordHashConcurrency int
 }
 
 // RateLimit holds the credential-endpoint throttling knobs. Per-IP and
@@ -70,6 +72,8 @@ func Load() Config {
 		AudiencePrefix:      envOr("AUTH_AUD_PREFIX", auth.DefaultAudiencePrefix),
 		SiteURL:             strings.TrimRight(os.Getenv("AUTH_SITE_URL"), "/"),
 		TenantDBSSLMode:     tenantDBSSLMode(),
+
+		PasswordHashConcurrency: hashConcurrency(),
 	}
 }
 
