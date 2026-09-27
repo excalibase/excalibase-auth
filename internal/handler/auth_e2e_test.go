@@ -84,6 +84,8 @@ func setupIntegrationFixture(t *testing.T, opts ...handlerOption) (*integrationF
 
 	// 4. Pool manager with auto-migration
 	poolMgr := pool.NewManager(vaultServer.URL, token.Literal("test-pat"), 1*time.Hour)
+	// The test container serves no TLS; production tenants require it.
+	poolMgr.SetSSLMode("disable")
 	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error {
 		return migrate.Run(connStr)
 	})

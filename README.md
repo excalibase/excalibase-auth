@@ -177,6 +177,7 @@ All configuration is via environment variables:
 | `RATE_LIMIT_LOGIN_FAILURES` | `5` | Failed logins per identity before the identity is locked |
 | `RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window over which login failures are counted |
 | `TRUSTED_PROXY_CIDRS` | — (empty) | Comma-separated CIDRs allowed to set `X-Forwarded-For` |
+| `TENANT_DB_SSLMODE` | `require` | sslmode for every tenant database connection: `disable`, `require`, `verify-ca` or `verify-full`; `prefer`/`allow` and anything else fail startup |
 
 ### Rate Limiting
 

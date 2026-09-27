@@ -47,6 +47,7 @@ func main() {
 
 	// Pool manager (multi-tenant connection cache)
 	poolMgr := pool.NewManager(cfg.ProvisioningURL, tokens, 1*time.Hour)
+	poolMgr.SetSSLMode(cfg.TenantDBSSLMode)
 	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error {
 		return migrate.Run(connStr)
 	})

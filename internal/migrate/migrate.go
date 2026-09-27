@@ -37,20 +37,10 @@ func Run(connStr string) error {
 // Must run before golang-migrate because the pgx5 driver checks CURRENT_SCHEMA()
 // which returns NULL if the search_path schema doesn't exist.
 func ensureAuthSchema(connStr string) error {
-	params := parseKV(connStr)
-	host := params["host"]
-	port := params["port"]
-	user := params["username"]
-	if user == "" {
-		user = params["user"]
+	pgURL, err := schemaBootstrapURL(connStr)
+	if err != nil {
+		return err
 	}
-	password := params["password"]
-	dbname := params["dbname"]
-	if dbname == "" {
-		dbname = params["database"]
-	}
-
-	pgURL := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, dbname)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -64,7 +54,6 @@ func ensureAuthSchema(connStr string) error {
 	_, err = conn.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS auth")
 	return err
 }
-
 
 // Down rolls back all migrations.
 func Down(connStr string) error {
@@ -113,26 +102,53 @@ func connStrToURL(connStr string) (string, error) {
 		return connStr, nil
 	}
 
-	// Parse key=value format: host=x port=y user=u password=p dbname=d ...
-	params := parseKV(connStr)
-	host := params["host"]
-	port := params["port"]
-	user := params["username"]
-	if user == "" {
-		user = params["user"]
+	target, err := parseTarget(connStr)
+	if err != nil {
+		return "", err
 	}
-	password := params["password"]
-	dbname := params["dbname"]
-	if dbname == "" {
-		dbname = params["database"]
-	}
-	sslmode := params["sslmode"]
-	if sslmode == "" {
-		sslmode = "disable"
-	}
-
 	// Use auth schema for the migrations tracking table so auth_admin doesn't need public schema access
-	return fmt.Sprintf("pgx5://%s:%s@%s:%s/%s?sslmode=%s&search_path=auth&x-migrations-table=auth.schema_migrations", user, password, host, port, dbname, sslmode), nil
+	return fmt.Sprintf("pgx5://%s:%s@%s:%s/%s?sslmode=%s&search_path=auth&x-migrations-table=auth.schema_migrations",
+		target.user, target.password, target.host, target.port, target.dbname, target.sslmode), nil
+}
+
+// schemaBootstrapURL is the plain postgres URL ensureAuthSchema dials, with
+// the same sslmode as the connection it was derived from.
+func schemaBootstrapURL(connStr string) (string, error) {
+	target, err := parseTarget(connStr)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		target.user, target.password, target.host, target.port, target.dbname, target.sslmode), nil
+}
+
+type target struct {
+	host, port, user, password, dbname, sslmode string
+}
+
+// parseTarget reads a key=value connection string. One that states no
+// sslmode is refused: assuming plaintext is how a tenant login ends up
+// unencrypted on a database that requires TLS.
+func parseTarget(connStr string) (target, error) {
+	params := parseKV(connStr)
+	t := target{
+		host:     params["host"],
+		port:     params["port"],
+		user:     params["username"],
+		password: params["password"],
+		dbname:   params["dbname"],
+		sslmode:  params["sslmode"],
+	}
+	if t.user == "" {
+		t.user = params["user"]
+	}
+	if t.dbname == "" {
+		t.dbname = params["database"]
+	}
+	if t.sslmode == "" {
+		return target{}, fmt.Errorf("connection string states no sslmode")
+	}
+	return t, nil
 }
 
 func parseKV(s string) map[string]string {
