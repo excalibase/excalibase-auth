@@ -31,7 +31,7 @@ var emailVerificationTokens = singleUseTokenStore{
 	         VALUES ($1, $2, $3, NOW())`,
 	selectByHash: `SELECT id, user_id, token_hash FROM auth.email_verification_tokens
 	               WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()`,
-	consume:    `UPDATE auth.email_verification_tokens SET consumed_at = NOW() WHERE id = $1`,
+	consume:    `UPDATE auth.email_verification_tokens SET consumed_at = NOW() WHERE id = $1 AND consumed_at IS NULL`,
 	invalidate: `UPDATE auth.email_verification_tokens SET consumed_at = NOW() WHERE user_id = $1 AND consumed_at IS NULL`,
 }
 
@@ -40,7 +40,7 @@ var passwordResetTokens = singleUseTokenStore{
 	         VALUES ($1, $2, $3, NOW())`,
 	selectByHash: `SELECT id, user_id, token_hash FROM auth.password_reset_tokens
 	               WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()`,
-	consume:    `UPDATE auth.password_reset_tokens SET consumed_at = NOW() WHERE id = $1`,
+	consume:    `UPDATE auth.password_reset_tokens SET consumed_at = NOW() WHERE id = $1 AND consumed_at IS NULL`,
 	invalidate: `UPDATE auth.password_reset_tokens SET consumed_at = NOW() WHERE user_id = $1 AND consumed_at IS NULL`,
 }
 
@@ -70,26 +70,46 @@ func (s singleUseTokenStore) invalidateAll(ctx context.Context, db *pgxpool.Pool
 
 // redeem validates a plaintext token and marks it consumed, returning the user
 // it belongs to. Returns errTokenNotRedeemable for unknown, expired, and
-// already-used tokens alike.
+// already-used tokens alike; of concurrent redeems only one consumes it.
 func (s singleUseTokenStore) redeem(ctx context.Context, db *pgxpool.Pool, plaintext string) (int64, error) {
+	rowID, userID, err := s.lookup(ctx, db, plaintext)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.claim(ctx, db, rowID); err != nil {
+		return 0, err
+	}
+	return userID, nil
+}
+
+// claim consumes a looked-up token row; it fails if another request already did.
+func (s singleUseTokenStore) claim(ctx context.Context, db *pgxpool.Pool, rowID int64) error {
+	tag, err := db.Exec(ctx, s.consume, rowID)
+	if err != nil || tag.RowsAffected() != 1 {
+		return errTokenNotRedeemable
+	}
+	return nil
+}
+
+// peek reports the user a live token belongs to without consuming it.
+func (s singleUseTokenStore) peek(ctx context.Context, db *pgxpool.Pool, plaintext string) (int64, error) {
+	_, userID, err := s.lookup(ctx, db, plaintext)
+	return userID, err
+}
+
+func (s singleUseTokenStore) lookup(ctx context.Context, db *pgxpool.Pool, plaintext string) (rowID, userID int64, err error) {
 	if plaintext == "" {
-		return 0, errTokenNotRedeemable
+		return 0, 0, errTokenNotRedeemable
 	}
 	hash := token.Hash(plaintext)
-
-	var rowID, userID int64
 	var storedHash string
 	if err := db.QueryRow(ctx, s.selectByHash, hash).Scan(&rowID, &userID, &storedHash); err != nil {
-		return 0, errTokenNotRedeemable
+		return 0, 0, errTokenNotRedeemable
 	}
 	// The row was found by an equality match the database performed; repeat it
 	// in constant time so the decisive comparison carries no timing signal.
 	if !token.Equal(storedHash, hash) {
-		return 0, errTokenNotRedeemable
+		return 0, 0, errTokenNotRedeemable
 	}
-
-	if _, err := db.Exec(ctx, s.consume, rowID); err != nil {
-		return 0, errTokenNotRedeemable
-	}
-	return userID, nil
+	return rowID, userID, nil
 }

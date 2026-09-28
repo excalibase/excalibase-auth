@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,7 +36,15 @@ var (
 	errMissingAPIKey        = errors.New("api_key is required")
 	errInvalidAPIKey        = errors.New("invalid or revoked api key")
 	errUnsupportedGrant     = errors.New("unsupported grant_type")
+	errHashingBusy          = errors.New("server busy, retry shortly")
 )
+
+// passwordHasher bounds how many argon2id hashes run at once; a saturated
+// hasher answers auth.ErrHashBusy rather than risking the pod's memory.
+type passwordHasher interface {
+	Hash(ctx context.Context, password string) (string, error)
+	Check(ctx context.Context, password, encoded string) (bool, error)
+}
 
 // verificationSentMessage is the single answer /resend-verification gives for
 // every address, whether or not an account exists behind it.
@@ -53,6 +62,7 @@ type AuthHandler struct {
 	siteURL        string // fallback base for email links (AUTH_SITE_URL)
 	resendThrottle *throttle.Throttle
 	forgotThrottle *throttle.Throttle
+	hasher         passwordHasher
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
@@ -65,7 +75,14 @@ func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshE
 		emailSender:    email.NoopSender{},
 		resendThrottle: throttle.New(resendVerificationLimit, resendVerificationWindow),
 		forgotThrottle: throttle.New(forgotPasswordLimit, forgotPasswordWindow),
+		hasher:         auth.NewHasher(auth.DefaultHashSlots, auth.DefaultHashWait),
 	}
+}
+
+// WithHasher replaces the bounded password hasher.
+func (h *AuthHandler) WithHasher(hasher passwordHasher) *AuthHandler {
+	h.hasher = hasher
+	return h
 }
 
 // SetEmail wires the transactional mailer and the fallback site URL used to
@@ -186,10 +203,9 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hash password
-	hash, err := auth.HashPassword(req.Password)
+	hash, err := h.hasher.Hash(r.Context(), req.Password)
 	if err != nil {
-		httpError(w, "internal error", 500)
+		writeHashFailure(w, err)
 		return
 	}
 
@@ -248,7 +264,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		metrics.LoginFailures.Inc()
 		log.Printf("auth.login.fail tenant=%s org=%s email=%s code=%d err=%v", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email), code, err)
-		httpError(w, err.Error(), code)
+		writeError(w, err, code)
 		return
 	}
 	metrics.Logins.Inc()
@@ -274,7 +290,11 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 	if !user.Enabled {
 		return nil, 403, errAccountDisabled
 	}
-	if !auth.CheckPassword(password, user.Password) {
+	matched, err := h.hasher.Check(r.Context(), password, user.Password)
+	if err != nil {
+		return nil, 503, errHashingBusy
+	}
+	if !matched {
 		return nil, 401, errInvalidCredentials
 	}
 	// EXC-11: checked only after the password, so this never tells an
@@ -606,10 +626,28 @@ func (h *AuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		httpError(w, err.Error(), code)
+		writeError(w, err, code)
 		return
 	}
 	writeJSON(w, resp)
+}
+
+// writeError is httpError that also tells a busy caller when to come back.
+func writeError(w http.ResponseWriter, err error, code int) {
+	if errors.Is(err, errHashingBusy) {
+		w.Header().Set("Retry-After", "1")
+	}
+	httpError(w, err.Error(), code)
+}
+
+// writeHashFailure answers a hash that could not run: saturation and a
+// cancelled request are capacity, anything else is ours.
+func writeHashFailure(w http.ResponseWriter, err error) {
+	if errors.Is(err, auth.ErrHashBusy) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		writeError(w, errHashingBusy, 503)
+		return
+	}
+	httpError(w, "internal error", 500)
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
