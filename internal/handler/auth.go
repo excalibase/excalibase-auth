@@ -27,6 +27,7 @@ import (
 // surface identical messages.
 var (
 	errProjectDBUnavailable = errors.New("failed to connect to project database")
+	errProjectHasNoDatabase = errors.New("project has no database")
 	errInvalidCredentials   = errors.New("invalid email or password")
 	errAccountDisabled      = errors.New("account is disabled")
 	errInvalidRefreshToken  = errors.New("invalid refresh token")
@@ -191,7 +192,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
-		httpError(w, "failed to connect to project database", 503)
+		writePoolFailure(w, err)
 		return
 	}
 
@@ -276,7 +277,8 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, password string) (*domain.AuthResponse, int, error) {
 	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
-		return nil, 503, errProjectDBUnavailable
+		status, perr := poolFailure(err)
+		return nil, status, perr
 	}
 
 	var user domain.User
@@ -367,7 +369,8 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 	ctx := r.Context()
 	pool, err := h.poolMgr.GetPool(ctx, chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
-		return nil, 503, errProjectDBUnavailable
+		status, perr := poolFailure(err)
+		return nil, status, perr
 	}
 	hash := token.Hash(refreshToken)
 
@@ -426,7 +429,8 @@ func (h *AuthHandler) exchangeAPIKey(r *http.Request, projectID, apiKey string) 
 	}
 	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
-		return nil, 503, errProjectDBUnavailable
+		status, perr := poolFailure(err)
+		return nil, status, perr
 	}
 
 	hash := service.HashAPIKey(apiKey)
@@ -471,7 +475,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
-		httpError(w, "failed to connect to project database", 503)
+		writePoolFailure(w, err)
 		return
 	}
 
@@ -671,4 +675,19 @@ var logSanitizer = strings.NewReplacer("\r", "_", "\n", "_", "\t", "_")
 
 func safeLog(s string) string {
 	return logSanitizer.Replace(s)
+}
+
+// poolFailure is the status and message for a project database that could not
+// be reached. A project created without a database (EXC-426) is its state,
+// 409, and not the outage every other failure is.
+func poolFailure(err error) (int, error) {
+	if errors.Is(err, pool.ErrNoDatabase) {
+		return http.StatusConflict, errProjectHasNoDatabase
+	}
+	return http.StatusServiceUnavailable, errProjectDBUnavailable
+}
+
+func writePoolFailure(w http.ResponseWriter, err error) {
+	status, message := poolFailure(err)
+	httpError(w, message.Error(), status)
 }
