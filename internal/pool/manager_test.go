@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -172,5 +173,22 @@ func TestGetProjectInfo_UsesCurrentToken(t *testing.T) {
 
 	if got != "Bearer info-pat" {
 		t.Errorf("authorization: got %q, want %q", got, "Bearer info-pat")
+	}
+}
+
+// EXC-426: provisioning answers 409 for a project created without a database.
+// The manager says so, so the handlers can pass it on instead of reporting an
+// outage.
+func TestFetchCredentials_ProjectWithoutADatabase(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"project has no database"}`))
+	}))
+	defer server.Close()
+
+	mgr := NewManager(server.URL, token.Literal("test-pat"), time.Hour)
+	_, err := mgr.GetPool(context.Background(), "my-org", "apps-only")
+	if !errors.Is(err, ErrNoDatabase) {
+		t.Fatalf("got %v, want ErrNoDatabase", err)
 	}
 }

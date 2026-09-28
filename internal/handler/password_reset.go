@@ -148,7 +148,7 @@ func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 
 	db, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
-		httpError(w, errProjectDBUnavailable.Error(), 503)
+		writePoolFailure(w, err)
 		return
 	}
 

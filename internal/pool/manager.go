@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -156,6 +157,11 @@ func (m *Manager) createPool(ctx context.Context, orgSlug, projectID string) (*p
 	return pool, nil
 }
 
+// ErrNoDatabase is returned for a project created without a database
+// (EXC-426). It is not an outage: there is no database to connect to, and
+// the handlers answer 409 rather than 503.
+var ErrNoDatabase = errors.New("project has no database")
+
 // refreshUnchanged keeps the existing pool when the vault record is identical.
 func (m *Manager) refreshUnchanged(projectID, fingerprint string) (*pgxpool.Pool, bool) {
 	m.mu.Lock()
@@ -192,6 +198,10 @@ func (m *Manager) fetchCredentials(ctx context.Context, orgSlug, projectID strin
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusConflict {
+		// Provisioning's answer for a project created without a database.
+		return credentialRecord{}, fmt.Errorf("%w: %s", ErrNoDatabase, projectID)
+	}
 	if resp.StatusCode != 200 {
 		return credentialRecord{}, fmt.Errorf("vault returned %d", resp.StatusCode)
 	}
