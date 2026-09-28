@@ -34,7 +34,7 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 
 **Key packages**:
 - `internal/pool` — Multi-tenant connection pool manager. Fetches credentials from `{PROVISIONING_URL}/vault/secrets/projects/{id}/credentials/auth_admin`. Has injectable `poolCreator` and `migrator` functions.
-- `internal/migrate` — golang-migrate runner with embedded SQL files (`internal/migrate/migrations/`). Provides `Run(connStr)` and `Down(connStr)`.
+- `internal/migrate` — golang-migrate runner with embedded SQL files (`internal/migrate/migrations/`). Provides `Run(ctx, pool)` and `Down(ctx, pool)`, run over the tenant's own pool so migrations authenticate like it (client certificate included).
 - `internal/auth` — JWT signing/verification using ECDSA (ES256). Private key fetched from vault at startup.
 - `internal/handler` — HTTP handlers for register, login, validate, refresh, logout. All routes scoped under `/auth/{projectId}/`.
 - `internal/ratelimit` — keyed token-bucket limiter (in-memory, per replica) plus client-IP resolution behind trusted proxies and hashed identity keys.

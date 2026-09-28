@@ -14,9 +14,9 @@ import (
 )
 
 type poolEntry struct {
-	pool      *pgxpool.Pool
-	createdAt time.Time
-	connStr   string // to detect credential rotation
+	pool        *pgxpool.Pool
+	createdAt   time.Time
+	fingerprint string // detects rotated credentials and renewed certificates
 }
 
 // ProjectInfo mirrors the response of provisioning's
@@ -56,16 +56,21 @@ type Manager struct {
 	mu              sync.RWMutex
 	ttl             time.Duration
 	httpClient      *http.Client
-	poolCreator     func(ctx context.Context, connStr string) (*pgxpool.Pool, error)
-	migrator        func(ctx context.Context, connStr string) error // optional, runs on first connect
+	poolCreator     func(ctx context.Context, config *pgxpool.Config) (*pgxpool.Pool, error)
+	migrator        func(ctx context.Context, pool *pgxpool.Pool) error // optional, runs on first connect
 	sslMode         string
 }
 
-// defaultTenantSSLMode: a tenant database requires TLS (EXC-410), so a
-// connection that cannot encrypt must fail rather than fall back.
-const defaultTenantSSLMode = "require"
+// defaultTenantSSLMode: tenant logins are client-certificate only (EXC-410),
+// and a certificate is only worth presenting to a verified server.
+const defaultTenantSSLMode = "verify-full"
 
-// SetSSLMode sets the sslmode every tenant connection is opened with.
+// maxCredentialAge bounds how long a vault record is trusted, so a renewed
+// certificate or CA reaches new connections within the hour, restart-free.
+const maxCredentialAge = time.Hour
+
+// SetSSLMode sets the sslmode every tenant connection is opened with:
+// disable (password, docker AIO only) or any TLS mode (verify-full + client cert).
 func (m *Manager) SetSSLMode(mode string) {
 	m.sslMode = mode
 }
@@ -73,6 +78,9 @@ func (m *Manager) SetSSLMode(mode string) {
 // NewManager builds a pool manager. tokens is consulted at request time so a
 // provisioning token rotated on disk takes effect without a restart.
 func NewManager(provisioningURL string, tokens token.Source, ttl time.Duration) *Manager {
+	if ttl <= 0 || ttl > maxCredentialAge {
+		ttl = maxCredentialAge
+	}
 	return &Manager{
 		provisioningURL: provisioningURL,
 		tokens:          tokens,
@@ -85,7 +93,7 @@ func NewManager(provisioningURL string, tokens token.Source, ttl time.Duration) 
 	}
 }
 
-func (m *Manager) SetMigrator(fn func(ctx context.Context, connStr string) error) {
+func (m *Manager) SetMigrator(fn func(ctx context.Context, pool *pgxpool.Pool) error) {
 	m.migrator = fn
 }
 
@@ -95,9 +103,10 @@ func (m *Manager) SetMigrator(fn func(ctx context.Context, connStr string) error
 func (m *Manager) GetPool(ctx context.Context, orgSlug, projectID string) (*pgxpool.Pool, error) {
 	m.mu.RLock()
 	entry, ok := m.pools[projectID]
+	fresh := ok && time.Since(entry.createdAt) < m.ttl
 	m.mu.RUnlock()
 
-	if ok && time.Since(entry.createdAt) < m.ttl {
+	if fresh {
 		return entry.pool, nil
 	}
 
@@ -105,53 +114,61 @@ func (m *Manager) GetPool(ctx context.Context, orgSlug, projectID string) (*pgxp
 }
 
 func (m *Manager) createPool(ctx context.Context, orgSlug, projectID string) (*pgxpool.Pool, error) {
-	creds, err := m.fetchCredentials(ctx, orgSlug, projectID)
+	record, err := m.fetchCredentials(ctx, orgSlug, projectID)
 	if err != nil {
 		log.Printf("ERROR: fetch credentials for %s: %v", projectID, err)
 		return nil, fmt.Errorf("fetch credentials: %w", err)
 	}
 
 	log.Printf("INFO: got credentials for %s: host=%s port=%s user=%s db=%s",
-		projectID, creds["host"], creds["port"], creds["username"], creds["database"])
+		projectID, record.Host, record.Port, record.Username, record.Database)
 
-	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s search_path=auth",
-		creds["host"], creds["port"], creds["username"], creds["password"], creds["database"], m.sslMode)
-
-	// If credentials haven't changed, just refresh the timestamp (keep existing pool)
-	m.mu.RLock()
-	existing, exists := m.pools[projectID]
-	m.mu.RUnlock()
-	if exists && existing.connStr == connStr && existing.pool != nil {
-		m.mu.Lock()
-		existing.createdAt = time.Now()
-		m.mu.Unlock()
-		return existing.pool, nil
+	fingerprint := record.fingerprint()
+	if pool, ok := m.refreshUnchanged(projectID, fingerprint); ok {
+		return pool, nil
 	}
 
-	pool, err := m.poolCreator(ctx, connStr)
+	config, err := tenantPoolConfig(record, m.sslMode)
+	if err != nil {
+		log.Printf("ERROR: tenant connection for %s: %v", projectID, err)
+		return nil, fmt.Errorf("tenant connection: %w", err)
+	}
+	pool, err := m.poolCreator(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
 	}
 
-	// Run migrations on first connect
 	if pool != nil && m.migrator != nil {
-		if err := m.migrator(ctx, connStr); err != nil {
-			fmt.Printf("WARN: migration failed for %s: %v\n", projectID, err)
+		if err := m.migrator(ctx, pool); err != nil {
+			log.Printf("WARN: migration failed for %s: %v", projectID, err)
 		}
 	}
 
 	m.mu.Lock()
-	// Close old pool if credentials changed
-	if old, ok := m.pools[projectID]; ok && old.pool != nil {
-		old.pool.Close()
-	}
-	m.pools[projectID] = &poolEntry{pool: pool, createdAt: time.Now(), connStr: connStr}
+	old, replaced := m.pools[projectID]
+	m.pools[projectID] = &poolEntry{pool: pool, createdAt: time.Now(), fingerprint: fingerprint}
 	m.mu.Unlock()
 
+	// Close waits for borrowed connections, so it must not hold up the caller.
+	if replaced && old.pool != nil && old.pool != pool {
+		go old.pool.Close()
+	}
 	return pool, nil
 }
 
-func (m *Manager) fetchCredentials(ctx context.Context, orgSlug, projectID string) (map[string]string, error) {
+// refreshUnchanged keeps the existing pool when the vault record is identical.
+func (m *Manager) refreshUnchanged(projectID, fingerprint string) (*pgxpool.Pool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	existing, ok := m.pools[projectID]
+	if !ok || existing.pool == nil || existing.fingerprint != fingerprint {
+		return nil, false
+	}
+	existing.createdAt = time.Now()
+	return existing.pool, true
+}
+
+func (m *Manager) fetchCredentials(ctx context.Context, orgSlug, projectID string) (credentialRecord, error) {
 	// Vault path: projects/{projectID}/credentials/auth_admin
 	// orgSlug param kept for backward-compat with callers; vault paths are
 	// project-scoped only (provisioning refactor 2026-05). Drop the org
@@ -161,29 +178,29 @@ func (m *Manager) fetchCredentials(ctx context.Context, orgSlug, projectID strin
 	log.Printf("INFO: fetching credentials from %s", url)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, err
+		return credentialRecord{}, err
 	}
 	tok, err := m.tokens.Get()
 	if err != nil {
-		return nil, fmt.Errorf("provisioning token: %w", err)
+		return credentialRecord{}, fmt.Errorf("provisioning token: %w", err)
 	}
 	req.Header.Set(authorizationHeader, bearerPrefix+tok)
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("vault request: %w", err)
+		return credentialRecord{}, fmt.Errorf("vault request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("vault returned %d", resp.StatusCode)
+		return credentialRecord{}, fmt.Errorf("vault returned %d", resp.StatusCode)
 	}
 
-	var creds map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&creds); err != nil {
-		return nil, fmt.Errorf("decode credentials: %w", err)
+	var record credentialRecord
+	if err := json.NewDecoder(resp.Body).Decode(&record); err != nil {
+		return credentialRecord{}, fmt.Errorf("decode credentials: %w", err)
 	}
-	return creds, nil
+	return record, nil
 }
 
 // GetProjectInfo returns display-name metadata for a project (org name, project
@@ -229,11 +246,7 @@ func (m *Manager) GetProjectInfo(ctx context.Context, projectID string) (Project
 	return info, nil
 }
 
-func defaultPoolCreator(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
-	config, err := pgxpool.ParseConfig(connStr)
-	if err != nil {
-		return nil, err
-	}
+func defaultPoolCreator(ctx context.Context, config *pgxpool.Config) (*pgxpool.Pool, error) {
 	config.MinConns = 2
 	config.MaxConns = 10
 	config.MaxConnLifetime = 30 * time.Minute

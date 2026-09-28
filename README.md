@@ -177,7 +177,7 @@ All configuration is via environment variables:
 | `RATE_LIMIT_LOGIN_FAILURES` | `5` | Failed logins per identity before the identity is locked |
 | `RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window over which login failures are counted |
 | `TRUSTED_PROXY_CIDRS` | — (empty) | Comma-separated CIDRs allowed to set `X-Forwarded-For` |
-| `TENANT_DB_SSLMODE` | `require` | sslmode for every tenant database connection: `disable`, `require`, `verify-ca` or `verify-full`; `prefer`/`allow` and anything else fail startup |
+| `TENANT_DB_SSLMODE` | `verify-full` | `disable` (docker AIO only: password login, no TLS) or a TLS mode. `require`, `verify-ca` and `verify-full` all mean verify-full with the client certificate from the vault record (`sslcert`/`sslkey`/`sslrootcert`); a record without them is refused. `prefer`/`allow` and anything else fail startup |
 
 ### Rate Limiting
 
@@ -227,10 +227,10 @@ excalibase-auth/
 
 1. Request arrives at `/auth/{orgSlug}/{projectName}/register`
 2. `pool.Manager` checks cache for an existing pool for this project
-3. If missing or expired (1h TTL), fetches credentials from provisioning vault:
+3. If missing or expired (1h TTL, the ceiling), fetches credentials from provisioning vault:
    `GET {PROVISIONING_URL}/vault/secrets/projects/{projectId}/credentials/auth_admin`
-4. Creates a new `pgxpool.Pool` and runs golang-migrate migrations
-5. If credentials rotated, old pool is gracefully closed and replaced
+4. Creates a new `pgxpool.Pool` (verify-full + the record's client certificate unless `TENANT_DB_SSLMODE=disable`) and runs golang-migrate migrations over that pool
+5. If the record changed (rotated password, renewed certificate or CA), the old pool is closed and replaced
 6. Handler executes queries against the per-tenant `auth` schema
 
 ### Database Schema

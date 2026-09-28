@@ -52,6 +52,21 @@ func setupTestDB(t *testing.T) (string, func()) {
 	return connStr, cleanup
 }
 
+// poolFor opens the kind of pool the manager hands the migrator.
+func poolFor(t *testing.T, connStr string) *pgxpool.Pool {
+	t.Helper()
+	config, err := pgxpool.ParseConfig(connStr + " search_path=auth")
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
 func tableExists(t *testing.T, connStr, schema, table string) bool {
 	t.Helper()
 	ctx := context.Background()
@@ -76,7 +91,7 @@ func TestMigrate_Up(t *testing.T) {
 	connStr, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	err := Run(connStr)
+	err := Run(context.Background(), poolFor(t, connStr))
 	if err != nil {
 		t.Fatalf("Run() returned error: %v", err)
 	}
@@ -96,10 +111,10 @@ func TestMigrate_Up_Idempotent(t *testing.T) {
 	connStr, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	if err := Run(connStr); err != nil {
+	if err := Run(context.Background(), poolFor(t, connStr)); err != nil {
 		t.Fatalf("first Run() error: %v", err)
 	}
-	if err := Run(connStr); err != nil {
+	if err := Run(context.Background(), poolFor(t, connStr)); err != nil {
 		t.Fatalf("second Run() should be idempotent, got error: %v", err)
 	}
 
@@ -112,11 +127,11 @@ func TestMigrate_Down(t *testing.T) {
 	connStr, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	if err := Run(connStr); err != nil {
+	if err := Run(context.Background(), poolFor(t, connStr)); err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	if err := Down(connStr); err != nil {
+	if err := Down(context.Background(), poolFor(t, connStr)); err != nil {
 		t.Fatalf("Down() returned error: %v", err)
 	}
 
@@ -135,13 +150,13 @@ func TestMigrate_UpDown_Roundtrip(t *testing.T) {
 	connStr, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	if err := Run(connStr); err != nil {
+	if err := Run(context.Background(), poolFor(t, connStr)); err != nil {
 		t.Fatalf("first Up error: %v", err)
 	}
-	if err := Down(connStr); err != nil {
+	if err := Down(context.Background(), poolFor(t, connStr)); err != nil {
 		t.Fatalf("Down error: %v", err)
 	}
-	if err := Run(connStr); err != nil {
+	if err := Run(context.Background(), poolFor(t, connStr)); err != nil {
 		t.Fatalf("second Up error: %v", err)
 	}
 
@@ -158,13 +173,15 @@ func TestMigrate_RefreshTokensHashedInPlace(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	if err := ensureAuthSchema(connStr); err != nil {
+	if err := ensureAuthSchema(ctx, poolFor(t, connStr)); err != nil {
 		t.Fatalf("ensure schema: %v", err)
 	}
-	m, err := newMigrate(connStr)
+	m, err := newMigrate(poolFor(t, connStr))
 	if err != nil {
 		t.Fatalf("newMigrate: %v", err)
 	}
+	// The runner holds a pooled connection until closed; the pool's cleanup waits for it.
+	defer m.Close()
 	if err := m.Migrate(4); err != nil {
 		t.Fatalf("migrate to 4: %v", err)
 	}
@@ -180,7 +197,7 @@ func TestMigrate_RefreshTokensHashedInPlace(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if err := Run(connStr); err != nil {
+	if err := Run(context.Background(), poolFor(t, connStr)); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 

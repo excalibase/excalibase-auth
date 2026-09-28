@@ -3,180 +3,89 @@ package migrate
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
+	"github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Run applies all pending UP migrations.
-func Run(connStr string) error {
-	if err := ensureAuthSchema(connStr); err != nil {
+// migrationsTable keeps the tracking table in the auth schema, so auth_admin
+// needs no access to public.
+const migrationsTable = "auth.schema_migrations"
+
+// Run applies all pending UP migrations over the tenant's own pool, so they
+// authenticate exactly as the pool does (client certificate included).
+func Run(ctx context.Context, pool *pgxpool.Pool) error {
+	if err := ensureAuthSchema(ctx, pool); err != nil {
 		return fmt.Errorf("ensure auth schema: %w", err)
 	}
-
-	m, err := newMigrate(connStr)
-	if err != nil {
-		return err
-	}
-
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("migrate up: %w", err)
-	}
-	return nil
-}
-
-// ensureAuthSchema creates the auth schema if it doesn't exist.
-// Must run before golang-migrate because the pgx5 driver checks CURRENT_SCHEMA()
-// which returns NULL if the search_path schema doesn't exist.
-func ensureAuthSchema(connStr string) error {
-	pgURL, err := schemaBootstrapURL(connStr)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, err := pgx.Connect(ctx, pgURL)
-	if err != nil {
-		return fmt.Errorf("connect: %w", err)
-	}
-	defer conn.Close(ctx)
-
-	_, err = conn.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS auth")
-	return err
+	return withMigrate(pool, func(runner *migrate.Migrate) error {
+		if err := runner.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+			return fmt.Errorf("migrate up: %w", err)
+		}
+		return nil
+	})
 }
 
 // Down rolls back all migrations.
-func Down(connStr string) error {
-	m, err := newMigrate(connStr)
+func Down(_ context.Context, pool *pgxpool.Pool) error {
+	return withMigrate(pool, func(runner *migrate.Migrate) error {
+		if err := runner.Down(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+			return fmt.Errorf("migrate down: %w", err)
+		}
+		return nil
+	})
+}
+
+// ensureAuthSchema must run before golang-migrate: the pgx5 driver reads
+// CURRENT_SCHEMA(), which is NULL while the search_path schema is missing.
+func ensureAuthSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := pool.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS auth")
+	return err
+}
+
+func withMigrate(pool *pgxpool.Pool, action func(*migrate.Migrate) error) error {
+	runner, err := newMigrate(pool)
 	if err != nil {
 		return err
 	}
-
-	if err := m.Down(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("migrate down: %w", err)
-	}
-	return nil
+	actionErr := action(runner)
+	sourceErr, driverErr := runner.Close()
+	return errors.Join(actionErr, sourceErr, driverErr)
 }
 
-func newMigrate(connStr string) (*migrate.Migrate, error) {
+// newMigrate borrows connections from the pool; closing the runner releases
+// them without closing the pool.
+func newMigrate(pool *pgxpool.Pool) (*migrate.Migrate, error) {
 	subFS, err := fs.Sub(migrationsFS, "migrations")
 	if err != nil {
 		return nil, fmt.Errorf("sub fs: %w", err)
 	}
-
 	source, err := iofs.New(subFS, ".")
 	if err != nil {
 		return nil, fmt.Errorf("iofs source: %w", err)
 	}
-
-	dbURL, err := connStrToURL(connStr)
+	driver, err := pgx.WithInstance(stdlib.OpenDBFromPool(pool), &pgx.Config{
+		SchemaName:      "auth",
+		MigrationsTable: migrationsTable,
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("migration driver: %w", err)
 	}
-
-	m, err := migrate.NewWithSourceInstance("iofs", source, dbURL)
+	runner, err := migrate.NewWithInstance("iofs", source, "pgx5", driver)
 	if err != nil {
 		return nil, fmt.Errorf("new migrate: %w", err)
 	}
-	return m, nil
-}
-
-// connStrToURL converts a pgx key=value connection string to a pgx5:// URL,
-// or passes through if already a URL.
-func connStrToURL(connStr string) (string, error) {
-	// If already a URL format, just ensure pgx5 scheme
-	if len(connStr) > 5 && (connStr[:5] == "pgx5:" || connStr[:8] == "postgres") {
-		if connStr[:8] == "postgres" {
-			return "pgx5" + connStr[8:], nil
-		}
-		return connStr, nil
-	}
-
-	target, err := parseTarget(connStr)
-	if err != nil {
-		return "", err
-	}
-	// Use auth schema for the migrations tracking table so auth_admin doesn't need public schema access
-	return fmt.Sprintf("pgx5://%s:%s@%s:%s/%s?sslmode=%s&search_path=auth&x-migrations-table=auth.schema_migrations",
-		target.user, target.password, target.host, target.port, target.dbname, target.sslmode), nil
-}
-
-// schemaBootstrapURL is the plain postgres URL ensureAuthSchema dials, with
-// the same sslmode as the connection it was derived from.
-func schemaBootstrapURL(connStr string) (string, error) {
-	target, err := parseTarget(connStr)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
-		target.user, target.password, target.host, target.port, target.dbname, target.sslmode), nil
-}
-
-type target struct {
-	host, port, user, password, dbname, sslmode string
-}
-
-// parseTarget reads a key=value connection string. One that states no
-// sslmode is refused: assuming plaintext is how a tenant login ends up
-// unencrypted on a database that requires TLS.
-func parseTarget(connStr string) (target, error) {
-	params := parseKV(connStr)
-	t := target{
-		host:     params["host"],
-		port:     params["port"],
-		user:     params["username"],
-		password: params["password"],
-		dbname:   params["dbname"],
-		sslmode:  params["sslmode"],
-	}
-	if t.user == "" {
-		t.user = params["user"]
-	}
-	if t.dbname == "" {
-		t.dbname = params["database"]
-	}
-	if t.sslmode == "" {
-		return target{}, fmt.Errorf("connection string states no sslmode")
-	}
-	return t, nil
-}
-
-func parseKV(s string) map[string]string {
-	result := make(map[string]string)
-	key := ""
-	val := ""
-	inKey := true
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if inKey {
-			if c == '=' {
-				inKey = false
-			} else if c != ' ' {
-				key += string(c)
-			}
-		} else {
-			if c == ' ' || i == len(s)-1 {
-				if c != ' ' {
-					val += string(c)
-				}
-				result[key] = val
-				key = ""
-				val = ""
-				inKey = true
-			} else {
-				val += string(c)
-			}
-		}
-	}
-	return result
+	return runner, nil
 }

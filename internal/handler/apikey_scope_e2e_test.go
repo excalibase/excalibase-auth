@@ -23,7 +23,12 @@ const apiKeysPath = "/auth/test-org/test-project/api-keys/"
 // provisions one outside the end-user plane. A nil owner means no end user.
 func seedAPIKey(t *testing.T, fx *integrationFixture, keyType service.KeyType, owner *int64) (string, int64) {
 	t.Helper()
-	if err := migrate.Run(fx.connStr); err != nil {
+	migrationPool, err := pgxpool.New(context.Background(), fx.connStr+" search_path=auth")
+	if err != nil {
+		t.Fatalf("connect for migrations: %v", err)
+	}
+	defer migrationPool.Close()
+	if err := migrate.Run(context.Background(), migrationPool); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	plaintext, hash, prefix, err := service.GenerateAPIKey(keyType)
