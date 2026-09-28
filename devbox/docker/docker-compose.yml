@@ -23,6 +23,8 @@ services:
       PORT: "24000"
       PROVISIONING_URL: ${PROVISIONING_URL:-http://host.docker.internal:24005/api}
       PROVISIONING_PAT: ${PROVISIONING_PAT}
+      # The devbox Postgres serves no TLS; Kubernetes tenants use verify-full + client certificates.
+      TENANT_DB_SSLMODE: disable
     depends_on:
       postgres:
         condition: service_healthy

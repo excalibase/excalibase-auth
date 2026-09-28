@@ -37,11 +37,11 @@ func TestFetchCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchCredentials: %v", err)
 	}
-	if got["host"] != "10.0.0.5" {
-		t.Errorf("host: got %s", got["host"])
+	if got.Host != "10.0.0.5" {
+		t.Errorf("host: got %s", got.Host)
 	}
-	if got["username"] != "auth_admin" {
-		t.Errorf("username: got %s", got["username"])
+	if got.Username != "auth_admin" {
+		t.Errorf("username: got %s", got.Username)
 	}
 }
 
@@ -57,8 +57,9 @@ func TestGetPoolCaches(t *testing.T) {
 	defer server.Close()
 
 	mgr := NewManager(server.URL, token.Literal("test-pat"), time.Hour)
+	mgr.SetSSLMode("disable") // a password-only record; cert records are covered in tenant_tls_test.go
 	// Mock pool creator since we can't connect to real PG
-	mgr.poolCreator = func(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
+	mgr.poolCreator = func(ctx context.Context, config *pgxpool.Config) (*pgxpool.Pool, error) {
 		// Return nil pool — we're testing cache logic, not PG connection
 		return nil, nil
 	}
@@ -84,7 +85,8 @@ func TestGetPoolTTLExpiry(t *testing.T) {
 	defer server.Close()
 
 	mgr := NewManager(server.URL, token.Literal("test-pat"), 1*time.Millisecond) // very short TTL
-	mgr.poolCreator = func(ctx context.Context, connStr string) (*pgxpool.Pool, error) {
+	mgr.SetSSLMode("disable")
+	mgr.poolCreator = func(ctx context.Context, config *pgxpool.Config) (*pgxpool.Pool, error) {
 		return nil, nil
 	}
 

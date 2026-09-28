@@ -86,9 +86,7 @@ func setupIntegrationFixture(t *testing.T, opts ...handlerOption) (*integrationF
 	poolMgr := pool.NewManager(vaultServer.URL, token.Literal("test-pat"), 1*time.Hour)
 	// The test container serves no TLS; production tenants require it.
 	poolMgr.SetSSLMode("disable")
-	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error {
-		return migrate.Run(connStr)
-	})
+	poolMgr.SetMigrator(migrate.Run)
 
 	// 5. Auth handler + router
 	authHandler := NewAuthHandler(poolMgr, jwtSvc, 604800)

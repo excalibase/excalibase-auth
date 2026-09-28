@@ -85,14 +85,16 @@ func tenantDBSSLMode() string {
 	return mode
 }
 
-// parseTenantDBSSLMode defaults to require. prefer and allow are refused:
-// both fall back to plaintext without saying so.
+// parseTenantDBSSLMode yields disable or verify-full. Tenant logins are
+// client-certificate only, and a certificate proves nothing to an unverified
+// server, so require and verify-ca are accepted spellings of verify-full.
+// prefer and allow are refused: both fall back to plaintext without saying so.
 func parseTenantDBSSLMode(raw string) (string, error) {
 	switch raw {
-	case "":
-		return "require", nil
-	case "disable", "require", "verify-ca", "verify-full":
+	case "disable":
 		return raw, nil
+	case "", "require", "verify-ca", "verify-full":
+		return "verify-full", nil
 	default:
 		return "", fmt.Errorf("%q is not one of disable, require, verify-ca, verify-full", raw)
 	}

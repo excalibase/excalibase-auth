@@ -151,7 +151,7 @@ func setupVerifyFixture(t *testing.T, requireVerification bool) (*verifyFixture,
 	poolMgr := pool.NewManager(provisioning.URL, token.Literal("test-pat"), time.Hour)
 	// The test container serves no TLS; production tenants require it.
 	poolMgr.SetSSLMode("disable")
-	poolMgr.SetMigrator(func(ctx context.Context, connStr string) error { return migrate.Run(connStr) })
+	poolMgr.SetMigrator(migrate.Run)
 
 	sender := &stubSender{}
 	// The test client reaches the server over loopback, standing in for the
