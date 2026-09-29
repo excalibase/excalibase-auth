@@ -211,12 +211,15 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Insert user
-	var userID int64
+	var (
+		userID int64
+		role   string
+	)
 	err = pool.QueryRow(r.Context(),
 		`INSERT INTO users (email, password, full_name, role, enabled, created_at, updated_at)
-		 VALUES ($1, $2, $3, 'user', true, NOW(), NOW()) RETURNING id`,
+		 VALUES ($1, $2, $3, 'user', true, NOW(), NOW()) RETURNING id, role`,
 		req.Email, hash, req.FullName,
-	).Scan(&userID)
+	).Scan(&userID, &role)
 	if err != nil {
 		httpError(w, "failed to create user", 500)
 		return
@@ -241,7 +244,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.generateAuthResponse(r, projectID, userID, req.Email, req.FullName, false)
+	resp, err := h.generateAuthResponse(r, projectID, domain.UserInfo{ID: userID, Email: req.Email, FullName: req.FullName}, role, false)
 	if err != nil {
 		httpError(w, "failed to generate tokens", 500)
 		return
@@ -304,10 +307,14 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 	if !user.EmailVerified && h.settingsFor(r.Context(), projectID).requireEmailVerification {
 		return nil, 403, errEmailNotVerified
 	}
+	if err := auth.ValidateAccountRole(user.Role); err != nil {
+		return nil, 403, err
+	}
 
 	pool.Exec(r.Context(), "UPDATE users SET last_login_at = NOW() WHERE id = $1", user.ID)
 
-	resp, err := h.generateAuthResponse(r, projectID, user.ID, user.Email, user.FullName, user.EmailVerified)
+	userInfo := domain.UserInfo{ID: user.ID, Email: user.Email, FullName: user.FullName}
+	resp, err := h.generateAuthResponse(r, projectID, userInfo, user.Role, user.EmailVerified)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -339,13 +346,16 @@ func (h *AuthHandler) Validate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, map[string]interface{}{
+	result := map[string]interface{}{
 		"valid":     true,
 		"email":     claims.Sub,
-		"userId":    claims.UserID,
 		"projectId": claims.ProjectID,
 		"role":      claims.Role,
-	})
+	}
+	if claims.UserID != 0 {
+		result["userId"] = claims.UserID
+	}
+	writeJSON(w, result)
 }
 
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
@@ -390,12 +400,18 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 		return nil, 500, errRefreshTokenStore
 	}
 
-	var user domain.UserInfo
-	var emailVerified bool
+	var (
+		user          domain.UserInfo
+		role          string
+		emailVerified bool
+	)
 	if err := tx.QueryRow(ctx,
-		"SELECT id, email, full_name, email_verified FROM users WHERE id = $1", rotated.userID,
-	).Scan(&user.ID, &user.Email, &user.FullName, &emailVerified); err != nil {
+		"SELECT id, email, full_name, role, email_verified FROM users WHERE id = $1", rotated.userID,
+	).Scan(&user.ID, &user.Email, &user.FullName, &role, &emailVerified); err != nil {
 		return nil, 401, errInvalidRefreshToken
+	}
+	if err := auth.ValidateAccountRole(role); err != nil {
+		return nil, 403, err
 	}
 
 	successor, err := storeRefreshToken(ctx, tx, user.ID, rotated.session)
@@ -406,7 +422,7 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 		return nil, 500, errRefreshTokenStore
 	}
 
-	resp, err := h.sessionResponse(r, projectID, user, emailVerified, successor)
+	resp, err := h.sessionResponse(r, projectID, user, role, emailVerified, successor)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -454,11 +470,7 @@ func (h *AuthHandler) exchangeAPIKey(r *http.Request, projectID, apiKey string) 
 
 	pool.Exec(r.Context(), "UPDATE auth.api_keys SET last_used_at = NOW() WHERE id = $1", keyID)
 
-	var userID int64
-	if createdBy != nil {
-		userID = *createdBy
-	}
-	resp, err := h.generateAPIKeyAuthResponse(r, projectID, userID, keyID, keyType)
+	resp, err := h.generateAPIKeyAuthResponse(r, projectID, keyID, keyType)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -489,58 +501,105 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // generateAuthResponse starts a new session for the user.
-func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, userID int64, email, fullName string, emailVerified bool) (*domain.AuthResponse, error) {
+func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, user domain.UserInfo, role string, emailVerified bool) (*domain.AuthResponse, error) {
 	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return nil, err
 	}
-	refreshToken, err := storeRefreshToken(r.Context(), pool, userID, h.newRefreshSession())
+	refreshToken, err := storeRefreshToken(r.Context(), pool, user.ID, h.newRefreshSession())
 	if err != nil {
 		return nil, err
 	}
-	return h.sessionResponse(r, projectID, domain.UserInfo{ID: userID, Email: email, FullName: fullName}, emailVerified, refreshToken)
+	return h.sessionResponse(r, projectID, user, role, emailVerified, refreshToken)
+}
+
+// projectLabels are the display names a token carries next to projectId.
+type projectLabels struct {
+	orgSlug     string
+	projectName string
+	orgName     string
+}
+
+// labelsFor looks up display names from provisioning (cached per projectId).
+// Best-effort: an unreachable provisioning falls back to projectId/orgSlug so
+// sign-in never blocks on a metadata lookup.
+func (h *AuthHandler) labelsFor(r *http.Request, projectID string) projectLabels {
+	labels := projectLabels{orgSlug: chi.URLParam(r, "orgSlug"), projectName: projectID}
+	labels.orgName = labels.orgSlug
+	info, err := h.poolMgr.GetProjectInfo(r.Context(), projectID)
+	if err != nil {
+		return labels
+	}
+	if info.ProjectName != "" {
+		labels.projectName = info.ProjectName
+	}
+	if info.OrgName != "" {
+		labels.orgName = info.OrgName
+	}
+	if info.OrgSlug != "" {
+		labels.orgSlug = info.OrgSlug
+	}
+	return labels
+}
+
+// endUserClaims builds an end-user access token whose default and only
+// allowed role is the account's users.role.
+func endUserClaims(projectID string, labels projectLabels, user domain.UserInfo, role string, emailVerified bool) (auth.Claims, error) {
+	if err := auth.ValidateAccountRole(role); err != nil {
+		return auth.Claims{}, err
+	}
+	return auth.Claims{
+		Sub:          user.Email,
+		UserID:       user.ID,
+		ProjectID:    projectID,
+		OrgSlug:      labels.orgSlug,
+		ProjectName:  labels.projectName,
+		OrgName:      labels.orgName,
+		Role:         role,
+		AllowedRoles: []string{role},
+		// Edge functions branch on X-Excalibase-Scope to tell signed-in users
+		// from api-key traffic.
+		Scope:         "authenticated",
+		EmailVerified: emailVerified,
+	}, nil
+}
+
+// apiKeyClaims builds an api-key token: a publishable key signs in as anon,
+// a secret key as service. Neither carries a userId.
+func apiKeyClaims(projectID string, labels projectLabels, keyID int64, keyType string) (auth.Claims, error) {
+	var role, scope string
+	switch keyType {
+	case string(service.KeyTypePublishable):
+		role, scope = auth.RoleAnon, "public"
+	case string(service.KeyTypeSecret):
+		role, scope = auth.RoleService, "service"
+	default:
+		return auth.Claims{}, fmt.Errorf("unknown api key type %q", keyType)
+	}
+	return auth.Claims{
+		Sub:          fmt.Sprintf("apikey:%d", keyID),
+		ProjectID:    projectID,
+		OrgSlug:      labels.orgSlug,
+		ProjectName:  labels.projectName,
+		OrgName:      labels.orgName,
+		Role:         role,
+		AllowedRoles: []string{role},
+		Scope:        scope,
+		KeyID:        keyID,
+	}, nil
 }
 
 // sessionResponse signs an end-user access token and pairs it with the
 // session's refresh token.
-func (h *AuthHandler) sessionResponse(r *http.Request, projectID string, user domain.UserInfo, emailVerified bool, refreshToken string) (*domain.AuthResponse, error) {
-	orgSlug := chi.URLParam(r, "orgSlug")
-
-	// Look up display names from provisioning (cached per projectId in poolMgr).
-	// Best-effort — if provisioning is unreachable, fall back to projectId/orgSlug
-	// so we never block login on a metadata lookup.
-	projectName := projectID
-	orgName := orgSlug
-	if info, err := h.poolMgr.GetProjectInfo(r.Context(), projectID); err == nil {
-		if info.ProjectName != "" {
-			projectName = info.ProjectName
-		}
-		if info.OrgName != "" {
-			orgName = info.OrgName
-		}
-		if info.OrgSlug != "" {
-			orgSlug = info.OrgSlug
-		}
-	}
-
-	accessToken, err := h.jwtService.Sign(auth.Claims{
-		Sub:         user.Email,
-		UserID:      user.ID,
-		ProjectID:   projectID,
-		OrgSlug:     orgSlug,
-		ProjectName: projectName,
-		OrgName:     orgName,
-		Role:        "user",
-		// Password-flow tokens are end-user identities. Edge functions branch
-		// on this header (X-Excalibase-Scope) to distinguish anon traffic
-		// (scope=public via service-key flow) from logged-in users.
-		Scope:         "authenticated",
-		EmailVerified: emailVerified,
-	})
+func (h *AuthHandler) sessionResponse(r *http.Request, projectID string, user domain.UserInfo, role string, emailVerified bool, refreshToken string) (*domain.AuthResponse, error) {
+	claims, err := endUserClaims(projectID, h.labelsFor(r, projectID), user, role, emailVerified)
 	if err != nil {
 		return nil, err
 	}
-
+	accessToken, err := h.jwtService.Sign(claims)
+	if err != nil {
+		return nil, err
+	}
 	return &domain.AuthResponse{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
@@ -552,46 +611,12 @@ func (h *AuthHandler) sessionResponse(r *http.Request, projectID string, user do
 
 // generateAPIKeyAuthResponse issues a JWT for an api-key grant. It does not
 // create a refresh token: the api key itself is the long-lived credential.
-//
-// The token's `sub` is set to "apikey:<id>" so downstream consumers can
-// distinguish api-key tokens from user-password tokens at a glance, and the
-// `role` reflects the key type (publishable → "user", secret → "service") so
-// authorization checks have something coarser than scope to act on.
-func (h *AuthHandler) generateAPIKeyAuthResponse(r *http.Request, projectID string, userID, keyID int64, keyType string) (*domain.AuthResponse, error) {
-	orgSlug := chi.URLParam(r, "orgSlug")
-
-	projectName := projectID
-	orgName := orgSlug
-	if info, err := h.poolMgr.GetProjectInfo(r.Context(), projectID); err == nil {
-		if info.ProjectName != "" {
-			projectName = info.ProjectName
-		}
-		if info.OrgName != "" {
-			orgName = info.OrgName
-		}
-		if info.OrgSlug != "" {
-			orgSlug = info.OrgSlug
-		}
+func (h *AuthHandler) generateAPIKeyAuthResponse(r *http.Request, projectID string, keyID int64, keyType string) (*domain.AuthResponse, error) {
+	claims, err := apiKeyClaims(projectID, h.labelsFor(r, projectID), keyID, keyType)
+	if err != nil {
+		return nil, err
 	}
-
-	scope := "public"
-	role := "user"
-	if keyType == string(service.KeyTypeSecret) {
-		scope = "service"
-		role = "service"
-	}
-
-	accessToken, err := h.jwtService.Sign(auth.Claims{
-		Sub:         fmt.Sprintf("apikey:%d", keyID),
-		UserID:      userID,
-		ProjectID:   projectID,
-		OrgSlug:     orgSlug,
-		ProjectName: projectName,
-		OrgName:     orgName,
-		Role:        role,
-		Scope:       scope,
-		KeyID:       keyID,
-	})
+	accessToken, err := h.jwtService.Sign(claims)
 	if err != nil {
 		return nil, err
 	}

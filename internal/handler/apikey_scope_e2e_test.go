@@ -3,13 +3,11 @@ package handler
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/excalibase/auth/internal/migrate"
@@ -76,19 +74,7 @@ func operatorJWT(t *testing.T, fx *integrationFixture) string {
 
 func jwtScope(t *testing.T, tok string) string {
 	t.Helper()
-	parts := strings.Split(tok, ".")
-	if len(parts) != 3 {
-		t.Fatalf("not a JWT: %q", tok)
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		t.Fatalf("decode payload: %v", err)
-	}
-	var claims map[string]interface{}
-	if err := json.Unmarshal(raw, &claims); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
-	}
-	scope, _ := claims["scope"].(string)
+	scope, _ := jwtPayload(t, tok)["scope"].(string)
 	return scope
 }
 

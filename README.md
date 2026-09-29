@@ -98,6 +98,8 @@ curl -X POST http://localhost:24000/auth/my-org/my-project/validate \
 }
 ```
 
+`userId` is absent for api-key tokens.
+
 ### Refresh
 
 ```bash
@@ -270,12 +272,31 @@ Tokens are signed with ECDSA P-256 (ES256). The private key is fetched from the 
   "projectId": "my-org/my-project",
   "orgSlug": "my-org",
   "projectName": "my-project",
+  "orgName": "My Org",
   "role": "user",
+  "allowed_roles": ["user"],
+  "scope": "authenticated",
+  "email_verified": true,
+  "token_use": "access",
+  "aud": ["excalibase:my-org/my-project"],
   "iss": "excalibase",
   "iat": 1712200000,
   "exp": 1712286400
 }
 ```
+
+`role` is the default role the engine runs the request as; `allowed_roles` lists the roles the token
+may act as and always contains `role`.
+
+| Token | `role` / `allowed_roles` | `scope` | `userId` | `sub` |
+|-------|--------------------------|---------|----------|-------|
+| password login, registration, refresh | the account's `users.role` | `authenticated` | the account id | email |
+| publishable api key | `anon` / `["anon"]` | `public` | absent | `apikey:<id>` |
+| secret api key | `service` / `["service"]` | `service` | absent | `apikey:<id>` |
+
+An account's role is read from `users.role` at every login and refresh, so a changed role takes
+effect on the next refresh. It must match `^[a-z][a-z0-9_]{0,62}$` and must not be `anon` or
+`service`; otherwise login and refresh answer `403 {"error": "invalid_account_role"}`.
 
 excalibase-graphql fetches the public key from the provisioning vault, verifies the JWT directly, and uses the claims to set PostgreSQL RLS context:
 ```sql

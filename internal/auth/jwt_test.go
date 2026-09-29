@@ -310,3 +310,42 @@ func TestPublicKeyJWKS_SerializesP256(t *testing.T) {
 		t.Errorf("use: got %q, want sig", k.Use)
 	}
 }
+
+func TestSignVerify_AllowedRolesRoundTrip(t *testing.T) {
+	svc, _ := NewJWTService(testKeyPEM(t), "excalibase", 3600)
+	token, err := svc.Sign(Claims{Sub: "a@test.com", UserID: 1, ProjectID: "p", Role: "editor", AllowedRoles: []string{"editor"}})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	claims, err := svc.Verify(token)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(claims.AllowedRoles) != 1 || claims.AllowedRoles[0] != "editor" {
+		t.Errorf("allowed_roles: got %v, want [editor]", claims.AllowedRoles)
+	}
+}
+
+func TestSign_AlwaysEmitsAllowedRolesAsArray(t *testing.T) {
+	svc, _ := NewJWTService(testKeyPEM(t), "excalibase", 3600)
+	token, _ := svc.Sign(Claims{ProjectID: "p"})
+	raw, ok := parseUnverified(t, token)["allowed_roles"]
+	if !ok {
+		t.Fatal("allowed_roles claim missing")
+	}
+	if roles, isArray := raw.([]interface{}); !isArray || len(roles) != 0 {
+		t.Errorf("allowed_roles: got %#v, want empty array", raw)
+	}
+}
+
+func TestSign_OmitsUserIdWhenZero(t *testing.T) {
+	svc, _ := NewJWTService(testKeyPEM(t), "excalibase", 3600)
+	withoutUser, _ := svc.Sign(Claims{ProjectID: "p", Role: "anon", AllowedRoles: []string{"anon"}})
+	if _, present := parseUnverified(t, withoutUser)["userId"]; present {
+		t.Error("userId must be omitted when zero")
+	}
+	withUser, _ := svc.Sign(Claims{ProjectID: "p", UserID: 9})
+	if got := parseUnverified(t, withUser)["userId"]; got != float64(9) {
+		t.Errorf("userId: got %v, want 9", got)
+	}
+}
