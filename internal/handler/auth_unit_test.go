@@ -183,11 +183,11 @@ func TestAuthResponses_ExpMatchesAdvertisedTTL(t *testing.T) {
 		context.WithValue(context.Background(), chi.RouteCtxKey, rctx),
 	)
 
-	password, err := h.sessionResponse(req, "test-project", domain.UserInfo{ID: 42, Email: "alice@example.com"}, false, "refresh")
+	password, err := h.sessionResponse(req, "test-project", domain.UserInfo{ID: 42, Email: "alice@example.com"}, "user", false, "refresh")
 	if err != nil {
 		t.Fatalf("sessionResponse: %v", err)
 	}
-	apiKey, err := h.generateAPIKeyAuthResponse(req, "test-project", 0, 7, "publishable")
+	apiKey, err := h.generateAPIKeyAuthResponse(req, "test-project", 7, "publishable")
 	if err != nil {
 		t.Fatalf("generateAPIKeyAuthResponse: %v", err)
 	}

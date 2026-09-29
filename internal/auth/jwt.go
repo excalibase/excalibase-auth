@@ -67,12 +67,14 @@ func (c *Claims) IsAccess() bool {
 
 type Claims struct {
 	Sub         string `json:"sub"`
-	UserID      int64  `json:"userId"`
-	ProjectID   string `json:"projectId"` // opaque project ref minted by provisioning (e.g. "proj_a3k9fx7b2k")
+	UserID      int64  `json:"userId,omitempty"` // zero, and the claim omitted, for api-key tokens
+	ProjectID   string `json:"projectId"`        // opaque project ref minted by provisioning (e.g. "proj_a3k9fx7b2k")
 	OrgSlug     string `json:"orgSlug"`
 	ProjectName string `json:"projectName"` // display name (user-typed, e.g. "blog")
 	OrgName     string `json:"orgName"`     // display name (e.g. "Acme Corp")
 	Role        string `json:"role"`
+	// AllowedRoles lists the roles the token may act as; it contains Role.
+	AllowedRoles []string `json:"allowed_roles"`
 	// Scope distinguishes credential origin: "authenticated" (password login),
 	// "public" (publishable api key, browser-safe), or "service" (secret api key,
 	// server-side only). Empty for legacy password flows that don't set it.
@@ -144,16 +146,16 @@ func (s *JWTService) AudienceFor(projectID string) string {
 func (s *JWTService) Sign(claims Claims) (string, error) {
 	now := time.Now()
 	mc := jwt.MapClaims{
-		"sub":         claims.Sub,
-		"userId":      claims.UserID,
-		"projectId":   claims.ProjectID,
-		"orgSlug":     claims.OrgSlug,
-		"projectName": claims.ProjectName,
-		"orgName":     claims.OrgName,
-		"role":        claims.Role,
-		"iss":         s.issuer,
-		"iat":         now.Unix(),
-		"exp":         now.Add(time.Duration(s.expSeconds) * time.Second).Unix(),
+		"sub":           claims.Sub,
+		"projectId":     claims.ProjectID,
+		"orgSlug":       claims.OrgSlug,
+		"projectName":   claims.ProjectName,
+		"orgName":       claims.OrgName,
+		"role":          claims.Role,
+		"allowed_roles": allowedRolesClaim(claims.AllowedRoles),
+		"iss":           s.issuer,
+		"iat":           now.Unix(),
+		"exp":           now.Add(time.Duration(s.expSeconds) * time.Second).Unix(),
 		// Array form so verifiers that expect the multi-valued `aud` shape
 		// (RFC 7519 §4.1.3) need no special-casing.
 		"aud":            []string{s.AudienceFor(claims.ProjectID)},
@@ -162,6 +164,9 @@ func (s *JWTService) Sign(claims Claims) (string, error) {
 	}
 	// Optional claims — only emit when set so password-flow tokens stay
 	// byte-for-byte identical to the pre-api-key behavior.
+	if claims.UserID != 0 {
+		mc["userId"] = claims.UserID
+	}
 	if claims.Scope != "" {
 		mc["scope"] = claims.Scope
 	}
@@ -169,6 +174,14 @@ func (s *JWTService) Sign(claims Claims) (string, error) {
 		mc["keyId"] = claims.KeyID
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodES256, mc).SignedString(s.privateKey)
+}
+
+// allowedRolesClaim keeps the claim an array even when no roles are set.
+func allowedRolesClaim(roles []string) []string {
+	if roles == nil {
+		return []string{}
+	}
+	return roles
 }
 
 // PublicKeyJWKS returns the JWKS representation of the EC public key.
@@ -221,16 +234,25 @@ func audienceClaim(raw interface{}) []string {
 	case []string:
 		return v
 	case []interface{}:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
+		return stringsClaim(v)
 	default:
 		return nil
 	}
+}
+
+// stringsClaim reads a JSON array of strings, skipping non-string entries.
+func stringsClaim(raw interface{}) []string {
+	items, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (s *JWTService) Verify(tokenString string) (*Claims, error) {
@@ -288,6 +310,7 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 		ProjectName:   projectName,
 		OrgName:       orgName,
 		Role:          role,
+		AllowedRoles:  stringsClaim(mapClaims["allowed_roles"]),
 		Scope:         scope,
 		KeyID:         int64(keyID),
 	}, nil
