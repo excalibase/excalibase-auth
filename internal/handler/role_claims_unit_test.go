@@ -14,7 +14,7 @@ var testLabels = projectLabels{orgSlug: "acme", projectName: "blog", orgName: "A
 
 func TestEndUserClaims_CarryAccountRole(t *testing.T) {
 	user := domain.UserInfo{ID: 12, Email: "ed@test.com", FullName: "Ed"}
-	claims, err := endUserClaims("proj_1", testLabels, user, "editor", true)
+	claims, err := endUserClaims("proj_1", testLabels, user, accountRoles{role: "editor"}, true)
 	if err != nil {
 		t.Fatalf("endUserClaims: %v", err)
 	}
@@ -31,9 +31,34 @@ func TestEndUserClaims_CarryAccountRole(t *testing.T) {
 
 func TestEndUserClaims_RefuseReservedOrInvalidRole(t *testing.T) {
 	user := domain.UserInfo{ID: 12, Email: "ed@test.com"}
-	for _, role := range []string{"anon", "service", "", "Admin", "not-valid"} {
-		if _, err := endUserClaims("proj_1", testLabels, user, role, false); !errors.Is(err, auth.ErrInvalidAccountRole) {
+	for _, role := range []string{"anon", "service", "", "Admin", "not-valid", "postgres", "pg_monitor", "excalibase_app"} {
+		if _, err := endUserClaims("proj_1", testLabels, user, accountRoles{role: role}, false); !errors.Is(err, auth.ErrInvalidAccountRole) {
 			t.Errorf("role %q: got %v, want ErrInvalidAccountRole", role, err)
+		}
+	}
+}
+
+func TestEndUserClaims_CarryStoredAllowedRoles(t *testing.T) {
+	user := domain.UserInfo{ID: 12, Email: "ed@test.com"}
+	claims, err := endUserClaims("proj_1", testLabels, user, accountRoles{role: "editor", allowed: []string{"user", "editor"}}, false)
+	if err != nil {
+		t.Fatalf("endUserClaims: %v", err)
+	}
+	if claims.Role != "editor" || !slices.Equal(claims.AllowedRoles, []string{"user", "editor"}) {
+		t.Errorf("role %q allowed %v, want editor [user editor]", claims.Role, claims.AllowedRoles)
+	}
+}
+
+func TestEndUserClaims_RefuseInvalidStoredAllowedRoles(t *testing.T) {
+	user := domain.UserInfo{ID: 12, Email: "ed@test.com"}
+	for name, allowed := range map[string][]string{
+		"role missing":    {"user"},
+		"reserved entry":  {"editor", "service"},
+		"malformed entry": {"editor", "Bad"},
+	} {
+		_, err := endUserClaims("proj_1", testLabels, user, accountRoles{role: "editor", allowed: allowed}, false)
+		if !errors.Is(err, auth.ErrInvalidAccountRole) {
+			t.Errorf("%s: got %v, want ErrInvalidAccountRole", name, err)
 		}
 	}
 }

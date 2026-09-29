@@ -131,6 +131,14 @@ func (h *AuthHandler) Routes(r chi.Router) {
 			r.Use(middleware.RequireJWT(h.jwtService))
 			r.Route("/api-keys", h.APIKeyRoutes)
 		})
+
+		// End-user roles (EXC-370): only the control plane's user-admin token
+		// or the project's secret-key token, checked here at registration.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RequireJWT(h.jwtService))
+			r.Use(requireUserManager)
+			r.Route("/users", h.UserRoutes)
+		})
 	})
 }
 
@@ -244,7 +252,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.generateAuthResponse(r, projectID, domain.UserInfo{ID: userID, Email: req.Email, FullName: req.FullName}, role, false)
+	resp, err := h.generateAuthResponse(r, projectID, domain.UserInfo{ID: userID, Email: req.Email, FullName: req.FullName}, accountRoles{role: role}, false)
 	if err != nil {
 		httpError(w, "failed to generate tokens", 500)
 		return
@@ -286,9 +294,9 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 
 	var user domain.User
 	err = pool.QueryRow(r.Context(),
-		"SELECT id, email, password, full_name, role, enabled, email_verified FROM users WHERE email = $1",
+		"SELECT id, email, password, full_name, role, allowed_roles, enabled, email_verified FROM users WHERE email = $1",
 		email,
-	).Scan(&user.ID, &user.Email, &user.Password, &user.FullName, &user.Role, &user.Enabled, &user.EmailVerified)
+	).Scan(&user.ID, &user.Email, &user.Password, &user.FullName, &user.Role, &user.AllowedRoles, &user.Enabled, &user.EmailVerified)
 	if err != nil {
 		return nil, 401, errInvalidCredentials
 	}
@@ -307,14 +315,15 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 	if !user.EmailVerified && h.settingsFor(r.Context(), projectID).requireEmailVerification {
 		return nil, 403, errEmailNotVerified
 	}
-	if err := auth.ValidateAccountRole(user.Role); err != nil {
+	roles := accountRoles{role: user.Role, allowed: user.AllowedRoles}
+	if err := roles.validate(); err != nil {
 		return nil, 403, err
 	}
 
 	pool.Exec(r.Context(), "UPDATE users SET last_login_at = NOW() WHERE id = $1", user.ID)
 
 	userInfo := domain.UserInfo{ID: user.ID, Email: user.Email, FullName: user.FullName}
-	resp, err := h.generateAuthResponse(r, projectID, userInfo, user.Role, user.EmailVerified)
+	resp, err := h.generateAuthResponse(r, projectID, userInfo, roles, user.EmailVerified)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -402,15 +411,15 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 
 	var (
 		user          domain.UserInfo
-		role          string
+		roles         accountRoles
 		emailVerified bool
 	)
 	if err := tx.QueryRow(ctx,
-		"SELECT id, email, full_name, role, email_verified FROM users WHERE id = $1", rotated.userID,
-	).Scan(&user.ID, &user.Email, &user.FullName, &role, &emailVerified); err != nil {
+		"SELECT id, email, full_name, role, allowed_roles, email_verified FROM users WHERE id = $1", rotated.userID,
+	).Scan(&user.ID, &user.Email, &user.FullName, &roles.role, &roles.allowed, &emailVerified); err != nil {
 		return nil, 401, errInvalidRefreshToken
 	}
-	if err := auth.ValidateAccountRole(role); err != nil {
+	if err := roles.validate(); err != nil {
 		return nil, 403, err
 	}
 
@@ -422,7 +431,7 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 		return nil, 500, errRefreshTokenStore
 	}
 
-	resp, err := h.sessionResponse(r, projectID, user, role, emailVerified, successor)
+	resp, err := h.sessionResponse(r, projectID, user, roles, emailVerified, successor)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -501,7 +510,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // generateAuthResponse starts a new session for the user.
-func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, user domain.UserInfo, role string, emailVerified bool) (*domain.AuthResponse, error) {
+func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool) (*domain.AuthResponse, error) {
 	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return nil, err
@@ -510,7 +519,7 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 	if err != nil {
 		return nil, err
 	}
-	return h.sessionResponse(r, projectID, user, role, emailVerified, refreshToken)
+	return h.sessionResponse(r, projectID, user, roles, emailVerified, refreshToken)
 }
 
 // projectLabels are the display names a token carries next to projectId.
@@ -542,10 +551,23 @@ func (h *AuthHandler) labelsFor(r *http.Request, projectID string) projectLabels
 	return labels
 }
 
-// endUserClaims builds an end-user access token whose default and only
-// allowed role is the account's users.role.
-func endUserClaims(projectID string, labels projectLabels, user domain.UserInfo, role string, emailVerified bool) (auth.Claims, error) {
-	if err := auth.ValidateAccountRole(role); err != nil {
+// accountRoles is an account's users.role and users.allowed_roles (nil = [role]).
+type accountRoles struct {
+	role    string
+	allowed []string
+}
+
+// validate refuses sign-in for an account whose roles cannot go in a token.
+func (roles accountRoles) validate() error {
+	_, err := auth.AccountAllowedRoles(roles.role, roles.allowed)
+	return err
+}
+
+// endUserClaims builds an end-user access token whose default role is the
+// account's users.role and whose allowed roles are users.allowed_roles.
+func endUserClaims(projectID string, labels projectLabels, user domain.UserInfo, roles accountRoles, emailVerified bool) (auth.Claims, error) {
+	allowed, err := auth.AccountAllowedRoles(roles.role, roles.allowed)
+	if err != nil {
 		return auth.Claims{}, err
 	}
 	return auth.Claims{
@@ -555,8 +577,8 @@ func endUserClaims(projectID string, labels projectLabels, user domain.UserInfo,
 		OrgSlug:      labels.orgSlug,
 		ProjectName:  labels.projectName,
 		OrgName:      labels.orgName,
-		Role:         role,
-		AllowedRoles: []string{role},
+		Role:         roles.role,
+		AllowedRoles: allowed,
 		// Edge functions branch on X-Excalibase-Scope to tell signed-in users
 		// from api-key traffic.
 		Scope:         "authenticated",
@@ -591,8 +613,8 @@ func apiKeyClaims(projectID string, labels projectLabels, keyID int64, keyType s
 
 // sessionResponse signs an end-user access token and pairs it with the
 // session's refresh token.
-func (h *AuthHandler) sessionResponse(r *http.Request, projectID string, user domain.UserInfo, role string, emailVerified bool, refreshToken string) (*domain.AuthResponse, error) {
-	claims, err := endUserClaims(projectID, h.labelsFor(r, projectID), user, role, emailVerified)
+func (h *AuthHandler) sessionResponse(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool, refreshToken string) (*domain.AuthResponse, error) {
+	claims, err := endUserClaims(projectID, h.labelsFor(r, projectID), user, roles, emailVerified)
 	if err != nil {
 		return nil, err
 	}

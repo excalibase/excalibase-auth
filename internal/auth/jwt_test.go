@@ -117,7 +117,7 @@ func TestWrongKey(t *testing.T) {
 	}
 }
 
-func _ () { _ = time.Now() } // keep time import used
+func _() { _ = time.Now() } // keep time import used
 
 // A token signed by an issuer different from the verifier's configured issuer
 // must be rejected. We sign with svcA (issuer "issuer-a") and verify with svcB
@@ -347,5 +347,25 @@ func TestSign_OmitsUserIdWhenZero(t *testing.T) {
 	withUser, _ := svc.Sign(Claims{ProjectID: "p", UserID: 9})
 	if got := parseUnverified(t, withUser)["userId"]; got != float64(9) {
 		t.Errorf("userId: got %v, want 9", got)
+	}
+}
+
+// The control plane's user-admin token names the platform user it acts for.
+func TestVerify_ReadsUserAdminActor(t *testing.T) {
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalECPrivateKey(priv)
+	svc, _ := NewJWTService(string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})), "excalibase", 3600)
+	now := time.Now()
+	signed, _ := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
+		"iss": "excalibase", "projectId": "p", "token_use": TokenUseUserAdmin, "actor": "plat-user-9",
+		"aud": []string{KeyAdminAudience("p")}, "iat": now.Unix(), "exp": now.Add(time.Minute).Unix(),
+	}).SignedString(priv)
+
+	claims, err := svc.Verify(signed)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if claims.Actor != "plat-user-9" || claims.TokenUse != "user_admin" {
+		t.Errorf("actor %q token_use %q", claims.Actor, claims.TokenUse)
 	}
 }

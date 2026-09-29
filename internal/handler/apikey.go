@@ -31,12 +31,14 @@ func (h *AuthHandler) APIKeyRoutes(r chi.Router) {
 // "authenticated" token must never reach a service key.
 func canManageAPIKeys(claims *auth.Claims, projectID string) bool {
 	if claims.TokenUse == auth.TokenUseKeyAdmin {
-		return isKeyAdminFor(claims, projectID)
+		return isPlatformTokenFor(claims, projectID)
 	}
 	return claims.IsAccess() && claims.Scope == "service"
 }
 
-func isKeyAdminFor(claims *auth.Claims, projectID string) bool {
+// isPlatformTokenFor checks the audience and short lifetime every token the
+// control plane signs for this service carries.
+func isPlatformTokenFor(claims *auth.Claims, projectID string) bool {
 	lifetime := time.Duration(claims.ExpiresAt-claims.IssuedAt) * time.Second
 	if claims.IssuedAt == 0 || lifetime <= 0 || lifetime > auth.MaxKeyAdminLifetime {
 		return false
