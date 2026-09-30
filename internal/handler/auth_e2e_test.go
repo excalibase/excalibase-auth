@@ -31,6 +31,9 @@ import (
 type integrationFixture struct {
 	srv     *httptest.Server
 	connStr string // direct pgx conn string for tests that need to seed rows
+	// signingKey and jwtSvc let a test sign what the control plane signs.
+	signingKey *ecdsa.PrivateKey
+	jwtSvc     *auth.JWTService
 }
 
 func setupIntegration(t *testing.T) (*httptest.Server, func()) {
@@ -102,7 +105,7 @@ func setupIntegrationFixture(t *testing.T, opts ...handlerOption) (*integrationF
 		vaultServer.Close()
 		pgContainer.Terminate(ctx)
 	}
-	return &integrationFixture{srv: srv, connStr: connStr}, cleanup
+	return &integrationFixture{srv: srv, connStr: connStr, signingKey: priv, jwtSvc: jwtSvc}, cleanup
 }
 
 func postJSON(srv *httptest.Server, path string, body interface{}) *http.Response {

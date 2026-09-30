@@ -105,6 +105,38 @@ func TestMigrate_Up(t *testing.T) {
 	if !tableExists(t, connStr, "auth", "api_keys") {
 		t.Error("expected auth.api_keys table to exist after migration")
 	}
+	if !tableExists(t, connStr, "auth", "role_changes") {
+		t.Error("expected auth.role_changes table to exist after migration")
+	}
+}
+
+// An account's allowed roles default to NULL, which reads as [role].
+func TestMigrate_UsersHoldRoleNamesAndAllowedRoles(t *testing.T) {
+	connStr, cleanup := setupTestDB(t)
+	defer cleanup()
+	db := poolFor(t, connStr)
+	if err := Run(context.Background(), db); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	var dataType, nullable string
+	if err := db.QueryRow(context.Background(),
+		`SELECT data_type, is_nullable FROM information_schema.columns
+		 WHERE table_schema = 'auth' AND table_name = 'users' AND column_name = 'allowed_roles'`,
+	).Scan(&dataType, &nullable); err != nil {
+		t.Fatalf("allowed_roles column: %v", err)
+	}
+	if dataType != "ARRAY" || nullable != "YES" {
+		t.Errorf("allowed_roles: type %s nullable %s, want ARRAY YES", dataType, nullable)
+	}
+
+	var roleLength int
+	if err := db.QueryRow(context.Background(),
+		`SELECT character_maximum_length FROM information_schema.columns
+		 WHERE table_schema = 'auth' AND table_name = 'users' AND column_name = 'role'`,
+	).Scan(&roleLength); err != nil || roleLength < 63 {
+		t.Errorf("users.role holds %d characters (%v), want a 63-character role name", roleLength, err)
+	}
 }
 
 func TestMigrate_Up_Idempotent(t *testing.T) {

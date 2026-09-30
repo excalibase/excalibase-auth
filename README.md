@@ -46,6 +46,8 @@ All endpoints are scoped under `/auth/{orgSlug}/{projectName}/`:
 | `POST` | `/auth/{orgSlug}/{projectName}/validate` | Validate a JWT and return claims |
 | `POST` | `/auth/{orgSlug}/{projectName}/refresh` | Exchange refresh token for new token pair |
 | `POST` | `/auth/{orgSlug}/{projectName}/logout` | Revoke a refresh token |
+| `GET`  | `/auth/{orgSlug}/{projectName}/users` | List the project's accounts (user admin or service token) |
+| `PUT`  | `/auth/{orgSlug}/{projectName}/users/{userId}/role` | Set an account's role and allowed roles (user admin or service token) |
 | `GET`  | `/healthz` | Health check |
 
 ### Register
@@ -115,6 +117,36 @@ curl -X POST http://localhost:24000/auth/my-org/my-project/logout \
   -H "Content-Type: application/json" \
   -d '{"refreshToken": "550e8400-e29b-41d4-a716-446655440000"}'
 ```
+
+### End-user roles
+
+Two callers may use `/users`, both for the project in the path only:
+
+- the control plane's **user-admin token**: `token_use: "user_admin"`, `aud: ["excalibase-auth:<projectId>"]`,
+  `exp - iat` at most 60 s, and a non-empty `actor` claim naming the Studio platform user;
+- the project's **secret-key token** (`role` and `scope` both `service`).
+
+End-user, publishable-key (`anon`) and `key_admin` tokens are refused, and a `user_admin` token is refused
+by `/api-keys`. No token or a bad one answers `401`; the wrong kind of token `403 insufficient_scope`; a
+token for another project `403 token_project_mismatch`.
+
+```bash
+curl http://localhost:24000/auth/my-org/my-project/users?limit=100&offset=0 \
+  -H "Authorization: Bearer $TOKEN"
+# 200 {"users":[{"id":1,"email":"alice@example.com","role":"user","allowedRoles":["user"],"enabled":true,"emailVerified":true}]}
+
+curl -X PUT http://localhost:24000/auth/my-org/my-project/users/1/role \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"role": "editor", "allowedRoles": ["editor", "user"]}'
+# 200 {"id":1,"email":"alice@example.com","role":"editor","allowedRoles":["editor","user"],"enabled":true,"emailVerified":true}
+```
+
+- `GET /users` is ordered by id; `limit` defaults to 100 (1–500), `offset` to 0; others answer `400 invalid_pagination`.
+- `allowedRoles` is optional (stored as `NULL`, read as `[role]`), must contain `role`, and holds at most 20 names.
+- `PUT` answers `400` with `invalid_request`, `invalid_user_id`, `invalid_role`, `reserved_role`,
+  `role_not_in_allowed_roles` or `too_many_allowed_roles`; `404 user_not_found`. It shares the `/token` per-IP rate limit.
+- A change revokes every refresh token of the account in the same transaction, so the new roles apply at its
+  next sign-in, and writes an `auth.role_changes` row whose `actor` is `studio:<actor>` or `service-key:<keyId>`.
 
 ## Quick Start
 
@@ -245,11 +277,21 @@ id BIGSERIAL PRIMARY KEY
 email VARCHAR(100) UNIQUE NOT NULL
 password VARCHAR(255) NOT NULL        -- bcrypt hash
 full_name VARCHAR(100) NOT NULL
-role VARCHAR(50) DEFAULT 'user'
+role VARCHAR(63) DEFAULT 'user'
 enabled BOOLEAN DEFAULT true
 created_at TIMESTAMPTZ
 updated_at TIMESTAMPTZ
 last_login_at TIMESTAMPTZ
+
+allowed_roles TEXT[]                  -- NULL = [role]
+
+-- auth.role_changes (one row per role change)
+id BIGSERIAL PRIMARY KEY
+user_id BIGINT REFERENCES users(id) ON DELETE CASCADE
+old_role, new_role TEXT NOT NULL
+old_allowed_roles, new_allowed_roles TEXT[] NOT NULL
+actor TEXT NOT NULL                   -- studio:<platform user id> | service-key:<api key id>
+changed_at TIMESTAMPTZ
 
 -- auth.refresh_tokens
 id BIGSERIAL PRIMARY KEY
@@ -290,13 +332,15 @@ may act as and always contains `role`.
 
 | Token | `role` / `allowed_roles` | `scope` | `userId` | `sub` |
 |-------|--------------------------|---------|----------|-------|
-| password login, registration, refresh | the account's `users.role` | `authenticated` | the account id | email |
+| password login, registration, refresh | `users.role` / `users.allowed_roles` (or `[role]` when unset) | `authenticated` | the account id | email |
 | publishable api key | `anon` / `["anon"]` | `public` | absent | `apikey:<id>` |
 | secret api key | `service` / `["service"]` | `service` | absent | `apikey:<id>` |
 
-An account's role is read from `users.role` at every login and refresh, so a changed role takes
-effect on the next refresh. It must match `^[a-z][a-z0-9_]{0,62}$` and must not be `anon` or
-`service`; otherwise login and refresh answer `403 {"error": "invalid_account_role"}`.
+An account's roles are read from `users.role` and `users.allowed_roles` at every login and refresh.
+Every name must match `^[a-z][a-z0-9_]{0,62}$` and must not be reserved: `anon`, `service`, the platform
+roles `postgres`, `auth_admin`, `excalibase_app`, `cdc_watcher`, `streaming_replica`,
+`excalibase_docbrowser`, `app`, or any name starting with `pg_` or `excalibase_`; `role` must be one of
+the allowed roles. Otherwise login and refresh answer `403 {"error": "invalid_account_role"}`.
 
 excalibase-graphql fetches the public key from the provisioning vault, verifies the JWT directly, and uses the claims to set PostgreSQL RLS context:
 ```sql

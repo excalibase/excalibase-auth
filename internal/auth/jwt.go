@@ -44,14 +44,18 @@ const (
 	// manage a project's api keys on a developer's behalf. It is accepted by
 	// the api-key routes only.
 	TokenUseKeyAdmin = "key_admin"
+	// TokenUseUserAdmin marks the short token the control plane signs to
+	// manage a project's end-user roles for a platform user named in `actor`.
+	// It is accepted by the user routes only.
+	TokenUseUserAdmin = "user_admin"
 )
 
 // keyAdminAudiencePrefix is deliberately not the engine's "excalibase:"
 // prefix, so the engine's audience check refuses a key-admin token.
 const keyAdminAudiencePrefix = "excalibase-auth:"
 
-// MaxKeyAdminLifetime bounds a key-admin token; the control plane signs one
-// per request.
+// MaxKeyAdminLifetime bounds a key-admin or user-admin token; the control
+// plane signs one per request.
 const MaxKeyAdminLifetime = 60 * time.Second
 
 // KeyAdminAudience is the only audience a key-admin token for projectID may carry.
@@ -91,6 +95,8 @@ type Claims struct {
 	// EmailVerified mirrors auth.users.email_verified so resource servers can
 	// gate on it without a round trip to the auth service.
 	EmailVerified bool `json:"email_verified"`
+	// Actor is the platform user a user-admin token acts for.
+	Actor string `json:"actor,omitempty"`
 	// IssuedAt and ExpiresAt are read back by Verify (unix seconds).
 	IssuedAt  int64 `json:"-"`
 	ExpiresAt int64 `json:"-"`
@@ -295,6 +301,7 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	keyID, _ := mapClaims["keyId"].(float64)
 	tokenUse, _ := mapClaims["token_use"].(string)
 	emailVerified, _ := mapClaims["email_verified"].(bool)
+	actor, _ := mapClaims["actor"].(string)
 	issuedAt, _ := mapClaims["iat"].(float64)
 	expiresAt, _ := mapClaims["exp"].(float64)
 	return &Claims{
@@ -313,5 +320,6 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 		AllowedRoles:  stringsClaim(mapClaims["allowed_roles"]),
 		Scope:         scope,
 		KeyID:         int64(keyID),
+		Actor:         actor,
 	}, nil
 }
