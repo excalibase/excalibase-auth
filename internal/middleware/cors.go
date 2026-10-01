@@ -33,8 +33,11 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 					w.Header().Set("Access-Control-Allow-Methods", strings.Join([]string{
 						"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH",
 					}, ", "))
+					// The SDK sends its publishable key and may send a role on
+					// every call; a browser app cannot sign in unless both pass.
 					w.Header().Set("Access-Control-Allow-Headers", strings.Join([]string{
 						"Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token",
+						"X-Excalibase-Publishable-Key", "X-Excalibase-Role",
 					}, ", "))
 					w.Header().Set("Access-Control-Max-Age", "3600")
 				}
