@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -161,5 +162,29 @@ func TestCORS_VaryHeader(t *testing.T) {
 
 	if got := rr.Header().Get("Vary"); got != "Origin" {
 		t.Errorf("Vary: got %q, want %q", got, "Origin")
+	}
+}
+
+// @excalibase/sdk sends its publishable key header on every auth call, and a
+// role header may ride along; a browser app on its own origin must get past the
+// preflight with them, or it can never sign in.
+func TestCORS_PreflightAllowsTheSDKHeaders(t *testing.T) {
+	handler := CORS([]string{"*"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called for preflight")
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/auth/acme/proj-1/token", nil)
+	req.Header.Set("Origin", "https://shop.example.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "content-type,x-excalibase-publishable-key,x-excalibase-role")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	allowed := strings.ToLower(rr.Header().Get("Access-Control-Allow-Headers"))
+	for _, header := range []string{"authorization", "content-type", "x-excalibase-publishable-key", "x-excalibase-role"} {
+		if !strings.Contains(allowed, header) {
+			t.Errorf("Allow-Headers %q is missing %s", allowed, header)
+		}
 	}
 }
