@@ -60,6 +60,8 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 | `RATE_LIMIT_REGISTER_PER_PROJECT` | `60` | No |
 | `RATE_LIMIT_LOGIN_FAILURES` / `_LOGIN_FAILURE_WINDOW_SECONDS` | `5` / `900` | No |
 | `TRUSTED_PROXY_CIDRS` | — (XFF never trusted) | No |
+| `CORS_ORIGINS` | `https://app.excalibase.io` (platform/Studio; project routes add the project's allowlist) | No |
+| `PROJECT_CORS_TTL_SECONDS` | `30` | No |
 
 ## Testing Strategy
 

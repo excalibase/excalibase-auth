@@ -11,6 +11,7 @@ import (
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/config"
+	"github.com/excalibase/auth/internal/cors"
 	"github.com/excalibase/auth/internal/email"
 	"github.com/excalibase/auth/internal/handler"
 	"github.com/excalibase/auth/internal/metrics"
@@ -58,7 +59,8 @@ func main() {
 	}
 	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.RefreshExpiration).
 		WithTrustedProxies(cfg.RateLimit.TrustedProxyCIDRs).
-		WithHasher(hasher)
+		WithHasher(hasher).
+		WithCORS(cfg.CORSOrigins, cors.NewProvisioningProvider(cfg.ProvisioningURL, tokens, cfg.ProjectCORSTTL))
 	if cfg.RateLimit.Enabled {
 		authHandler.WithRateLimits(custommw.NewRateLimits(custommw.RateLimitConfigFrom(cfg.RateLimit)))
 	} else {
@@ -76,7 +78,8 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(custommw.SecurityHeaders)
-	r.Use(custommw.CORS(cfg.CORSOrigins))
+	// Project routes answer CORS from the project's own allowlist (see Routes).
+	r.Use(custommw.ExceptPathPrefix("/auth/", custommw.CORS(cfg.CORSOrigins)))
 	r.Use(metrics.Middleware)
 
 	r.Handle("/metrics", metrics.Handler())

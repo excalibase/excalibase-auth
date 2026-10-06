@@ -30,16 +30,7 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 			// Handle preflight
 			if r.Method == http.MethodOptions {
 				if origin != "" && (wildcard || originSet[origin]) {
-					w.Header().Set("Access-Control-Allow-Methods", strings.Join([]string{
-						"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH",
-					}, ", "))
-					// The SDK sends its publishable key and may send a role on
-					// every call; a browser app cannot sign in unless both pass.
-					w.Header().Set("Access-Control-Allow-Headers", strings.Join([]string{
-						"Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token",
-						"X-Excalibase-Publishable-Key", "X-Excalibase-Role",
-					}, ", "))
-					w.Header().Set("Access-Control-Max-Age", "3600")
+					setPreflightHeaders(w)
 				}
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -48,4 +39,18 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// setPreflightHeaders grants the methods and headers a browser may use. The SDK
+// sends its publishable key and may send a role on every call; a browser app
+// cannot sign in unless both pass.
+func setPreflightHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Methods", strings.Join([]string{
+		"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH",
+	}, ", "))
+	w.Header().Set("Access-Control-Allow-Headers", strings.Join([]string{
+		"Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token",
+		"X-Excalibase-Publishable-Key", "X-Excalibase-Role",
+	}, ", "))
+	w.Header().Set("Access-Control-Max-Age", "3600")
 }

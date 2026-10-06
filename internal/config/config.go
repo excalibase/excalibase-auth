@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/ratelimit"
@@ -22,7 +23,9 @@ type Config struct {
 	AccessTTL           int // seconds — signed lifetime of every access token
 	RefreshExpiration   int // seconds
 	CORSOrigins         []string
-	RateLimit           RateLimit
+	// ProjectCORSTTL is how long a project's browser-origin allowlist is cached.
+	ProjectCORSTTL time.Duration
+	RateLimit      RateLimit
 	// AudiencePrefix is prepended to the projectId to build the `aud` claim.
 	AudiencePrefix string
 	// SiteURL is the fallback base URL for links in transactional emails, used
@@ -68,6 +71,7 @@ func Load() Config {
 		AccessTTL:           accessTTL,
 		RefreshExpiration:   envInt("REFRESH_EXPIRATION", 604800),
 		CORSOrigins:         parseCORSOrigins(envOr("CORS_ORIGINS", "https://app.excalibase.io")),
+		ProjectCORSTTL:      projectCORSTTL(),
 		RateLimit:           loadRateLimit(),
 		AudiencePrefix:      envOr("AUTH_AUD_PREFIX", auth.DefaultAudiencePrefix),
 		SiteURL:             strings.TrimRight(os.Getenv("AUTH_SITE_URL"), "/"),
@@ -161,6 +165,18 @@ func envBool(key string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+// defaultProjectCORSTTL matches the engine, so an allowlist change reaches
+// sign-in and data calls on the same schedule.
+const defaultProjectCORSTTL = 30 * time.Second
+
+func projectCORSTTL() time.Duration {
+	seconds := envInt("PROJECT_CORS_TTL_SECONDS", 0)
+	if seconds <= 0 {
+		return defaultProjectCORSTTL
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func envInt(key string, fallback int) int {
