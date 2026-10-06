@@ -64,6 +64,11 @@ type AuthHandler struct {
 	resendThrottle *throttle.Throttle
 	forgotThrottle *throttle.Throttle
 	hasher         passwordHasher
+
+	// corsPlatform (Studio) and corsOrigins (the project's allowlist) answer
+	// CORS on project routes; with no source no project origin is granted.
+	corsPlatform []string
+	corsOrigins  middleware.ProjectOrigins
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
@@ -95,6 +100,14 @@ func (h *AuthHandler) SetEmail(sender email.Sender, siteURL string) {
 	h.siteURL = strings.TrimRight(siteURL, "/")
 }
 
+// WithCORS sets who may call project routes from a browser: the platform's
+// own origins plus each project's allowlist, read through origins.
+func (h *AuthHandler) WithCORS(platformOrigins []string, origins middleware.ProjectOrigins) *AuthHandler {
+	h.corsPlatform = append([]string{}, platformOrigins...)
+	h.corsOrigins = origins
+	return h
+}
+
 // WithRateLimits enables throttling of the credential routes. It returns the
 // receiver so construction reads as a chain.
 func (h *AuthHandler) WithRateLimits(limits *middleware.RateLimits) *AuthHandler {
@@ -104,6 +117,7 @@ func (h *AuthHandler) WithRateLimits(limits *middleware.RateLimits) *AuthHandler
 
 func (h *AuthHandler) Routes(r chi.Router) {
 	r.Route("/{orgSlug}/{projectId}", func(r chi.Router) {
+		r.Use(middleware.ProjectCORS(h.corsPlatform, h.corsOrigins))
 		r.Use(middleware.TenantContext)
 		r.With(h.limit(rateLimitRegister)).Post("/register", h.Register)
 		r.With(h.limit(rateLimitLogin)).Post("/login", h.Login)

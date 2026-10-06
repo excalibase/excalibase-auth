@@ -211,6 +211,8 @@ All configuration is via environment variables:
 | `RATE_LIMIT_LOGIN_FAILURES` | `5` | Failed logins per identity before the identity is locked |
 | `RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window over which login failures are counted |
 | `TRUSTED_PROXY_CIDRS` | — (empty) | Comma-separated CIDRs allowed to set `X-Forwarded-For` |
+| `CORS_ORIGINS` | `https://app.excalibase.io` | Platform (Studio) origins, trusted with credentials on every route. On `/auth/{org}/{project}/*` a `*` here is ignored: other origins come from the project's allowlist (`corsAllowedOrigins` on provisioning's `/projects/{id}/info`, the list the engine uses), exact match, no credentials; an allowlist that cannot be read refuses the origin |
+| `PROJECT_CORS_TTL_SECONDS` | `30` | How long a project's allowlist is cached; a failed refresh keeps the last list |
 | `TENANT_DB_SSLMODE` | `verify-full` | `disable` (docker AIO only: password login, no TLS) or a TLS mode. `require`, `verify-ca` and `verify-full` all mean verify-full with the client certificate from the vault record (`sslcert`/`sslkey`/`sslrootcert`); a record without them is refused. `prefer`/`allow` and anything else fail startup |
 
 ### Rate Limiting

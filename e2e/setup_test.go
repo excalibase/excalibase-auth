@@ -41,6 +41,11 @@ func TestMain(m *testing.M) {
 				"key":       privPEM,
 				"algorithm": "EC-P256",
 			})
+		case r.URL.Path == "/projects/"+corsProject+"/info":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"projectId":          corsProject,
+				"corsAllowedOrigins": []string{corsAppOrigin},
+			})
 		default:
 			// Return PG credentials for any project
 			json.NewEncoder(w).Encode(map[string]string{
