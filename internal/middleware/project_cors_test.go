@@ -19,7 +19,7 @@ type fakeOrigins struct {
 	asked []string
 }
 
-func (f *fakeOrigins) OriginsFor(_ context.Context, projectID string) ([]string, error) {
+func (f *fakeOrigins) Resolve(_ context.Context, projectID string) ([]string, error) {
 	f.asked = append(f.asked, projectID)
 	if list, ok := f.lists[projectID]; ok {
 		return list, nil
@@ -37,7 +37,7 @@ const (
 
 // projectRouter mounts ProjectCORS the way AuthHandler.Routes does, so the
 // project id comes from chi's own routing of /auth/{orgSlug}/{projectId}.
-func projectRouter(t *testing.T, platform []string, origins ProjectOrigins) (http.Handler, *bool) {
+func projectRouter(t *testing.T, platform []string, origins OriginResolver) (http.Handler, *bool) {
 	t.Helper()
 	reached := false
 	r := chi.NewRouter()

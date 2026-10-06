@@ -9,9 +9,9 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// ProjectOrigins resolves a project's browser-origin allowlist.
-type ProjectOrigins interface {
-	OriginsFor(ctx context.Context, projectID string) ([]string, error)
+// OriginResolver resolves a project's browser-origin allowlist.
+type OriginResolver interface {
+	Resolve(ctx context.Context, projectID string) ([]string, error)
 }
 
 // corsWildcard is how provisioning stores "any origin": the list's only entry.
@@ -27,7 +27,7 @@ const corsWildcard = "*"
 //     and a refused preflight is a 403.
 //
 // A platform "*" is ignored here: it is not a project's decision.
-func ProjectCORS(platformOrigins []string, origins ProjectOrigins) func(http.Handler) http.Handler {
+func ProjectCORS(platformOrigins []string, origins OriginResolver) func(http.Handler) http.Handler {
 	platform := make(map[string]bool, len(platformOrigins))
 	for _, o := range platformOrigins {
 		if o != corsWildcard {
@@ -37,29 +37,16 @@ func ProjectCORS(platformOrigins []string, origins ProjectOrigins) func(http.Han
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			origin := r.Header.Get("Origin")
-			if origin == "" {
+			if r.Header.Get("Origin") == "" {
 				next.ServeHTTP(w, r)
 				return
 			}
-			w.Header().Add("Vary", "Origin")
-
-			allowOrigin, credentials := platformGrant(platform, origin)
-			if allowOrigin == "" {
-				allowOrigin = projectGrant(r, origins, origin)
-			}
-			if allowOrigin != "" {
-				w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
-				if credentials {
-					w.Header().Set("Access-Control-Allow-Credentials", "true")
-				}
-			}
-
+			granted := grantProjectCORS(w, r, platform, origins)
 			if r.Method != http.MethodOptions {
 				next.ServeHTTP(w, r)
 				return
 			}
-			if allowOrigin == "" {
+			if !granted {
 				w.WriteHeader(http.StatusForbidden)
 				return
 			}
@@ -69,21 +56,32 @@ func ProjectCORS(platformOrigins []string, origins ProjectOrigins) func(http.Han
 	}
 }
 
-func platformGrant(platform map[string]bool, origin string) (string, bool) {
+// grantProjectCORS sets the grant headers for the request's origin and reports
+// whether it granted one.
+func grantProjectCORS(w http.ResponseWriter, r *http.Request, platform map[string]bool, origins OriginResolver) bool {
+	origin := r.Header.Get("Origin")
+	w.Header().Add("Vary", "Origin")
 	if platform[origin] {
-		return origin, true
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		return true
 	}
-	return "", false
+	allowOrigin := projectGrant(r, origins, origin)
+	if allowOrigin == "" {
+		return false
+	}
+	w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
+	return true
 }
 
 // projectGrant is the Access-Control-Allow-Origin value the project's
 // allowlist gives origin, or "".
-func projectGrant(r *http.Request, origins ProjectOrigins, origin string) string {
+func projectGrant(r *http.Request, origins OriginResolver, origin string) string {
 	projectID := chi.URLParam(r, "projectId")
 	if projectID == "" || origins == nil {
 		return ""
 	}
-	listed, err := origins.OriginsFor(r.Context(), projectID)
+	listed, err := origins.Resolve(r.Context(), projectID)
 	if err != nil {
 		// The project id is request-derived; the access log carries the path.
 		log.Printf("WARN: project CORS allowlist unavailable, refusing cross-origin access: %v", err)

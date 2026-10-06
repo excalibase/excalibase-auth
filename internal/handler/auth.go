@@ -68,7 +68,7 @@ type AuthHandler struct {
 	// corsPlatform (Studio) and corsOrigins (the project's allowlist) answer
 	// CORS on project routes; with no source no project origin is granted.
 	corsPlatform []string
-	corsOrigins  middleware.ProjectOrigins
+	corsOrigins  middleware.OriginResolver
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
@@ -102,7 +102,7 @@ func (h *AuthHandler) SetEmail(sender email.Sender, siteURL string) {
 
 // WithCORS sets who may call project routes from a browser: the platform's
 // own origins plus each project's allowlist, read through origins.
-func (h *AuthHandler) WithCORS(platformOrigins []string, origins middleware.ProjectOrigins) *AuthHandler {
+func (h *AuthHandler) WithCORS(platformOrigins []string, origins middleware.OriginResolver) *AuthHandler {
 	h.corsPlatform = append([]string{}, platformOrigins...)
 	h.corsOrigins = origins
 	return h

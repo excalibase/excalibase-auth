@@ -64,8 +64,8 @@ func NewProvisioningProvider(baseURL string, tokens token.Source, ttl time.Durat
 	}
 }
 
-// OriginsFor returns the project's allowlist, or an error wrapping ErrUnavailable.
-func (p *ProvisioningProvider) OriginsFor(ctx context.Context, projectID string) ([]string, error) {
+// Resolve returns the project's allowlist, or an error wrapping ErrUnavailable.
+func (p *ProvisioningProvider) Resolve(ctx context.Context, projectID string) ([]string, error) {
 	now := p.now()
 	p.mu.RLock()
 	cached, ok := p.cache[projectID]

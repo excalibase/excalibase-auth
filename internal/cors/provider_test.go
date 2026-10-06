@@ -45,13 +45,13 @@ func newProvider(url string, c *clock) *ProvisioningProvider {
 	return p
 }
 
-func TestOriginsForReadsTheProjectInfoAllowlist(t *testing.T) {
+func TestResolveReadsTheProjectInfoAllowlist(t *testing.T) {
 	stub := &provisioningStub{status: http.StatusOK, body: `{"projectId":"proj-1","corsAllowedOrigins":["https://shop.example.com","http://localhost:5173"]}`}
 	srv := stub.serve(t)
 
-	got, err := newProvider(srv.URL, &clock{now: time.Unix(0, 0)}).OriginsFor(context.Background(), "proj-1")
+	got, err := newProvider(srv.URL, &clock{now: time.Unix(0, 0)}).Resolve(context.Background(), "proj-1")
 	if err != nil {
-		t.Fatalf("OriginsFor: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if len(got) != 2 || got[0] != "https://shop.example.com" || got[1] != "http://localhost:5173" {
 		t.Errorf("origins = %v", got)
@@ -64,28 +64,28 @@ func TestOriginsForReadsTheProjectInfoAllowlist(t *testing.T) {
 	}
 }
 
-func TestOriginsForAMissingFieldIsNoOrigins(t *testing.T) {
+func TestResolveAMissingFieldIsNoOrigins(t *testing.T) {
 	stub := &provisioningStub{status: http.StatusOK, body: `{"projectId":"proj-1"}`}
 	srv := stub.serve(t)
 
-	got, err := newProvider(srv.URL, &clock{now: time.Unix(0, 0)}).OriginsFor(context.Background(), "proj-1")
+	got, err := newProvider(srv.URL, &clock{now: time.Unix(0, 0)}).Resolve(context.Background(), "proj-1")
 	if err != nil {
-		t.Fatalf("OriginsFor: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("origins = %v, want none", got)
 	}
 }
 
-func TestOriginsForCachesWithinTheTTLAndRefetchesAfter(t *testing.T) {
+func TestResolveCachesWithinTheTTLAndRefetchesAfter(t *testing.T) {
 	stub := &provisioningStub{status: http.StatusOK, body: `{"corsAllowedOrigins":["https://a.example.com"]}`}
 	srv := stub.serve(t)
 	c := &clock{now: time.Unix(1000, 0)}
 	p := newProvider(srv.URL, c)
 
 	for i := 0; i < 3; i++ {
-		if _, err := p.OriginsFor(context.Background(), "proj-1"); err != nil {
-			t.Fatalf("OriginsFor: %v", err)
+		if _, err := p.Resolve(context.Background(), "proj-1"); err != nil {
+			t.Fatalf("Resolve: %v", err)
 		}
 	}
 	if n := stub.calls.Load(); n != 1 {
@@ -93,8 +93,8 @@ func TestOriginsForCachesWithinTheTTLAndRefetchesAfter(t *testing.T) {
 	}
 
 	c.now = c.now.Add(31 * time.Second)
-	if _, err := p.OriginsFor(context.Background(), "proj-1"); err != nil {
-		t.Fatalf("OriginsFor: %v", err)
+	if _, err := p.Resolve(context.Background(), "proj-1"); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 	if n := stub.calls.Load(); n != 2 {
 		t.Errorf("calls after TTL = %d, want 2", n)
@@ -103,35 +103,35 @@ func TestOriginsForCachesWithinTheTTLAndRefetchesAfter(t *testing.T) {
 
 // An unknown project (404) or a provisioning outage with nothing cached is an
 // error, never an empty list: the caller must refuse rather than guess.
-func TestOriginsForFailsClosedWithNothingCached(t *testing.T) {
+func TestResolveFailsClosedWithNothingCached(t *testing.T) {
 	for _, status := range []int{http.StatusNotFound, http.StatusServiceUnavailable, http.StatusForbidden} {
 		stub := &provisioningStub{status: status, body: `{"error":"x"}`}
 		srv := stub.serve(t)
 
-		_, err := newProvider(srv.URL, &clock{now: time.Unix(0, 0)}).OriginsFor(context.Background(), "proj-1")
+		_, err := newProvider(srv.URL, &clock{now: time.Unix(0, 0)}).Resolve(context.Background(), "proj-1")
 		if !errors.Is(err, ErrUnavailable) {
 			t.Errorf("status %d: err = %v, want ErrUnavailable", status, err)
 		}
 	}
 }
 
-func TestOriginsForFailsClosedWhenProvisioningIsUnreachable(t *testing.T) {
+func TestResolveFailsClosedWhenProvisioningIsUnreachable(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	url := srv.URL
 	srv.Close()
 
-	_, err := newProvider(url, &clock{now: time.Unix(0, 0)}).OriginsFor(context.Background(), "proj-1")
+	_, err := newProvider(url, &clock{now: time.Unix(0, 0)}).Resolve(context.Background(), "proj-1")
 	if !errors.Is(err, ErrUnavailable) {
 		t.Errorf("err = %v, want ErrUnavailable", err)
 	}
 }
 
-func TestOriginsForFailsClosedWithoutAToken(t *testing.T) {
+func TestResolveFailsClosedWithoutAToken(t *testing.T) {
 	stub := &provisioningStub{status: http.StatusOK, body: `{"corsAllowedOrigins":["*"]}`}
 	srv := stub.serve(t)
 	p := NewProvisioningProvider(srv.URL, token.Literal(""), time.Minute)
 
-	if _, err := p.OriginsFor(context.Background(), "proj-1"); !errors.Is(err, ErrUnavailable) {
+	if _, err := p.Resolve(context.Background(), "proj-1"); !errors.Is(err, ErrUnavailable) {
 		t.Errorf("err = %v, want ErrUnavailable", err)
 	}
 	if n := stub.calls.Load(); n != 0 {
@@ -139,29 +139,29 @@ func TestOriginsForFailsClosedWithoutAToken(t *testing.T) {
 	}
 }
 
-func TestOriginsForFailsClosedOnAMalformedBody(t *testing.T) {
+func TestResolveFailsClosedOnAMalformedBody(t *testing.T) {
 	stub := &provisioningStub{status: http.StatusOK, body: `{"corsAllowedOrigins":"https://a.example.com"}`}
 	srv := stub.serve(t)
 
-	if _, err := newProvider(srv.URL, &clock{now: time.Unix(0, 0)}).OriginsFor(context.Background(), "proj-1"); !errors.Is(err, ErrUnavailable) {
+	if _, err := newProvider(srv.URL, &clock{now: time.Unix(0, 0)}).Resolve(context.Background(), "proj-1"); !errors.Is(err, ErrUnavailable) {
 		t.Errorf("err = %v, want ErrUnavailable", err)
 	}
 }
 
 // Same contract as the engine: a failed refresh keeps serving the last list
 // provisioning gave for that project.
-func TestOriginsForServesTheLastGoodListWhenARefreshFails(t *testing.T) {
+func TestResolveServesTheLastGoodListWhenARefreshFails(t *testing.T) {
 	stub := &provisioningStub{status: http.StatusOK, body: `{"corsAllowedOrigins":["https://a.example.com"]}`}
 	srv := stub.serve(t)
 	c := &clock{now: time.Unix(1000, 0)}
 	p := newProvider(srv.URL, c)
-	if _, err := p.OriginsFor(context.Background(), "proj-1"); err != nil {
-		t.Fatalf("OriginsFor: %v", err)
+	if _, err := p.Resolve(context.Background(), "proj-1"); err != nil {
+		t.Fatalf("Resolve: %v", err)
 	}
 
 	stub.status = http.StatusServiceUnavailable
 	c.now = c.now.Add(time.Minute)
-	got, err := p.OriginsFor(context.Background(), "proj-1")
+	got, err := p.Resolve(context.Background(), "proj-1")
 	if err != nil || len(got) != 1 || got[0] != "https://a.example.com" {
 		t.Errorf("got %v, %v; want the cached list", got, err)
 	}
@@ -169,24 +169,24 @@ func TestOriginsForServesTheLastGoodListWhenARefreshFails(t *testing.T) {
 
 // The project id comes from the URL; it is escaped into one path segment so it
 // cannot steer the lookup to another provisioning route.
-func TestOriginsForEscapesTheProjectID(t *testing.T) {
+func TestResolveEscapesTheProjectID(t *testing.T) {
 	stub := &provisioningStub{status: http.StatusOK, body: `{}`}
 	srv := stub.serve(t)
 
-	_, _ = newProvider(srv.URL, &clock{now: time.Unix(0, 0)}).OriginsFor(context.Background(), "../vault?x=1")
+	_, _ = newProvider(srv.URL, &clock{now: time.Unix(0, 0)}).Resolve(context.Background(), "../vault?x=1")
 	if p := stub.path.Load(); p != "/projects/..%2Fvault%3Fx=1/info" {
 		t.Errorf("path = %v", p)
 	}
 }
 
-func TestOriginsForReturnsACopyCallersCannotMutate(t *testing.T) {
+func TestResolveReturnsACopyCallersCannotMutate(t *testing.T) {
 	stub := &provisioningStub{status: http.StatusOK, body: `{"corsAllowedOrigins":["https://a.example.com"]}`}
 	srv := stub.serve(t)
 	p := newProvider(srv.URL, &clock{now: time.Unix(0, 0)})
 
-	first, _ := p.OriginsFor(context.Background(), "proj-1")
+	first, _ := p.Resolve(context.Background(), "proj-1")
 	first[0] = "https://evil.example.com"
-	second, _ := p.OriginsFor(context.Background(), "proj-1")
+	second, _ := p.Resolve(context.Background(), "proj-1")
 	if second[0] != "https://a.example.com" {
 		t.Errorf("cache was mutated through a returned slice: %v", second)
 	}
