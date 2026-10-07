@@ -26,6 +26,7 @@ func forgotPasswordRouter(t *testing.T, trusted []*net.IPNet) *chi.Mux {
 	jwtSvc, _ := auth.NewJWTService(string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b})), "excalibase", 3600)
 	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
 	h := NewAuthHandler(mgr, jwtSvc, 604800).WithTrustedProxies(trusted)
+	h.SetEmail(nil, "https://app.test")
 	r := chi.NewRouter()
 	r.Route("/auth", h.Routes)
 	return r

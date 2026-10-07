@@ -105,6 +105,13 @@ type verifyFixture struct {
 // response carries the project's verification setting.
 func setupVerifyFixture(t *testing.T, requireVerification bool) (*verifyFixture, func()) {
 	t.Helper()
+	return setupVerifyFixtureWithSite(t, requireVerification, "https://site.test", "https://fallback.test")
+}
+
+// setupVerifyFixtureWithSite lets a test choose the project's site URL (as
+// provisioning reports it) and auth's own fallback.
+func setupVerifyFixtureWithSite(t *testing.T, requireVerification bool, projectSiteURL, fallbackSiteURL string) (*verifyFixture, func()) {
+	t.Helper()
 	ctx := context.Background()
 
 	pgContainer, err := postgres.Run(ctx, "postgres:16-alpine",
@@ -133,7 +140,7 @@ func setupVerifyFixture(t *testing.T, requireVerification bool) (*verifyFixture,
 				"projectName":              "Test Project",
 				"orgSlug":                  "test-org",
 				"requireEmailVerification": requireVerification,
-				"siteUrl":                  "https://site.test",
+				"siteUrl":                  projectSiteURL,
 			})
 			return
 		}
@@ -159,7 +166,7 @@ func setupVerifyFixture(t *testing.T, requireVerification bool) (*verifyFixture,
 	_, loopback, _ := net.ParseCIDR("127.0.0.1/32")
 	hashes := &switchableHasher{real: auth.NewHasher(2, time.Second)}
 	h := NewAuthHandler(poolMgr, jwtSvc, 604800).WithTrustedProxies([]*net.IPNet{loopback}).WithHasher(hashes)
-	h.SetEmail(sender, "https://fallback.test")
+	h.SetEmail(sender, fallbackSiteURL)
 
 	r := chi.NewRouter()
 	r.Route("/auth", h.Routes)
