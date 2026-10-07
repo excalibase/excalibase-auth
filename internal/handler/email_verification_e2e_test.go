@@ -449,12 +449,19 @@ func TestIntegration_TokenCarriesEmailVerifiedClaim(t *testing.T) {
 	}
 
 	postJSON(fx.srv, testOrgProject+"/verify-email", map[string]string{"token": plaintext}).Body.Close()
+	// A resend link proves only the address, so the owner sets a new password.
+	postJSON(fx.srv, testOrgProject+"/reset-password", map[string]string{
+		"token": resetLinkToken(t, fx.sender.last(t)), "newPassword": newPassword,
+	}).Body.Close()
 
 	after := postJSON(fx.srv, testOrgProject+"/login", map[string]string{
-		"email": aliceEmail, "password": alicePassword,
+		"email": aliceEmail, "password": newPassword,
 	})
 	var afterBody map[string]interface{}
 	decodeJSON(after, &afterBody)
+	if after.StatusCode != 200 {
+		t.Fatalf("login after verification and reset: got %d", after.StatusCode)
+	}
 	if claimsOf(t, afterBody["accessToken"].(string))["email_verified"] != true {
 		t.Error("email_verified should be true after verification")
 	}

@@ -75,7 +75,9 @@ curl -X POST http://localhost:24000/auth/my-org/my-project/register \
 
 The password must be at least 8 characters, at most 256 bytes and not only whitespace; a breach answers 400 naming the rule.
 
-When the project requires email verification, no session is returned and the verification link is mailed. A new address and one that already has an account get the same `201 {"emailVerificationRequired": true, "message": ..., "user": {"email", "fullName"}}`, and the existing account gets no mail. When verification is not required, sign-up signs the user in directly and sends no verification mail, so a taken address answers `409` (it cannot be hidden without breaking that flow).
+When the project requires email verification, no session is returned and the verification link is mailed. A new address and one that already has an account get the same `201 {"emailVerificationRequired": true, "message": ..., "user": {"email", "fullName"}}`. A verified account gets no mail. An account nobody has verified yet takes the new sign-up's password and name and gets a fresh link, so the inbox owner overrides anyone who signed up with their address first (at most 3 such takeovers per address per hour, shared with resend). When verification is not required, sign-up signs the user in directly and sends no verification mail, so a taken address answers `409` (it cannot be hidden without breaking that flow). On a project that requires verification, an unverified account can neither sign in nor refresh (`403 email_not_verified`).
+
+Verifying (`GET|POST /verify-email`) revokes every refresh token the account holds. A link from sign-up proves the password that sign-up set and answers `{"verified": true}`. A link from `/resend-verification` proves only the address: the stored password is disabled, a password-reset link is mailed, and the answer is `{"verified": true, "passwordResetRequired": true}`; the user signs in after `/reset-password`.
 
 ### Login
 

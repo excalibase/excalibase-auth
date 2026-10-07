@@ -230,7 +230,9 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if settings.requireEmailVerification {
 		if created {
 			metrics.Signups.Inc()
-			h.sendVerification(r.Context(), pool, projectID, user.ID, req.Email, settings.siteURL)
+			h.sendVerification(r.Context(), pool, projectID, user.ID, req.Email, settings.siteURL, true)
+		} else {
+			h.replaceUnverified(r.Context(), pool, projectID, req, hash, settings.siteURL)
 		}
 		writeRegisterAccepted(w, req)
 		return
@@ -285,6 +287,29 @@ func insertUser(ctx context.Context, db *pgxpool.Pool, req domain.RegisterReques
 		return user, "", false, nil
 	}
 	return user, role, err == nil, err
+}
+
+// replaceUnverified lets a sign-up for an address nobody has proved take the
+// account over: the newest sign-up's password and name win and only its link
+// stays live, so whoever owns the inbox ends up with the password they chose.
+// It shares the resend budget per address; past it the sign-up changes nothing.
+func (h *AuthHandler) replaceUnverified(ctx context.Context, db *pgxpool.Pool, projectID string, req domain.RegisterRequest, hash, siteURL string) {
+	if !h.resendThrottle.Allow(token.Hash(projectID + "|" + req.Email)) {
+		return
+	}
+	var userID int64
+	if err := db.QueryRow(ctx,
+		`UPDATE auth.users SET password = $2, full_name = $3, updated_at = NOW()
+		 WHERE email = $1 AND email_verified = false RETURNING id`,
+		req.Email, hash, req.FullName,
+	).Scan(&userID); err != nil {
+		return
+	}
+	if _, err := db.Exec(ctx,
+		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false", userID); err != nil {
+		log.Printf("auth.register.revoke_failed project=%s userId=%d", safeLog(projectID), userID)
+	}
+	h.sendVerification(ctx, db, projectID, userID, req.Email, siteURL, true)
 }
 
 // writeRegisterAccepted answers a verification-required sign-up. It carries
@@ -457,6 +482,10 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 	}
 	if err := roles.validate(); err != nil {
 		return nil, 403, err
+	}
+	// Returning before commit rolls the consume back, so the token survives.
+	if !emailVerified && h.settingsFor(ctx, projectID).requireEmailVerification {
+		return nil, 403, errEmailNotVerified
 	}
 
 	successor, err := storeRefreshToken(ctx, tx, user.ID, rotated.session)

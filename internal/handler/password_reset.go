@@ -90,9 +90,14 @@ func (h *AuthHandler) sendPasswordReset(r *http.Request, projectID, address stri
 		return
 	}
 
-	// issue invalidates anything outstanding, so the newest link is the only
-	// live one and an older leaked link stops working.
-	plaintext, err := passwordResetTokens.issue(r.Context(), db, userID, resetTTL)
+	h.mailPasswordReset(r.Context(), db, projectID, userID, address)
+}
+
+// mailPasswordReset mints a reset link and mails it. issue invalidates anything
+// outstanding, so the newest link is the only live one and an older leaked link
+// stops working.
+func (h *AuthHandler) mailPasswordReset(ctx context.Context, db *pgxpool.Pool, projectID string, userID int64, address string) {
+	plaintext, err := passwordResetTokens.issue(ctx, db, userID, resetTTL)
 	if err != nil {
 		log.Printf("auth.reset.issue_failed project=%s userId=%d", safeLog(projectID), userID)
 		return
@@ -104,11 +109,11 @@ func (h *AuthHandler) sendPasswordReset(r *http.Request, projectID, address stri
 		Template:  email.TemplatePasswordReset,
 		Data: map[string]string{
 			"userEmail":  address,
-			"resetUrl":   resetLink(h.settingsFor(r.Context(), projectID).siteURL, plaintext),
+			"resetUrl":   resetLink(h.settingsFor(ctx, projectID).siteURL, plaintext),
 			"expiresMin": strconv.Itoa(int(resetTTL.Minutes())),
 		},
 	}
-	if err := h.emailSender.Send(r.Context(), msg); err != nil {
+	if err := h.emailSender.Send(ctx, msg); err != nil {
 		log.Printf("auth.reset.send_failed project=%s userId=%d err=%v", safeLog(projectID), userID, err)
 	}
 }
