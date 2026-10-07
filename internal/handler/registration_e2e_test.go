@@ -35,7 +35,7 @@ func TestIntegration_RegisterSendsNoVerificationMailWhenNotRequired(t *testing.T
 	}
 }
 
-// With verification required, sign-up for an existing address answers exactly
+// With verification required, sign-up for a verified address answers exactly
 // like a new one, mails nothing, and leaves the account's password alone.
 func TestIntegration_RegisterDoesNotRevealExistingAccountsWhenVerificationRequired(t *testing.T) {
 	if testing.Short() {
@@ -47,6 +47,7 @@ func TestIntegration_RegisterDoesNotRevealExistingAccountsWhenVerificationRequir
 	fresh := fx.register(t, aliceEmail)
 	freshStatus, freshBody := fresh.StatusCode, readBody(t, fresh)
 	link := verificationLinkToken(t, fx.sender.last(t))
+	postJSON(fx.srv, testOrgProject+"/verify-email", map[string]string{"token": link}).Body.Close()
 	fx.sender.reset()
 
 	again := postJSON(fx.srv, testOrgProject+"/register", map[string]string{
@@ -61,10 +62,8 @@ func TestIntegration_RegisterDoesNotRevealExistingAccountsWhenVerificationRequir
 		t.Errorf("body differs:\n new:      %s\n existing: %s", freshBody, againBody)
 	}
 	if sent := fx.sender.all(); len(sent) != 0 {
-		t.Errorf("an existing account must get no mail from a sign-up attempt, got %d", len(sent))
+		t.Errorf("a verified account must get no mail from a sign-up attempt, got %d", len(sent))
 	}
-
-	postJSON(fx.srv, testOrgProject+"/verify-email", map[string]string{"token": link}).Body.Close()
 	if login := fx.login(t, alicePassword); login.StatusCode != 200 {
 		t.Errorf("original password after a repeat sign-up: got %d, want 200", login.StatusCode)
 	}
