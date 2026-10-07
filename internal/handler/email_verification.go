@@ -140,9 +140,9 @@ func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"verified": true, "passwordResetRequired": true})
 }
 
-// unusablePassword is stored in place of a hash nobody proved; it never parses
+// unprovenHashMarker is stored in place of a hash nobody proved; it never parses
 // as argon2id, so every password check against it fails.
-const unusablePassword = "!reset-required"
+const unprovenHashMarker = "!reset-required"
 
 type redeemedVerification struct {
 	userID           int64
@@ -181,7 +181,7 @@ func markVerified(ctx context.Context, db *pgxpool.Pool, redeemed redeemedVerifi
 		`UPDATE auth.users SET email_verified = true, updated_at = NOW(),
 		        password = CASE WHEN $2 THEN password ELSE $3 END
 		 WHERE id = $1 RETURNING email`,
-		redeemed.userID, redeemed.confirmsPassword, unusablePassword,
+		redeemed.userID, redeemed.confirmsPassword, unprovenHashMarker,
 	).Scan(&address); err != nil {
 		return "", err
 	}
