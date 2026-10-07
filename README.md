@@ -73,6 +73,10 @@ curl -X POST http://localhost:24000/auth/my-org/my-project/register \
 }
 ```
 
+The password must be at least 8 characters, at most 256 bytes and not only whitespace; a breach answers 400 naming the rule.
+
+When the project requires email verification, no session is returned and the verification link is mailed. A new address and one that already has an account get the same `201 {"emailVerificationRequired": true, "message": ..., "user": {"email", "fullName"}}`, and the existing account gets no mail. When verification is not required, sign-up signs the user in directly and sends no verification mail, so a taken address answers `409` (it cannot be hidden without breaking that flow).
+
 ### Login
 
 ```bash

@@ -30,7 +30,6 @@ const (
 )
 
 var (
-	errPasswordRequired = errors.New("newPassword is required")
 	errResetTokenNeeded = errors.New("token is required")
 )
 
@@ -41,16 +40,6 @@ type forgotPasswordRequest struct {
 type resetPasswordRequest struct {
 	Token       string `json:"token"`
 	NewPassword string `json:"newPassword"`
-}
-
-// validatePassword holds the one password policy both registration and reset
-// answer to. It is deliberately a single function so tightening the rule can
-// never leave one of the two doors more permissive than the other.
-func validatePassword(password string) error {
-	if password == "" {
-		return errPasswordRequired
-	}
-	return nil
 }
 
 func resetLink(siteURL, plaintext string) string {

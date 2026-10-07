@@ -21,6 +21,7 @@ import (
 	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Shared sentinel errors so HTTP handlers and the unified /token dispatch
@@ -38,6 +39,8 @@ var (
 	errInvalidAPIKey        = errors.New("invalid or revoked api key")
 	errUnsupportedGrant     = errors.New("unsupported grant_type")
 	errHashingBusy          = errors.New("server busy, retry shortly")
+	errEmailAndNameRequired = errors.New("email and fullName are required")
+	errCannotRegister       = errors.New("cannot register with this email; sign in or reset the password")
 )
 
 // passwordHasher bounds how many argon2id hashes run at once; a saturated
@@ -187,26 +190,19 @@ func (h *AuthHandler) WithTrustedProxies(trusted []*net.IPNet) *AuthHandler {
 // projectKey returns the opaque projectId used as pool key and vault path segment.
 // Globally unique (provisioning mints it), so org scoping is handled by URL path, not the key.
 func projectKey(r *http.Request) string {
-	pid := chi.URLParam(r, "projectId")
-	log.Printf("SENTINEL_RENAME_V3 projectKey returning projectId=%q orgSlug=%q", pid, chi.URLParam(r, "orgSlug"))
-	return pid
+	return chi.URLParam(r, "projectId")
 }
+
+// registerAcceptedMessage is the one answer a verification-required sign-up
+// gives, whether the address was new or already had an account.
+const registerAcceptedMessage = "Check your email to confirm your address, then sign in"
 
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	projectID := projectKey(r)
 	tenantID, _ := middleware.TenantIDFromContext(r.Context())
 	orgSlug, _ := middleware.OrgSlugFromContext(r.Context())
-	var req domain.RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpError(w, "invalid request", 400)
-		return
-	}
-	if req.Email == "" || req.FullName == "" {
-		httpError(w, "email, password, and fullName are required", 400)
-		return
-	}
-	if err := validatePassword(req.Password); err != nil {
-		httpError(w, "email, password, and fullName are required", 400)
+	req, ok := decodeRegisterRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -218,62 +214,88 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if email exists
-	var exists bool
-	pool.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", req.Email).Scan(&exists)
-	if exists {
-		httpError(w, "email already registered", 409)
-		return
-	}
-
+	// Hashed before the insert, so a taken address costs the same time as a new one.
 	hash, err := h.hasher.Hash(r.Context(), req.Password)
 	if err != nil {
 		writeHashFailure(w, err)
 		return
 	}
-
-	// Insert user
-	var (
-		userID int64
-		role   string
-	)
-	err = pool.QueryRow(r.Context(),
-		`INSERT INTO users (email, password, full_name, role, enabled, created_at, updated_at)
-		 VALUES ($1, $2, $3, 'user', true, NOW(), NOW()) RETURNING id, role`,
-		req.Email, hash, req.FullName,
-	).Scan(&userID, &role)
+	user, role, created, err := insertUser(r.Context(), pool, req, hash)
 	if err != nil {
 		httpError(w, "failed to create user", 500)
 		return
 	}
 
-	metrics.Signups.Inc()
-
-	// EXC-11: the account starts unverified (column default) and we mail the
-	// proof-of-address link before answering.
 	settings := h.settingsFor(r.Context(), projectID)
-	h.sendVerification(r.Context(), pool, projectID, userID, req.Email, settings.siteURL)
-
 	if settings.requireEmailVerification {
-		// Returning a session here would hand out exactly the access the
-		// project just said must be earned by proving the address.
-		w.WriteHeader(201)
-		writeJSON(w, map[string]interface{}{
-			"emailVerificationRequired": true,
-			"message":                   verificationSentMessage,
-			"user":                      domain.UserInfo{ID: userID, Email: req.Email, FullName: req.FullName},
-		})
+		if created {
+			metrics.Signups.Inc()
+			h.sendVerification(r.Context(), pool, projectID, user.ID, req.Email, settings.siteURL)
+		}
+		writeRegisterAccepted(w, req)
 		return
 	}
+	if !created {
+		// Sign-up signs the user in here, so a taken address cannot be hidden
+		// without a new flow; the message at least names no account.
+		httpError(w, errCannotRegister.Error(), 409)
+		return
+	}
+	metrics.Signups.Inc()
 
-	resp, err := h.generateAuthResponse(r, projectID, domain.UserInfo{ID: userID, Email: req.Email, FullName: req.FullName}, accountRoles{role: role}, false)
+	resp, err := h.generateAuthResponse(r, projectID, user, accountRoles{role: role}, false)
 	if err != nil {
 		httpError(w, "failed to generate tokens", 500)
 		return
 	}
-
 	w.WriteHeader(201)
 	writeJSON(w, resp)
+}
+
+// decodeRegisterRequest answers 400 for a body that is malformed, incomplete
+// or whose password breaks the policy.
+func decodeRegisterRequest(w http.ResponseWriter, r *http.Request) (domain.RegisterRequest, bool) {
+	var req domain.RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, "invalid request", 400)
+		return req, false
+	}
+	if req.Email == "" || req.FullName == "" {
+		httpError(w, errEmailAndNameRequired.Error(), 400)
+		return req, false
+	}
+	if err := validatePassword(req.Password); err != nil {
+		httpError(w, err.Error(), 400)
+		return req, false
+	}
+	return req, true
+}
+
+// insertUser creates the account unless the address is taken, reporting which.
+func insertUser(ctx context.Context, db *pgxpool.Pool, req domain.RegisterRequest, hash string) (domain.UserInfo, string, bool, error) {
+	user := domain.UserInfo{Email: req.Email, FullName: req.FullName}
+	var role string
+	err := db.QueryRow(ctx,
+		`INSERT INTO users (email, password, full_name, role, enabled, created_at, updated_at)
+		 VALUES ($1, $2, $3, 'user', true, NOW(), NOW())
+		 ON CONFLICT (email) DO NOTHING RETURNING id, role`,
+		req.Email, hash, req.FullName,
+	).Scan(&user.ID, &role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return user, "", false, nil
+	}
+	return user, role, err == nil, err
+}
+
+// writeRegisterAccepted answers a verification-required sign-up. It carries
+// only what the caller sent, so a new and an existing address read the same.
+func writeRegisterAccepted(w http.ResponseWriter, req domain.RegisterRequest) {
+	w.WriteHeader(201)
+	writeJSON(w, map[string]interface{}{
+		"emailVerificationRequired": true,
+		"message":                   registerAcceptedMessage,
+		"user":                      map[string]string{"email": req.Email, "fullName": req.FullName},
+	})
 }
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
