@@ -221,6 +221,27 @@ All configuration is via environment variables:
 | `PROJECT_CORS_TTL_SECONDS` | `30` | How long a project's allowlist is cached; a failed refresh keeps the last list |
 | `TENANT_DB_SSLMODE` | `verify-full` | `disable` (docker AIO only: password login, no TLS) or a TLS mode. `require`, `verify-ca` and `verify-full` all mean verify-full with the client certificate from the vault record (`sslcert`/`sslkey`/`sslrootcert`); a record without them is refused. `prefer`/`allow` and anything else fail startup |
 
+### CORS
+
+The same rule as the GraphQL/REST engine and the functions gateway:
+
+| Request | Origin allowed | Origin not allowed |
+|---|---|---|
+| Preflight | 204 with the grant headers | 403, no CORS headers (the browser blocks the call) |
+| Actual request | served, `Access-Control-Allow-Origin` set | served, no `Access-Control-Allow-Origin` (a page cannot read it) |
+
+Auth takes credentials in the request body or a bearer token, never a cookie,
+so the server has no reason to refuse a request for its `Origin`; doing so
+would only break native apps and server-side proxies. Every answer to a
+request with `Origin` carries `Vary: Origin`.
+
+Native apps run in a WebView, which preflights like a browser, so their origin
+must be on the project's allowlist: `capacitor://localhost` (Capacitor iOS),
+`https://localhost` (Capacitor Android), `ionic://localhost`,
+`tauri://localhost` (Tauri macOS/Linux), `http://tauri.localhost` (Tauri
+Windows), or the custom scheme an Electron app registers. `null` (Electron
+`file://` pages) cannot be listed; use a custom protocol.
+
 ### Rate Limiting
 
 `/register`, `/login`, `/token` and the legacy `/refresh` alias are throttled with keyed token buckets:
