@@ -214,7 +214,7 @@ func TestIntegration_RegisterStoresTokenHashedAndEmailsTheLink(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
-	fx, cleanup := setupVerifyFixture(t, false)
+	fx, cleanup := setupVerifyFixture(t, true)
 	defer cleanup()
 
 	resp := fx.register(t, aliceEmail)
@@ -260,7 +260,7 @@ func TestIntegration_VerifyEmailMarksAccountVerified(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
-	fx, cleanup := setupVerifyFixture(t, false)
+	fx, cleanup := setupVerifyFixture(t, true)
 	defer cleanup()
 
 	fx.register(t, aliceEmail).Body.Close()
@@ -286,7 +286,7 @@ func TestIntegration_VerifyEmailAcceptsPostWithJSONBody(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
-	fx, cleanup := setupVerifyFixture(t, false)
+	fx, cleanup := setupVerifyFixture(t, true)
 	defer cleanup()
 
 	fx.register(t, aliceEmail).Body.Close()
@@ -307,7 +307,7 @@ func TestIntegration_VerifyEmailRejectsReusedUnknownAndExpiredTokens(t *testing.
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
-	fx, cleanup := setupVerifyFixture(t, false)
+	fx, cleanup := setupVerifyFixture(t, true)
 	defer cleanup()
 
 	fx.register(t, aliceEmail).Body.Close()
@@ -435,6 +435,8 @@ func TestIntegration_TokenCarriesEmailVerifiedClaim(t *testing.T) {
 	defer cleanup()
 
 	fx.register(t, aliceEmail).Body.Close()
+	// Sign-up mails no link here, so the user asks for one.
+	postJSON(fx.srv, testOrgProject+"/resend-verification", map[string]string{"email": aliceEmail}).Body.Close()
 	plaintext := verificationLinkToken(t, fx.sender.last(t))
 
 	before := postJSON(fx.srv, testOrgProject+"/login", map[string]string{
@@ -526,7 +528,7 @@ func TestIntegration_ResendVerificationInvalidatesThePreviousToken(t *testing.T)
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
-	fx, cleanup := setupVerifyFixture(t, false)
+	fx, cleanup := setupVerifyFixture(t, true)
 	defer cleanup()
 
 	fx.register(t, aliceEmail).Body.Close()
@@ -558,7 +560,7 @@ func TestIntegration_RegisterSucceedsWhenEmailDeliveryFails(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
-	fx, cleanup := setupVerifyFixture(t, false)
+	fx, cleanup := setupVerifyFixture(t, true)
 	defer cleanup()
 
 	fx.sender.failNext = true
