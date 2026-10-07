@@ -145,6 +145,41 @@ func TestProjectCORSRefusesAnOriginNotOnTheAllowlist(t *testing.T) {
 	}
 }
 
+// EXC-563: auth is a bearer token, never a cookie, so the Origin header alone
+// is no reason to refuse a request. Native apps (Capacitor, Tauri, Electron file
+// pages sending null) and server-side proxies reach the handler; the browser,
+// given no grant, keeps a page on an unlisted origin from reading the answer.
+func TestProjectCORSServesNativeAndProxiedOriginsWithoutGrant(t *testing.T) {
+	for _, origin := range []string{"capacitor://localhost", "tauri://localhost", "null", "http://localhost:5173"} {
+		origins := &fakeOrigins{lists: map[string][]string{"proj-jfp7kx46kb": {appOrigin}}}
+		h, reached := projectRouter(t, []string{studioOrigin}, origins)
+
+		rr := send(h, http.MethodPost, tokenPath, origin)
+
+		if rr.Code != http.StatusOK || !*reached {
+			t.Errorf("%s: status %d reached=%v, want served", origin, rr.Code, *reached)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("%s: Allow-Origin = %q, want none", origin, got)
+		}
+	}
+}
+
+// A listed native-app origin is granted like any other.
+func TestProjectCORSGrantsAListedNativeAppOrigin(t *testing.T) {
+	origins := &fakeOrigins{lists: map[string][]string{"proj-jfp7kx46kb": {"capacitor://localhost"}}}
+	h, _ := projectRouter(t, []string{studioOrigin}, origins)
+
+	rr := send(h, http.MethodOptions, tokenPath, "capacitor://localhost")
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status %d, want 204", rr.Code)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "capacitor://localhost" {
+		t.Errorf("Allow-Origin = %q, want capacitor://localhost", got)
+	}
+}
+
 // One project's allowlist never opens another project's routes.
 func TestProjectCORSUsesTheAllowlistOfTheProjectInThePath(t *testing.T) {
 	origins := &fakeOrigins{lists: map[string][]string{

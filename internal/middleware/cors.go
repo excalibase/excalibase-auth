@@ -5,8 +5,11 @@ import (
 	"strings"
 )
 
-// CORS returns middleware that validates Origin against allowed origins
-// and sets appropriate CORS response headers.
+// CORS answers browser CORS on the platform routes (health, JWKS). As on every
+// data-plane service (EXC-563) an actual request is never refused for its
+// Origin: auth is a bearer token, so the browser enforces CORS by withholding
+// an ungranted response. Only a listed origin is granted; an unlisted origin's
+// preflight is a 403 without CORS headers.
 func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 	wildcard := len(allowedOrigins) == 1 && allowedOrigins[0] == "*"
 	originSet := make(map[string]bool, len(allowedOrigins))
@@ -17,26 +20,27 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-
+			allowed := origin != "" && (wildcard || originSet[origin])
 			if origin != "" {
-				allowed := wildcard || originSet[origin]
-				if allowed {
-					w.Header().Set("Access-Control-Allow-Origin", origin)
-					w.Header().Set("Access-Control-Allow-Credentials", "true")
-					w.Header().Set("Vary", "Origin")
-				}
+				w.Header().Add("Vary", "Origin")
+			}
+			if allowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
 			}
 
-			// Handle preflight
-			if r.Method == http.MethodOptions {
-				if origin != "" && (wildcard || originSet[origin]) {
-					setPreflightHeaders(w)
-				}
-				w.WriteHeader(http.StatusNoContent)
+			if r.Method != http.MethodOptions {
+				next.ServeHTTP(w, r)
 				return
 			}
-
-			next.ServeHTTP(w, r)
+			if origin != "" && !allowed {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			if allowed {
+				setPreflightHeaders(w)
+			}
+			w.WriteHeader(http.StatusNoContent)
 		})
 	}
 }

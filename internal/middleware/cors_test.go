@@ -95,11 +95,43 @@ func TestCORS_PreflightBlockedOrigin(t *testing.T) {
 
 	handler.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusNoContent {
-		t.Errorf("status: got %d, want %d", rr.Code, http.StatusNoContent)
+	// A refused preflight is a 403 on every service (EXC-563), not a bare 204.
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("status: got %d, want %d", rr.Code, http.StatusForbidden)
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("Allow-Origin should be empty for blocked origin, got %q", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Methods"); got != "" {
+		t.Errorf("Allow-Methods should be empty for blocked origin, got %q", got)
+	}
+}
+
+// An actual request is served whatever its Origin; only a listed origin is
+// granted, and every answer varies by Origin so a cache cannot replay one
+// origin's answer to another.
+func TestCORS_UnlistedOriginIsServedWithoutGrant(t *testing.T) {
+	for _, origin := range []string{"https://evil.com", "capacitor://localhost", "null"} {
+		reached := false
+		handler := CORS([]string{"https://app.excalibase.io"})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reached = true
+			w.WriteHeader(http.StatusOK)
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil)
+		req.Header.Set("Origin", origin)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if !reached || rr.Code != http.StatusOK {
+			t.Errorf("%s: status %d reached=%v, want served", origin, rr.Code, reached)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("%s: Allow-Origin = %q, want none", origin, got)
+		}
+		if got := rr.Header().Get("Vary"); got != "Origin" {
+			t.Errorf("%s: Vary = %q, want Origin", origin, got)
+		}
 	}
 }
 
