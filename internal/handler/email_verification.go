@@ -52,8 +52,8 @@ func (h *AuthHandler) settingsFor(ctx context.Context, projectID string) project
 		return settings
 	}
 	settings.requireEmailVerification = info.RequireEmailVerification
-	if info.SiteURL != "" {
-		settings.siteURL = info.SiteURL
+	if own := normalizeSiteURL(info.SiteURL); own != "" {
+		settings.siteURL = own
 	}
 	return settings
 }
@@ -73,6 +73,10 @@ func verificationLink(siteURL, plaintext string) string {
 //
 // Neither the address nor the token is ever logged.
 func (h *AuthHandler) sendVerification(ctx context.Context, db *pgxpool.Pool, projectID string, userID int64, address, siteURL string, confirmsPassword bool) {
+	if siteURL == "" {
+		log.Printf("auth.verification.no_site_url project=%s userId=%d: not sent, set the project's site URL", safeLog(projectID), userID)
+		return
+	}
 	plaintext, err := emailVerificationTokens.issue(ctx, db, userID, verificationTTL)
 	if err == nil && confirmsPassword {
 		_, err = db.Exec(ctx,
@@ -211,6 +215,11 @@ func (h *AuthHandler) ResendVerification(w http.ResponseWriter, r *http.Request)
 	// Key on a hash so no address is held in process memory by the limiter.
 	if !h.resendThrottle.Allow(token.Hash(projectID + "|" + req.Email)) {
 		httpError(w, errTooManyRequests.Error(), 429)
+		return
+	}
+
+	if h.settingsFor(r.Context(), projectID).siteURL == "" {
+		writeSiteURLRequired(w, projectID)
 		return
 	}
 

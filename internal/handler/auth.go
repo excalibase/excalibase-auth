@@ -100,7 +100,7 @@ func (h *AuthHandler) SetEmail(sender email.Sender, siteURL string) {
 	if sender != nil {
 		h.emailSender = sender
 	}
-	h.siteURL = strings.TrimRight(siteURL, "/")
+	h.siteURL = normalizeSiteURL(siteURL)
 }
 
 // WithCORS sets who may call project routes from a browser: the platform's
@@ -206,6 +206,12 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	settings := h.settingsFor(r.Context(), projectID)
+	if settings.requireEmailVerification && settings.siteURL == "" {
+		writeSiteURLRequired(w, projectID)
+		return
+	}
+
 	log.Printf("auth.register tenant=%s org=%s email=%s", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email))
 
 	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
@@ -226,7 +232,6 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settings := h.settingsFor(r.Context(), projectID)
 	if settings.requireEmailVerification {
 		if created {
 			metrics.Signups.Inc()

@@ -72,6 +72,11 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.settingsFor(r.Context(), projectID).siteURL == "" {
+		writeSiteURLRequired(w, projectID)
+		return
+	}
+
 	h.sendPasswordReset(r, projectID, req.Email)
 	writeJSON(w, map[string]interface{}{"message": resetSentMessage})
 }
@@ -97,6 +102,11 @@ func (h *AuthHandler) sendPasswordReset(r *http.Request, projectID, address stri
 // outstanding, so the newest link is the only live one and an older leaked link
 // stops working.
 func (h *AuthHandler) mailPasswordReset(ctx context.Context, db *pgxpool.Pool, projectID string, userID int64, address string) {
+	siteURL := h.settingsFor(ctx, projectID).siteURL
+	if siteURL == "" {
+		log.Printf("auth.reset.no_site_url project=%s userId=%d: not sent, set the project's site URL", safeLog(projectID), userID)
+		return
+	}
 	plaintext, err := passwordResetTokens.issue(ctx, db, userID, resetTTL)
 	if err != nil {
 		log.Printf("auth.reset.issue_failed project=%s userId=%d", safeLog(projectID), userID)
@@ -109,7 +119,7 @@ func (h *AuthHandler) mailPasswordReset(ctx context.Context, db *pgxpool.Pool, p
 		Template:  email.TemplatePasswordReset,
 		Data: map[string]string{
 			"userEmail":  address,
-			"resetUrl":   resetLink(h.settingsFor(ctx, projectID).siteURL, plaintext),
+			"resetUrl":   resetLink(siteURL, plaintext),
 			"expiresMin": strconv.Itoa(int(resetTTL.Minutes())),
 		},
 	}
