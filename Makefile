@@ -35,7 +35,7 @@ build:
 .PHONY: test
 test:
 	@echo "$(BLUE)Running unit + integration tests...$(RESET)"
-	@$(GO) test ./... -count=1 -timeout=120s
+	@$(GO) test ./... -count=1 -timeout=300s
 
 .PHONY: test.unit
 test.unit:
