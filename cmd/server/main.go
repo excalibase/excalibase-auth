@@ -37,7 +37,7 @@ func main() {
 	}
 
 	// Fetch signing key from vault
-	privateKeyPEM, err := fetchSigningKey(cfg.ProvisioningURL, tokens)
+	privateKeyPEM, err := waitForSigningKey(cfg.ProvisioningURL, tokens, time.Sleep, log.Printf)
 	if err != nil {
 		log.Fatalf("Failed to fetch signing key from vault: %v", err)
 	}
@@ -109,41 +109,6 @@ func newSigner(privateKeyPEM string, cfg config.Config) (*auth.JWTService, error
 	}
 	signer.SetAudiencePrefix(cfg.AudiencePrefix)
 	return signer, nil
-}
-
-func fetchSigningKey(provisioningURL string, tokens token.Source) (string, error) {
-	url := provisioningURL + "/vault/secrets/pki/signing/private"
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	tok, err := tokens.Get()
-	if err != nil {
-		return "", fmt.Errorf("provisioning token: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("vault returned %d", resp.StatusCode)
-	}
-
-	var data map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return "", fmt.Errorf("decode: %w", err)
-	}
-
-	key, ok := data["key"]
-	if !ok || key == "" {
-		return "", fmt.Errorf("signing key not found in vault response")
-	}
-	return key, nil
 }
 
 // configureHashing sizes the password hasher against the container's memory
