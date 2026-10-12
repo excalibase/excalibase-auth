@@ -119,9 +119,13 @@ func (h *AuthHandler) WithRateLimits(limits *middleware.RateLimits) *AuthHandler
 }
 
 func (h *AuthHandler) Routes(r chi.Router) {
+	// The token-signing public keys, under the prefix the edge routes, so a
+	// customer backend verifies end-user tokens offline (EXC-600).
+	r.Get("/.well-known/jwks.json", h.JWKS)
 	r.Route("/{orgSlug}/{projectId}", func(r chi.Router) {
 		r.Use(middleware.ProjectCORS(h.corsPlatform, h.corsOrigins))
 		r.Use(middleware.TenantContext)
+		r.Get("/.well-known/jwks.json", h.JWKS)
 		r.With(h.limit(rateLimitRegister)).Post("/register", h.Register)
 		r.With(h.limit(rateLimitLogin)).Post("/login", h.Login)
 		r.Post("/validate", h.Validate)
