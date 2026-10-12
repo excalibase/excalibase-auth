@@ -701,7 +701,7 @@ func (h *AuthHandler) sessionResponse(r *http.Request, projectID string, user do
 		RefreshToken: refreshToken,
 		TokenType:    "Bearer",
 		ExpiresIn:    int64(h.jwtService.TTL()),
-		User:         user,
+		User:         &user,
 	}, nil
 }
 

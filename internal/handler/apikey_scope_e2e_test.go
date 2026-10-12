@@ -175,3 +175,39 @@ func TestIntegration_APIKey_OperatorManagesKeys(t *testing.T) {
 	expectStatus(t, sendAuthed(t, fx.srv, "DELETE", fmt.Sprintf("%s%d", apiKeysPath, newID), opJWT, nil), 204, "operator revoke")
 	expectStatus(t, exchangeAPIKeyForTest(fx.srv, newKey), 401, "revoked key exchange")
 }
+
+// TestIntegration_APIKey_AnonSignInCarriesNoUser pins EXC-607: an api-key token is no one's session, so
+// its answer has no user (it used to carry {id:0,email:""}, which apps read as signed in).
+func TestIntegration_APIKey_AnonSignInCarriesNoUser(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	fx, cleanup := setupIntegrationFixture(t)
+	defer cleanup()
+
+	for _, keyType := range []service.KeyType{service.KeyTypePublishable, service.KeyTypeSecret} {
+		plaintext, _ := seedAPIKey(t, fx, keyType, nil)
+		resp := exchangeAPIKeyForTest(fx.srv, plaintext)
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s key exchange: got %d", keyType, resp.StatusCode)
+		}
+		var out map[string]interface{}
+		decodeJSON(resp, &out)
+		if user, present := out["user"]; present {
+			t.Errorf("%s key sign-in answered user %v; an api-key session has no user", keyType, user)
+		}
+		if out["accessToken"] == "" || out["accessToken"] == nil {
+			t.Errorf("%s key sign-in lost its access token: %v", keyType, out)
+		}
+	}
+
+	resp := postJSON(fx.srv, "/auth/test-org/test-project/register", map[string]string{
+		"email": "signed-in@test.com", "password": "password123", "fullName": "Signed In",
+	})
+	var reg map[string]interface{}
+	decodeJSON(resp, &reg)
+	user, _ := reg["user"].(map[string]interface{})
+	if user == nil || user["email"] != "signed-in@test.com" || user["id"].(float64) <= 0 {
+		t.Fatalf("a signed-in user's answer must still carry the user: %v", reg)
+	}
+}
