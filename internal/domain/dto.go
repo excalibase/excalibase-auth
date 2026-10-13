@@ -58,11 +58,11 @@ type APIKeyInfo struct {
 }
 
 type AuthResponse struct {
-	AccessToken  string   `json:"accessToken"`
-	RefreshToken string   `json:"refreshToken"`
-	TokenType    string   `json:"tokenType"`
-	ExpiresIn    int64    `json:"expiresIn"`
-	User         UserInfo `json:"user"`
+	AccessToken  string    `json:"accessToken"`
+	RefreshToken string    `json:"refreshToken"`
+	TokenType    string    `json:"tokenType"`
+	ExpiresIn    int64     `json:"expiresIn"`
+	User         *UserInfo `json:"user,omitempty"` // nil for an api-key sign-in: no one is signed in
 }
 
 type UserInfo struct {
