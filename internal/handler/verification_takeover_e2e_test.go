@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"github.com/excalibase/auth/internal/store"
+	"github.com/excalibase/auth/internal/store/pgstore"
 	"net/http"
 	"testing"
 	"time"
@@ -47,8 +49,8 @@ func (f *verifyFixture) aliceID(t *testing.T) int64 {
 
 func (f *verifyFixture) mintRefreshToken(t *testing.T) string {
 	t.Helper()
-	plaintext, err := storeRefreshToken(context.Background(), f.db, f.aliceID(t),
-		refreshSession{familyID: uuid.New(), expiry: time.Now().Add(time.Hour)})
+	plaintext, err := storeRefreshToken(context.Background(), pgstore.New(f.db), f.aliceID(t),
+		store.RefreshSession{FamilyID: uuid.New(), Expiry: time.Now().Add(time.Hour)})
 	if err != nil {
 		t.Fatalf("mint refresh token: %v", err)
 	}

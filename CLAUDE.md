@@ -4,7 +4,7 @@ This file provides guidance when working with code in this repository.
 
 ## What This Is
 
-excalibase-auth is a multi-tenant JWT authentication microservice for the Excalibase platform. Each tenant (project) gets its own PostgreSQL database with an `auth` schema. The service dynamically provisions connection pools per project by fetching credentials from the provisioning service's vault. JWTs issued here carry userId, projectId, and role claims used by GraphQL/REST APIs to enforce PostgreSQL RLS policies.
+excalibase-auth is a multi-tenant JWT authentication microservice for the Excalibase platform. Each tenant (project) keeps its end users in its own database: an `auth` schema on a Postgres project, an `auth` database inside the project's instance on a MySQL project (ADR 0041). The service dynamically provisions connection pools per project by fetching credentials from the provisioning service's vault. JWTs issued here carry userId, projectId, and role claims used by GraphQL/REST APIs to enforce PostgreSQL RLS policies.
 
 ## Build & Test Commands
 
@@ -28,13 +28,14 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 
 ## Architecture
 
-**Multi-tenant pool pattern**: Requests include `{projectId}` in the URL. `pool.Manager` lazily creates/caches a `pgxpool.Pool` per project by calling the provisioning API for credentials. Pools are cached with a TTL and refreshed when credentials rotate. On first pool creation per project, golang-migrate runs embedded SQL migrations automatically.
+**Multi-tenant store pattern**: Requests include `{projectId}` in the URL. `pool.Manager` lazily creates/caches a `store.Store` per project by calling the provisioning API for credentials; the vault record's `engine` field picks Postgres (absent) or MySQL (`mysql`, TLS verified against the record's `sslrootcert`), anything else is refused. Pools are cached with a TTL and refreshed when credentials rotate. On first pool creation per project, golang-migrate runs embedded SQL migrations automatically.
 
-**Request flow**: HTTP request -> chi router -> `handler.AuthHandler` -> `pool.Manager.GetPool(projectID)` -> auto-migrate -> per-tenant PostgreSQL query.
+**Request flow**: HTTP request -> chi router -> `handler.AuthHandler` -> `pool.Manager.GetStore(projectID)` -> auto-migrate -> per-tenant query through `internal/store/pgstore` or `internal/store/mysqlstore`.
 
 **Key packages**:
 - `internal/pool` — Multi-tenant connection pool manager. Fetches credentials from `{PROVISIONING_URL}/vault/secrets/projects/{id}/credentials/auth_admin`. Has injectable `poolCreator` and `migrator` functions.
-- `internal/migrate` — golang-migrate runner with embedded SQL files (`internal/migrate/migrations/`). Provides `Run(ctx, pool)` and `Down(ctx, pool)`, run over the tenant's own pool so migrations authenticate like it (client certificate included).
+- `internal/store` — the per-project end-user store interface; `pgstore` and `mysqlstore` implement it and `storetest` is the contract both pass against real databases.
+- `internal/migrate` — golang-migrate runner with embedded SQL files, one tree per engine (`migrations/postgres/`, `migrations/mysql/`, versioned separately; a schema change needs a file in each). Provides `Run(ctx, pool)` and `Down(ctx, pool)`, run over the tenant's own pool so migrations authenticate like it (client certificate included).
 - `internal/auth` — JWT signing/verification using ECDSA (ES256). Private key fetched from vault at startup.
 - `internal/handler` — HTTP handlers for register, login, validate, refresh, logout. All routes scoped under `/auth/{projectId}/`.
 - `internal/ratelimit` — keyed token-bucket limiter (in-memory, per replica) plus client-IP resolution behind trusted proxies and hashed identity keys.

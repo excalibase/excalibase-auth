@@ -51,6 +51,7 @@ func main() {
 	poolMgr := pool.NewManager(cfg.ProvisioningURL, tokens, 1*time.Hour)
 	poolMgr.SetSSLMode(cfg.TenantDBSSLMode)
 	poolMgr.SetMigrator(migrate.Run)
+	poolMgr.SetMySQLMigrator(migrate.RunMySQL)
 
 	// Handler
 	hasher, err := configureHashing(cfg.PasswordHashConcurrency, config.CgroupMemoryMax)

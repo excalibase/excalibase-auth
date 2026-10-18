@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"github.com/excalibase/auth/internal/store/pgstore"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -121,14 +122,15 @@ func TestIntegration_AResetLinkLookedUpTwiceIsClaimedOnce(t *testing.T) {
 	resetToken := resetLinkToken(t, fx.sender.last(t))
 
 	ctx := context.Background()
-	rowID, _, err := passwordResetTokens.lookup(ctx, fx.db, resetToken)
+	db := pgstore.New(fx.db)
+	found, err := passwordResetTokens.lookup(ctx, db, resetToken)
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
-	if err := passwordResetTokens.claim(ctx, fx.db, rowID); err != nil {
+	if err := passwordResetTokens.claim(ctx, db, found.RowID); err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
-	if err := passwordResetTokens.claim(ctx, fx.db, rowID); err == nil {
+	if err := passwordResetTokens.claim(ctx, db, found.RowID); err == nil {
 		t.Fatal("a consumed link was claimed a second time")
 	}
 }

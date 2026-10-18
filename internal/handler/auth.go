@@ -17,11 +17,10 @@ import (
 	"github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/excalibase/auth/internal/service"
+	"github.com/excalibase/auth/internal/store"
 	"github.com/excalibase/auth/internal/throttle"
 	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Shared sentinel errors so HTTP handlers and the unified /token dispatch
@@ -218,7 +217,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("auth.register tenant=%s org=%s email=%s", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email))
 
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		writePoolFailure(w, err)
 		return
@@ -230,7 +229,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		writeHashFailure(w, err)
 		return
 	}
-	user, role, created, err := insertUser(r.Context(), pool, req, hash)
+	user, role, created, err := insertUser(r.Context(), db, req, hash)
 	if err != nil {
 		httpError(w, "failed to create user", 500)
 		return
@@ -239,9 +238,9 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if settings.requireEmailVerification {
 		if created {
 			metrics.Signups.Inc()
-			h.sendVerification(r.Context(), pool, projectID, user.ID, req.Email, settings.siteURL, true)
+			h.sendVerification(r.Context(), db, projectID, user.ID, req.Email, settings.siteURL, true)
 		} else {
-			h.replaceUnverified(r.Context(), pool, projectID, req, hash, settings.siteURL)
+			h.replaceUnverified(r.Context(), db, projectID, req, hash, settings.siteURL)
 		}
 		writeRegisterAccepted(w, req)
 		return
@@ -282,40 +281,33 @@ func decodeRegisterRequest(w http.ResponseWriter, r *http.Request) (domain.Regis
 	return req, true
 }
 
+// defaultAccountRole is the role every new account is created with.
+const defaultAccountRole = "user"
+
 // insertUser creates the account unless the address is taken, reporting which.
-func insertUser(ctx context.Context, db *pgxpool.Pool, req domain.RegisterRequest, hash string) (domain.UserInfo, string, bool, error) {
+func insertUser(ctx context.Context, db store.Store, req domain.RegisterRequest, hash string) (domain.UserInfo, string, bool, error) {
 	user := domain.UserInfo{Email: req.Email, FullName: req.FullName}
-	var role string
-	err := db.QueryRow(ctx,
-		`INSERT INTO users (email, password, full_name, role, enabled, created_at, updated_at)
-		 VALUES ($1, $2, $3, 'user', true, NOW(), NOW())
-		 ON CONFLICT (email) DO NOTHING RETURNING id, role`,
-		req.Email, hash, req.FullName,
-	).Scan(&user.ID, &role)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return user, "", false, nil
+	id, created, err := db.InsertUser(ctx, req.Email, hash, req.FullName)
+	if err != nil || !created {
+		return user, "", false, err
 	}
-	return user, role, err == nil, err
+	user.ID = id
+	return user, defaultAccountRole, true, nil
 }
 
 // replaceUnverified lets a sign-up for an address nobody has proved take the
 // account over: the newest sign-up's password and name win and only its link
 // stays live, so whoever owns the inbox ends up with the password they chose.
 // It shares the resend budget per address; past it the sign-up changes nothing.
-func (h *AuthHandler) replaceUnverified(ctx context.Context, db *pgxpool.Pool, projectID string, req domain.RegisterRequest, hash, siteURL string) {
+func (h *AuthHandler) replaceUnverified(ctx context.Context, db store.Store, projectID string, req domain.RegisterRequest, hash, siteURL string) {
 	if !h.resendThrottle.Allow(token.Hash(projectID + "|" + req.Email)) {
 		return
 	}
-	var userID int64
-	if err := db.QueryRow(ctx,
-		`UPDATE auth.users SET password = $2, full_name = $3, updated_at = NOW()
-		 WHERE email = $1 AND email_verified = false RETURNING id`,
-		req.Email, hash, req.FullName,
-	).Scan(&userID); err != nil {
+	userID, err := db.ReplaceUnverified(ctx, req.Email, hash, req.FullName)
+	if err != nil {
 		return
 	}
-	if _, err := db.Exec(ctx,
-		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false", userID); err != nil {
+	if err := db.RevokeUserRefreshTokens(ctx, userID); err != nil {
 		log.Printf("auth.register.revoke_failed project=%s userId=%d", safeLog(projectID), userID)
 	}
 	h.sendVerification(ctx, db, projectID, userID, req.Email, siteURL, true)
@@ -356,24 +348,20 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 // exchangePassword authenticates a user by email/password and returns a fresh
 // AuthResponse. Returns (nil, statusCode, err) on failure.
 func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, password string) (*domain.AuthResponse, int, error) {
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		status, perr := poolFailure(err)
 		return nil, status, perr
 	}
 
-	var user domain.User
-	err = pool.QueryRow(r.Context(),
-		"SELECT id, email, password, full_name, role, allowed_roles, enabled, email_verified FROM users WHERE email = $1",
-		email,
-	).Scan(&user.ID, &user.Email, &user.Password, &user.FullName, &user.Role, &user.AllowedRoles, &user.Enabled, &user.EmailVerified)
+	user, err := db.AccountByEmail(r.Context(), email)
 	if err != nil {
 		return nil, 401, errInvalidCredentials
 	}
 	if !user.Enabled {
 		return nil, 403, errAccountDisabled
 	}
-	matched, err := h.hasher.Check(r.Context(), password, user.Password)
+	matched, err := h.hasher.Check(r.Context(), password, user.PasswordHash)
 	if err != nil {
 		return nil, 503, errHashingBusy
 	}
@@ -390,7 +378,7 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 		return nil, 403, err
 	}
 
-	pool.Exec(r.Context(), "UPDATE users SET last_login_at = NOW() WHERE id = $1", user.ID)
+	_ = db.TouchLastLogin(r.Context(), user.ID)
 
 	userInfo := domain.UserInfo{ID: user.ID, Email: user.Email, FullName: user.FullName}
 	resp, err := h.generateAuthResponse(r, projectID, userInfo, roles, user.EmailVerified)
@@ -456,68 +444,66 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 // and a successor in the same session is issued with a fresh access token.
 func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshToken string) (*domain.AuthResponse, int, error) {
 	ctx := r.Context()
-	pool, err := h.poolMgr.GetPool(ctx, chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(ctx, chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		status, perr := poolFailure(err)
 		return nil, status, perr
 	}
 	hash := token.Hash(refreshToken)
-
-	tx, err := pool.Begin(ctx)
+	successor, successorHash, err := token.New()
 	if err != nil {
-		return nil, 503, errProjectDBUnavailable
+		return nil, 500, errRefreshTokenStore
 	}
-	defer tx.Rollback(ctx)
 
-	rotated, err := consumeRefreshToken(ctx, tx, hash)
-	if errors.Is(err, pgx.ErrNoRows) {
-		tx.Rollback(ctx)
-		code, rejectErr := rejectDeadRefreshToken(ctx, pool, hash)
+	var roles accountRoles
+	// A refusal returns before the store commits, so the token survives it.
+	account, _, err := db.RotateRefreshToken(ctx, hash, successorHash, func(account store.Account) error {
+		roles = accountRoles{role: account.Role, allowed: account.AllowedRoles}
+		if err := roles.validate(); err != nil {
+			return refreshRefusal{status: 403, err: err}
+		}
+		if !account.EmailVerified && h.settingsFor(ctx, projectID).requireEmailVerification {
+			return refreshRefusal{status: 403, err: errEmailNotVerified}
+		}
+		return nil
+	})
+	var refusal refreshRefusal
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		code, rejectErr := rejectDeadRefreshToken(ctx, db, hash)
 		return nil, code, rejectErr
-	}
-	if err != nil {
-		return nil, 500, errRefreshTokenStore
-	}
-
-	var (
-		user          domain.UserInfo
-		roles         accountRoles
-		emailVerified bool
-	)
-	if err := tx.QueryRow(ctx,
-		"SELECT id, email, full_name, role, allowed_roles, email_verified FROM users WHERE id = $1", rotated.userID,
-	).Scan(&user.ID, &user.Email, &user.FullName, &roles.role, &roles.allowed, &emailVerified); err != nil {
+	case errors.Is(err, store.ErrNoAccount):
 		return nil, 401, errInvalidRefreshToken
-	}
-	if err := roles.validate(); err != nil {
-		return nil, 403, err
-	}
-	// Returning before commit rolls the consume back, so the token survives.
-	if !emailVerified && h.settingsFor(ctx, projectID).requireEmailVerification {
-		return nil, 403, errEmailNotVerified
-	}
-
-	successor, err := storeRefreshToken(ctx, tx, user.ID, rotated.session)
-	if err != nil {
-		return nil, 500, errRefreshTokenStore
-	}
-	if err := tx.Commit(ctx); err != nil {
+	case errors.As(err, &refusal):
+		return nil, refusal.status, refusal.err
+	case errors.Is(err, store.ErrUnavailable):
+		return nil, 503, errProjectDBUnavailable
+	case err != nil:
 		return nil, 500, errRefreshTokenStore
 	}
 
-	resp, err := h.sessionResponse(r, projectID, user, roles, emailVerified, successor)
+	user := domain.UserInfo{ID: account.ID, Email: account.Email, FullName: account.FullName}
+	resp, err := h.sessionResponse(r, projectID, user, roles, account.EmailVerified, successor)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
 	return resp, 200, nil
 }
 
+// refreshRefusal is a status the account itself earns during a rotation.
+type refreshRefusal struct {
+	status int
+	err    error
+}
+
+func (refusal refreshRefusal) Error() string { return refusal.err.Error() }
+
 // exchangeAPIKey validates an opaque API key (esk_pub_live_… / esk_sec_live_…),
 // updates last_used_at, and issues a JWT keyed to the project. The api_key flow
 // does NOT issue a refresh token — the api key itself is the long-lived
 // credential and clients re-exchange via grant_type=api_key when the JWT expires.
 //
-// Note on timing: the lookup uses Postgres `=` on a VARCHAR which is not
+// Note on timing: the lookup uses the database's `=` on a VARCHAR which is not
 // guaranteed constant-time. Because api keys carry ~143 bits of entropy from
 // crypto/rand, brute force is infeasible regardless and the residual timing
 // channel is theoretical. If this ever moves to a high-throughput hot path,
@@ -526,32 +512,24 @@ func (h *AuthHandler) exchangeAPIKey(r *http.Request, projectID, apiKey string) 
 	if apiKey == "" {
 		return nil, 400, errMissingAPIKey
 	}
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		status, perr := poolFailure(err)
 		return nil, status, perr
 	}
 
-	hash := service.HashAPIKey(apiKey)
-	var (
-		keyID     int64
-		keyType   string
-		createdBy *int64
-	)
-	err = pool.QueryRow(r.Context(),
-		"SELECT id, key_type, created_by FROM auth.api_keys WHERE key_hash = $1 AND revoked_at IS NULL",
-		hash,
-	).Scan(&keyID, &keyType, &createdBy)
+	key, err := db.APIKeyByHash(r.Context(), service.HashAPIKey(apiKey))
 	if err != nil {
 		return nil, 401, errInvalidAPIKey
 	}
 	// A secret key owned by an end user predates operator-only key management
 	// and must never yield a service token.
-	if keyType == string(service.KeyTypeSecret) && createdBy != nil {
+	if key.Type == string(service.KeyTypeSecret) && key.CreatedBy != nil {
 		return nil, 401, errInvalidAPIKey
 	}
 
-	pool.Exec(r.Context(), "UPDATE auth.api_keys SET last_used_at = NOW() WHERE id = $1", keyID)
+	_ = db.TouchAPIKey(r.Context(), key.ID)
+	keyID, keyType := key.ID, key.Type
 
 	resp, err := h.generateAPIKeyAuthResponse(r, projectID, keyID, keyType)
 	if err != nil {
@@ -568,15 +546,13 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		writePoolFailure(w, err)
 		return
 	}
 
-	if _, err := pool.Exec(r.Context(),
-		"UPDATE auth.refresh_tokens SET revoked = true WHERE token_hash = $1", token.Hash(req.RefreshToken),
-	); err != nil {
+	if err := db.RevokeRefreshToken(r.Context(), token.Hash(req.RefreshToken)); err != nil {
 		httpError(w, "failed to log out", 500)
 		return
 	}
@@ -585,11 +561,11 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 // generateAuthResponse starts a new session for the user.
 func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool) (*domain.AuthResponse, error) {
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return nil, err
 	}
-	refreshToken, err := storeRefreshToken(r.Context(), pool, user.ID, h.newRefreshSession())
+	refreshToken, err := storeRefreshToken(r.Context(), db, user.ID, h.newRefreshSession())
 	if err != nil {
 		return nil, err
 	}

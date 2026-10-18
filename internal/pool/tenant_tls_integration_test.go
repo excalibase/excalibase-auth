@@ -92,7 +92,7 @@ func TestIntegration_TenantPoolConnectsToACertOnlyDatabaseWithTheRecordsCertific
 	record.Host, record.Port = host, port
 	mgr := NewManager(vaultServing(t, record), token.Literal("pat"), time.Hour)
 	mgr.SetMigrator(migrate.Run)
-	pool, err := mgr.GetPool(ctx, "org", "tenant-a")
+	pool, err := getPool(mgr, ctx, "org", "tenant-a")
 	if err != nil {
 		t.Fatalf("GetPool: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestIntegration_TenantPoolConnectsToACertOnlyDatabaseWithTheRecordsCertific
 
 	withoutCert := record
 	withoutCert.SSLCert, withoutCert.SSLKey = "", ""
-	_, err = NewManager(vaultServing(t, withoutCert), token.Literal("pat"), time.Hour).GetPool(ctx, "org", "tenant-a")
+	_, err = getPool(NewManager(vaultServing(t, withoutCert), token.Literal("pat"), time.Hour), ctx, "org", "tenant-a")
 	if err == nil || !strings.Contains(err.Error(), "sslcert") {
 		t.Fatalf("a record without a client certificate must be refused, got %v", err)
 	}
@@ -151,7 +151,7 @@ func TestIntegration_TenantPoolRefusesADatabaseThatCannotEncrypt(t *testing.T) {
 	vaultURL := vaultServing(t, record)
 
 	mgr := NewManager(vaultURL, token.Literal("pat"), time.Hour)
-	pool, err := mgr.GetPool(ctx, "org", "tenant-a")
+	pool, err := getPool(mgr, ctx, "org", "tenant-a")
 	if err == nil {
 		err = pool.Ping(ctx)
 		pool.Close()
@@ -162,7 +162,7 @@ func TestIntegration_TenantPoolRefusesADatabaseThatCannotEncrypt(t *testing.T) {
 
 	plain := NewManager(vaultURL, token.Literal("pat"), time.Hour)
 	plain.SetSSLMode("disable")
-	pool, err = plain.GetPool(ctx, "org", "tenant-a")
+	pool, err = getPool(plain, ctx, "org", "tenant-a")
 	if err != nil {
 		t.Fatalf("GetPool with disable: %v", err)
 	}

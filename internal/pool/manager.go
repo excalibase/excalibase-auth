@@ -10,12 +10,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/excalibase/auth/internal/store"
+	"github.com/excalibase/auth/internal/store/mysqlstore"
+	"github.com/excalibase/auth/internal/store/pgstore"
 	"github.com/excalibase/auth/internal/token"
+	"github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type poolEntry struct {
-	pool        *pgxpool.Pool
+	store       store.Store
 	createdAt   time.Time
 	fingerprint string // detects rotated credentials and renewed certificates
 }
@@ -59,6 +63,8 @@ type Manager struct {
 	httpClient      *http.Client
 	poolCreator     func(ctx context.Context, config *pgxpool.Config) (*pgxpool.Pool, error)
 	migrator        func(ctx context.Context, pool *pgxpool.Pool) error // optional, runs on first connect
+	mysqlMigrator   func(ctx context.Context, config *mysql.Config) error
+	mysqlOpener     func(config *mysql.Config) (store.Store, error)
 	sslMode         string
 }
 
@@ -90,31 +96,42 @@ func NewManager(provisioningURL string, tokens token.Source, ttl time.Duration) 
 		ttl:             ttl,
 		httpClient:      &http.Client{Timeout: 10 * time.Second},
 		poolCreator:     defaultPoolCreator,
+		mysqlOpener:     openMySQLStore,
 		sslMode:         defaultTenantSSLMode,
 	}
 }
 
+// SetMigrator sets the migrations run on a Postgres project's first connect.
 func (m *Manager) SetMigrator(fn func(ctx context.Context, pool *pgxpool.Pool) error) {
 	m.migrator = fn
 }
 
-// GetPool returns the pgx pool for a project. orgSlug + projectID together locate
-// the vault path (projects/{orgSlug}/{projectID}/credentials/auth_admin). Cache key
-// is projectID alone since provisioning mints it globally unique.
-func (m *Manager) GetPool(ctx context.Context, orgSlug, projectID string) (*pgxpool.Pool, error) {
+// SetMySQLMigrator sets the migrations run on a MySQL project's first connect.
+func (m *Manager) SetMySQLMigrator(fn func(ctx context.Context, config *mysql.Config) error) {
+	m.mysqlMigrator = fn
+}
+
+func openMySQLStore(config *mysql.Config) (store.Store, error) {
+	return mysqlstore.Open(config)
+}
+
+// GetStore returns the end-user store of a project, on the engine its vault
+// record names. Cache key is projectID alone since provisioning mints it
+// globally unique.
+func (m *Manager) GetStore(ctx context.Context, orgSlug, projectID string) (store.Store, error) {
 	m.mu.RLock()
 	entry, ok := m.pools[projectID]
 	fresh := ok && time.Since(entry.createdAt) < m.ttl
 	m.mu.RUnlock()
 
 	if fresh {
-		return entry.pool, nil
+		return entry.store, nil
 	}
 
-	return m.createPool(ctx, orgSlug, projectID)
+	return m.createStore(ctx, orgSlug, projectID)
 }
 
-func (m *Manager) createPool(ctx context.Context, orgSlug, projectID string) (*pgxpool.Pool, error) {
+func (m *Manager) createStore(ctx context.Context, orgSlug, projectID string) (store.Store, error) {
 	record, err := m.fetchCredentials(ctx, orgSlug, projectID)
 	if err != nil {
 		log.Printf("ERROR: fetch credentials for %s: %v", projectID, err)
@@ -125,10 +142,44 @@ func (m *Manager) createPool(ctx context.Context, orgSlug, projectID string) (*p
 		projectID, record.Host, record.Port, record.Username, record.Database)
 
 	fingerprint := record.fingerprint()
-	if pool, ok := m.refreshUnchanged(projectID, fingerprint); ok {
-		return pool, nil
+	if existing, ok := m.refreshUnchanged(projectID, fingerprint); ok {
+		return existing, nil
 	}
 
+	opened, err := m.openStore(ctx, projectID, record)
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	old, replaced := m.pools[projectID]
+	m.pools[projectID] = &poolEntry{store: opened, createdAt: time.Now(), fingerprint: fingerprint}
+	m.mu.Unlock()
+
+	// Close waits for borrowed connections, so it must not hold up the caller.
+	if replaced && old.store != nil && old.store != opened {
+		go old.store.Close()
+	}
+	return opened, nil
+}
+
+// engineMySQL is the vault record's engine for a MySQL project (ADR 0041); a
+// record without an engine is Postgres.
+const engineMySQL = "mysql"
+
+func (m *Manager) openStore(ctx context.Context, projectID string, record credentialRecord) (store.Store, error) {
+	switch record.Engine {
+	case "":
+		return m.openPostgres(ctx, projectID, record)
+	case engineMySQL:
+		return m.openMySQL(ctx, projectID, record)
+	default:
+		log.Printf("ERROR: tenant connection for %s: unsupported engine", projectID)
+		return nil, errors.New("tenant connection: credential record names an unsupported engine")
+	}
+}
+
+func (m *Manager) openPostgres(ctx context.Context, projectID string, record credentialRecord) (store.Store, error) {
 	config, err := tenantPoolConfig(record, m.sslMode)
 	if err != nil {
 		log.Printf("ERROR: tenant connection for %s: %v", projectID, err)
@@ -138,23 +189,35 @@ func (m *Manager) createPool(ctx context.Context, orgSlug, projectID string) (*p
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
 	}
-
 	if pool != nil && m.migrator != nil {
 		if err := m.migrator(ctx, pool); err != nil {
 			log.Printf("WARN: migration failed for %s: %v", projectID, err)
 		}
 	}
+	return pgstore.New(pool), nil
+}
 
-	m.mu.Lock()
-	old, replaced := m.pools[projectID]
-	m.pools[projectID] = &poolEntry{pool: pool, createdAt: time.Now(), fingerprint: fingerprint}
-	m.mu.Unlock()
-
-	// Close waits for borrowed connections, so it must not hold up the caller.
-	if replaced && old.pool != nil && old.pool != pool {
-		go old.pool.Close()
+// openMySQL reaches the project's auth database over TLS verified against the
+// record's CA, whatever the Postgres sslmode: MySQL logins require TLS.
+func (m *Manager) openMySQL(ctx context.Context, projectID string, record credentialRecord) (store.Store, error) {
+	config, err := mysqlstore.Config(mysqlstore.Login{
+		Host: record.Host, Port: record.Port, Database: record.Database,
+		Username: record.Username, Password: record.Password, ServerCA: record.SSLRootCert,
+	})
+	if err != nil {
+		log.Printf("ERROR: tenant connection for %s: %v", projectID, err)
+		return nil, fmt.Errorf("tenant connection: %w", err)
 	}
-	return pool, nil
+	if m.mysqlMigrator != nil {
+		if err := m.mysqlMigrator(ctx, config); err != nil {
+			log.Printf("WARN: migration failed for %s: %v", projectID, err)
+		}
+	}
+	opened, err := m.mysqlOpener(config)
+	if err != nil {
+		return nil, fmt.Errorf("create pool: %w", err)
+	}
+	return opened, nil
 }
 
 // ErrNoDatabase is returned for a project created without a database
@@ -162,16 +225,16 @@ func (m *Manager) createPool(ctx context.Context, orgSlug, projectID string) (*p
 // the handlers answer 409 rather than 503.
 var ErrNoDatabase = errors.New("project has no database")
 
-// refreshUnchanged keeps the existing pool when the vault record is identical.
-func (m *Manager) refreshUnchanged(projectID, fingerprint string) (*pgxpool.Pool, bool) {
+// refreshUnchanged keeps the existing store when the vault record is identical.
+func (m *Manager) refreshUnchanged(projectID, fingerprint string) (store.Store, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	existing, ok := m.pools[projectID]
-	if !ok || existing.pool == nil || existing.fingerprint != fingerprint {
+	if !ok || existing.store == nil || existing.fingerprint != fingerprint {
 		return nil, false
 	}
 	existing.createdAt = time.Now()
-	return existing.pool, true
+	return existing.store, true
 }
 
 func (m *Manager) fetchCredentials(ctx context.Context, orgSlug, projectID string) (credentialRecord, error) {

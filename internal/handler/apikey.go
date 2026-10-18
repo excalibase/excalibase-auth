@@ -74,7 +74,7 @@ func (h *AuthHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		writePoolFailure(w, err)
 		return
@@ -86,16 +86,7 @@ func (h *AuthHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var (
-		id        int64
-		createdAt time.Time
-	)
-	err = pool.QueryRow(r.Context(),
-		`INSERT INTO auth.api_keys (key_hash, key_prefix, key_type, name)
-		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, created_at`,
-		hash, prefix, req.KeyType, req.Name,
-	).Scan(&id, &createdAt)
+	id, createdAt, err := db.CreateAPIKey(r.Context(), hash, prefix, req.KeyType, req.Name)
 	if err != nil {
 		httpError(w, "failed to persist api key", 500)
 		return
@@ -130,37 +121,27 @@ func (h *AuthHandler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		writePoolFailure(w, err)
 		return
 	}
 
-	rows, err := pool.Query(r.Context(),
-		`SELECT id, key_prefix, key_type, COALESCE(name, ''), created_at, last_used_at
-		 FROM auth.api_keys
-		 WHERE revoked_at IS NULL
-		 ORDER BY created_at DESC`,
-	)
+	listing, err := db.ListAPIKeys(r.Context())
 	if err != nil {
 		httpError(w, "failed to query api keys", 500)
 		return
 	}
-	defer rows.Close()
 
-	keys := make([]domain.APIKeyInfo, 0)
-	for rows.Next() {
-		var info domain.APIKeyInfo
-		var createdAt time.Time
-		var lastUsed *time.Time
-		if err := rows.Scan(&info.ID, &info.KeyPrefix, &info.KeyType, &info.Name, &createdAt, &lastUsed); err != nil {
-			httpError(w, "failed to scan api key", 500)
-			return
+	keys := make([]domain.APIKeyInfo, 0, len(listing))
+	for _, key := range listing {
+		info := domain.APIKeyInfo{
+			ID: key.ID, KeyPrefix: key.Prefix, KeyType: key.Type, Name: key.Name,
+			CreatedAt: key.CreatedAt.Format(time.RFC3339),
 		}
-		info.CreatedAt = createdAt.Format(time.RFC3339)
-		if lastUsed != nil {
-			s := lastUsed.Format(time.RFC3339)
-			info.LastUsedAt = &s
+		if key.LastUsedAt != nil {
+			used := key.LastUsedAt.Format(time.RFC3339)
+			info.LastUsedAt = &used
 		}
 		keys = append(keys, info)
 	}
@@ -193,23 +174,18 @@ func (h *AuthHandler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		writePoolFailure(w, err)
 		return
 	}
 
-	tag, err := pool.Exec(r.Context(),
-		`UPDATE auth.api_keys
-		 SET revoked_at = NOW()
-		 WHERE id = $1 AND revoked_at IS NULL`,
-		id,
-	)
+	revoked, err := db.RevokeAPIKey(r.Context(), id)
 	if err != nil {
 		httpError(w, "failed to revoke api key", 500)
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if !revoked {
 		// Either id doesn't exist or already revoked. We treat both as success
 		// (idempotent) but return a hint in the body.
 		writeJSON(w, map[string]string{"status": "already_revoked_or_missing"})
