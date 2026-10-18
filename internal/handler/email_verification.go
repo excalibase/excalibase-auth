@@ -12,9 +12,9 @@ import (
 
 	"github.com/excalibase/auth/internal/domain"
 	"github.com/excalibase/auth/internal/email"
+	"github.com/excalibase/auth/internal/store"
 	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -72,16 +72,12 @@ func verificationLink(siteURL, plaintext string) string {
 // password; any other link proves only the address.
 //
 // Neither the address nor the token is ever logged.
-func (h *AuthHandler) sendVerification(ctx context.Context, db *pgxpool.Pool, projectID string, userID int64, address, siteURL string, confirmsPassword bool) {
+func (h *AuthHandler) sendVerification(ctx context.Context, db store.Store, projectID string, userID int64, address, siteURL string, confirmsPassword bool) {
 	if siteURL == "" {
 		log.Printf("auth.verification.no_site_url project=%s userId=%d: not sent, set the project's site URL", safeLog(projectID), userID)
 		return
 	}
-	plaintext, err := emailVerificationTokens.issue(ctx, db, userID, verificationTTL)
-	if err == nil && confirmsPassword {
-		_, err = db.Exec(ctx,
-			"UPDATE auth.email_verification_tokens SET confirms_password = true WHERE token_hash = $1", token.Hash(plaintext))
-	}
+	plaintext, err := emailVerificationTokens.issue(ctx, db, userID, verificationTTL, confirmsPassword)
 	if err != nil {
 		log.Printf("auth.verification.issue_failed project=%s userId=%d", safeLog(projectID), userID)
 		return
@@ -118,7 +114,7 @@ func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 		plaintext = req.Token
 	}
 
-	db, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		writePoolFailure(w, err)
 		return
@@ -154,46 +150,21 @@ type redeemedVerification struct {
 }
 
 // redeemVerification consumes a live link and reports what it proves.
-func redeemVerification(ctx context.Context, db *pgxpool.Pool, plaintext string) (redeemedVerification, error) {
-	rowID, userID, err := emailVerificationTokens.lookup(ctx, db, plaintext)
+func redeemVerification(ctx context.Context, db store.Store, plaintext string) (redeemedVerification, error) {
+	found, err := emailVerificationTokens.lookup(ctx, db, plaintext)
 	if err != nil {
 		return redeemedVerification{}, err
 	}
-	redeemed := redeemedVerification{userID: userID}
-	if err := db.QueryRow(ctx,
-		"SELECT confirms_password FROM auth.email_verification_tokens WHERE id = $1", rowID,
-	).Scan(&redeemed.confirmsPassword); err != nil {
-		return redeemedVerification{}, errTokenNotRedeemable
-	}
-	if err := emailVerificationTokens.claim(ctx, db, rowID); err != nil {
+	if err := emailVerificationTokens.claim(ctx, db, found.RowID); err != nil {
 		return redeemedVerification{}, err
 	}
-	return redeemed, nil
+	return redeemedVerification{userID: found.UserID, confirmsPassword: found.ConfirmsPassword}, nil
 }
 
 // markVerified records the proof, revokes every refresh token, and disables a
 // password the link did not prove, all at once. It returns the address.
-func markVerified(ctx context.Context, db *pgxpool.Pool, redeemed redeemedVerification) (string, error) {
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
-
-	var address string
-	if err := tx.QueryRow(ctx,
-		`UPDATE auth.users SET email_verified = true, updated_at = NOW(),
-		        password = CASE WHEN $2 THEN password ELSE $3 END
-		 WHERE id = $1 RETURNING email`,
-		redeemed.userID, redeemed.confirmsPassword, unprovenHashMarker,
-	).Scan(&address); err != nil {
-		return "", err
-	}
-	if _, err := tx.Exec(ctx,
-		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false", redeemed.userID); err != nil {
-		return "", err
-	}
-	return address, tx.Commit(ctx)
+func markVerified(ctx context.Context, db store.Store, redeemed redeemedVerification) (string, error) {
+	return db.MarkVerified(ctx, redeemed.userID, redeemed.confirmsPassword, unprovenHashMarker)
 }
 
 // ResendVerification re-sends the verification link. It answers 200 for every
@@ -231,19 +202,15 @@ func (h *AuthHandler) ResendVerification(w http.ResponseWriter, r *http.Request)
 // existing, still-unverified account. It reports nothing back to the caller:
 // every outcome must look identical from outside.
 func (h *AuthHandler) resendVerificationFor(r *http.Request, projectID, address string) {
-	db, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return
 	}
 
-	var userID int64
-	var verified bool
-	err = db.QueryRow(r.Context(),
-		"SELECT id, email_verified FROM auth.users WHERE email = $1", address,
-	).Scan(&userID, &verified)
-	if err != nil || verified {
+	account, err := db.AccountByEmail(r.Context(), address)
+	if err != nil || account.EmailVerified {
 		return
 	}
 
-	h.sendVerification(r.Context(), db, projectID, userID, address, h.settingsFor(r.Context(), projectID).siteURL, false)
+	h.sendVerification(r.Context(), db, projectID, account.ID, address, h.settingsFor(r.Context(), projectID).siteURL, false)
 }

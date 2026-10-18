@@ -56,7 +56,7 @@ func buildOne(t *testing.T, mode string, record credentialRecord) (*pgxpool.Conf
 		mgr.SetSSLMode(mode)
 	}
 	configs := recordingCreator(mgr)
-	_, err := mgr.GetPool(context.Background(), "org", "project-1")
+	_, err := getPool(mgr, context.Background(), "org", "project-1")
 	if err != nil {
 		return nil, err
 	}
@@ -171,12 +171,12 @@ func TestTenantPoolPicksUpARenewedCertificateOnRefresh(t *testing.T) {
 		return pgxpool.NewWithConfig(ctx, config)
 	}
 	ctx := context.Background()
-	firstPool, err := mgr.GetPool(ctx, "org", "project-1")
+	firstPool, err := getPool(mgr, ctx, "org", "project-1")
 	if err != nil {
 		t.Fatalf("first GetPool: %v", err)
 	}
 	time.Sleep(5 * time.Millisecond)
-	renewedPool, err := mgr.GetPool(ctx, "org", "project-1")
+	renewedPool, err := getPool(mgr, ctx, "org", "project-1")
 	if err != nil {
 		t.Fatalf("GetPool after refresh: %v", err)
 	}
@@ -196,13 +196,13 @@ func TestTenantPoolKeepsThePoolWhileTheRecordIsUnchanged(t *testing.T) {
 		return pgxpool.NewWithConfig(ctx, config)
 	}
 	ctx := context.Background()
-	pool, err := mgr.GetPool(ctx, "org", "project-1")
+	pool, err := getPool(mgr, ctx, "org", "project-1")
 	if err != nil {
 		t.Fatalf("GetPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
 	time.Sleep(5 * time.Millisecond)
-	if _, err := mgr.GetPool(ctx, "org", "project-1"); err != nil {
+	if _, err := getPool(mgr, ctx, "org", "project-1"); err != nil {
 		t.Fatalf("GetPool after refresh: %v", err)
 	}
 	if created != 1 {

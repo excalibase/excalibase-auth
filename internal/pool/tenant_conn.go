@@ -21,6 +21,8 @@ const sslModeDisable = "disable"
 // credentialRecord is the vault record provisioning writes for auth_admin.
 // The ssl* fields are PEM and present for every Kubernetes tenant.
 type credentialRecord struct {
+	// Engine is "mysql" for a MySQL project (ADR 0041); empty is Postgres.
+	Engine      string `json:"engine"`
 	Host        string `json:"host"`
 	Port        string `json:"port"`
 	Database    string `json:"database"`

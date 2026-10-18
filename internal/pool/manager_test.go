@@ -66,8 +66,8 @@ func TestGetPoolCaches(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	mgr.GetPool(ctx, "my-org", "project-1")
-	mgr.GetPool(ctx, "my-org", "project-1") // should be cached
+	getPool(mgr, ctx, "my-org", "project-1")
+	getPool(mgr, ctx, "my-org", "project-1") // should be cached
 
 	if callCount != 1 {
 		t.Errorf("expected 1 vault call (cached), got %d", callCount)
@@ -92,9 +92,9 @@ func TestGetPoolTTLExpiry(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	mgr.GetPool(ctx, "my-org", "project-1")
+	getPool(mgr, ctx, "my-org", "project-1")
 	time.Sleep(5 * time.Millisecond)
-	mgr.GetPool(ctx, "my-org", "project-1") // TTL expired, should re-fetch
+	getPool(mgr, ctx, "my-org", "project-1") // TTL expired, should re-fetch
 
 	if callCount != 2 {
 		t.Errorf("expected 2 vault calls (TTL expired), got %d", callCount)
@@ -187,7 +187,7 @@ func TestFetchCredentials_ProjectWithoutADatabase(t *testing.T) {
 	defer server.Close()
 
 	mgr := NewManager(server.URL, token.Literal("test-pat"), time.Hour)
-	_, err := mgr.GetPool(context.Background(), "my-org", "apps-only")
+	_, err := getPool(mgr, context.Background(), "my-org", "apps-only")
 	if !errors.Is(err, ErrNoDatabase) {
 		t.Fatalf("got %v, want ErrNoDatabase", err)
 	}

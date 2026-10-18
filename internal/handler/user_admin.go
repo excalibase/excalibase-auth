@@ -14,9 +14,8 @@ import (
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/domain"
 	"github.com/excalibase/auth/internal/middleware"
+	"github.com/excalibase/auth/internal/store"
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -90,12 +89,12 @@ func (h *AuthHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "invalid_pagination", http.StatusBadRequest)
 		return
 	}
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectKey(r))
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectKey(r))
 	if err != nil {
 		writePoolFailure(w, err)
 		return
 	}
-	users, err := listUsers(r.Context(), pool, limit, offset)
+	users, err := db.ListUsers(r.Context(), limit, offset)
 	if err != nil {
 		httpError(w, "failed_to_list_users", http.StatusInternalServerError)
 		return
@@ -123,34 +122,6 @@ func queryInt(r *http.Request, name string, fallback int) (int, error) {
 	return strconv.Atoi(raw)
 }
 
-func listUsers(ctx context.Context, pool *pgxpool.Pool, limit, offset int) ([]domain.ManagedUser, error) {
-	rows, err := pool.Query(ctx,
-		`SELECT id, email, role, allowed_roles, enabled, email_verified
-		 FROM auth.users ORDER BY id LIMIT $1 OFFSET $2`, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	users := make([]domain.ManagedUser, 0)
-	for rows.Next() {
-		user, err := scanManagedUser(rows)
-		if err != nil {
-			return nil, err
-		}
-		users = append(users, user)
-	}
-	return users, rows.Err()
-}
-
-func scanManagedUser(row pgx.Row) (domain.ManagedUser, error) {
-	var user domain.ManagedUser
-	err := row.Scan(&user.ID, &user.Email, &user.Role, &user.AllowedRoles, &user.Enabled, &user.EmailVerified)
-	if user.AllowedRoles == nil {
-		user.AllowedRoles = []string{user.Role}
-	}
-	return user, err
-}
-
 // SetUserRole replaces an account's role and allowed roles. Every session of
 // the account ends, so the new roles apply from its next sign-in.
 func (h *AuthHandler) SetUserRole(w http.ResponseWriter, r *http.Request) {
@@ -171,17 +142,17 @@ func (h *AuthHandler) SetUserRole(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	pool, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectKey(r))
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectKey(r))
 	if err != nil {
 		writePoolFailure(w, err)
 		return
 	}
-	change := roleChange{userID: userID, role: req.Role, allowed: allowed, actor: actorFrom(r.Context())}
+	change := store.RoleChange{UserID: userID, Role: req.Role, Allowed: allowed, Actor: actorFrom(r.Context())}
 	if req.AllowedRoles != nil {
-		change.stored = allowed
+		change.Stored = allowed
 	}
-	user, err := applyRoleChange(r.Context(), pool, change)
-	if errors.Is(err, errUserNotFound) {
+	user, err := db.ApplyRoleChange(r.Context(), change)
+	if errors.Is(err, store.ErrNotFound) {
 		httpError(w, errUserNotFound.Error(), http.StatusNotFound)
 		return
 	}
@@ -190,64 +161,11 @@ func (h *AuthHandler) SetUserRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("auth.users.role_changed project=%s user=%d role=%s actor=%s",
-		safeLog(projectKey(r)), userID, req.Role, safeLog(change.actor))
+		safeLog(projectKey(r)), userID, req.Role, safeLog(change.Actor))
 	writeJSON(w, user)
 }
 
 func actorFrom(ctx context.Context) string {
 	actor, _ := ctx.Value(actorCtxKey{}).(string)
 	return actor
-}
-
-// roleChange is one validated change; stored is what users.allowed_roles
-// receives (nil when the caller gave no list) and allowed its reading.
-type roleChange struct {
-	userID  int64
-	role    string
-	allowed []string
-	stored  []string
-	actor   string
-}
-
-// applyRoleChange updates the account, revokes every refresh token it holds
-// and writes the audit row in one transaction.
-func applyRoleChange(ctx context.Context, pool *pgxpool.Pool, change roleChange) (domain.ManagedUser, error) {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return domain.ManagedUser{}, err
-	}
-	defer tx.Rollback(ctx)
-
-	before, err := scanManagedUser(tx.QueryRow(ctx,
-		`SELECT id, email, role, allowed_roles, enabled, email_verified
-		 FROM auth.users WHERE id = $1 FOR UPDATE`, change.userID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.ManagedUser{}, errUserNotFound
-	}
-	if err != nil {
-		return domain.ManagedUser{}, err
-	}
-	statements := []struct {
-		sql  string
-		args []any
-	}{
-		{`UPDATE auth.users SET role = $2, allowed_roles = $3, updated_at = NOW() WHERE id = $1`,
-			[]any{change.userID, change.role, change.stored}},
-		{`UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false`,
-			[]any{change.userID}},
-		{`INSERT INTO auth.role_changes (user_id, old_role, new_role, old_allowed_roles, new_allowed_roles, actor)
-		  VALUES ($1, $2, $3, $4, $5, $6)`,
-			[]any{change.userID, before.Role, change.role, before.AllowedRoles, change.allowed, change.actor}},
-	}
-	for _, statement := range statements {
-		if _, err := tx.Exec(ctx, statement.sql, statement.args...); err != nil {
-			return domain.ManagedUser{}, err
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.ManagedUser{}, err
-	}
-	after := before
-	after.Role, after.AllowedRoles = change.role, change.allowed
-	return after, nil
 }

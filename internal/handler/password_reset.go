@@ -12,9 +12,9 @@ import (
 
 	"github.com/excalibase/auth/internal/email"
 	"github.com/excalibase/auth/internal/ratelimit"
+	"github.com/excalibase/auth/internal/store"
 	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -84,30 +84,29 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 // sendPasswordReset mails a reset link when the address belongs to a real
 // account. It reports nothing back: every outcome must look the same outside.
 func (h *AuthHandler) sendPasswordReset(r *http.Request, projectID, address string) {
-	db, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return
 	}
 
-	var userID int64
-	if err := db.QueryRow(r.Context(),
-		"SELECT id FROM auth.users WHERE email = $1", address).Scan(&userID); err != nil {
+	account, err := db.AccountByEmail(r.Context(), address)
+	if err != nil {
 		return
 	}
 
-	h.mailPasswordReset(r.Context(), db, projectID, userID, address)
+	h.mailPasswordReset(r.Context(), db, projectID, account.ID, address)
 }
 
 // mailPasswordReset mints a reset link and mails it. issue invalidates anything
 // outstanding, so the newest link is the only live one and an older leaked link
 // stops working.
-func (h *AuthHandler) mailPasswordReset(ctx context.Context, db *pgxpool.Pool, projectID string, userID int64, address string) {
+func (h *AuthHandler) mailPasswordReset(ctx context.Context, db store.Store, projectID string, userID int64, address string) {
 	siteURL := h.settingsFor(ctx, projectID).siteURL
 	if siteURL == "" {
 		log.Printf("auth.reset.no_site_url project=%s userId=%d: not sent, set the project's site URL", safeLog(projectID), userID)
 		return
 	}
-	plaintext, err := passwordResetTokens.issue(ctx, db, userID, resetTTL)
+	plaintext, err := passwordResetTokens.issue(ctx, db, userID, resetTTL, false)
 	if err != nil {
 		log.Printf("auth.reset.issue_failed project=%s userId=%d", safeLog(projectID), userID)
 		return
@@ -150,7 +149,7 @@ func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := h.poolMgr.GetPool(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		writePoolFailure(w, err)
 		return
@@ -184,12 +183,9 @@ func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 
 // applyNewPassword stores the new credential hash and revokes every refresh
 // token the account holds.
-func applyNewPassword(ctx context.Context, db *pgxpool.Pool, userID int64, hash string) error {
-	if _, err := db.Exec(ctx,
-		"UPDATE auth.users SET password = $1, updated_at = NOW() WHERE id = $2", hash, userID); err != nil {
+func applyNewPassword(ctx context.Context, db store.Store, userID int64, hash string) error {
+	if err := db.SetPassword(ctx, userID, hash); err != nil {
 		return err
 	}
-	_, err := db.Exec(ctx,
-		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false", userID)
-	return err
+	return db.RevokeUserRefreshTokens(ctx, userID)
 }

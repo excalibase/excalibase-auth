@@ -1,0 +1,132 @@
+package mysqlstore_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/excalibase/auth/internal/migrate"
+	"github.com/excalibase/auth/internal/store/mysqlstore"
+	"github.com/excalibase/auth/internal/store/storetest"
+	"github.com/excalibase/auth/internal/testmysql"
+)
+
+func authLogin(record map[string]string) mysqlstore.Login {
+	return mysqlstore.Login{
+		Host: record["host"], Port: record["port"], Database: record["database"],
+		Username: record["username"], Password: record["password"], ServerCA: record["sslrootcert"],
+	}
+}
+
+// openMigrated migrates and opens the auth database as auth_admin, holding
+// only the grant provisioning gives it.
+func openMigrated(t *testing.T) (*testmysql.Server, *mysqlstore.Store) {
+	t.Helper()
+	server := testmysql.Start(t)
+	config, err := mysqlstore.Config(authLogin(server.ProvisionAuth(t, "auth-admin-pw")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate.RunMySQL(context.Background(), config); err != nil {
+		t.Fatalf("migrate as auth_admin: %v", err)
+	}
+	db, err := mysqlstore.Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	return server, db
+}
+
+func TestIntegration_MySQLStoreKeepsTheStoreContract(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration")
+	}
+	server, db := openMigrated(t)
+	root := server.Root(t)
+	storetest.Run(t, storetest.Fixture{
+		Store: db,
+		Count: func(t *testing.T, table string) int {
+			var n int
+			if err := root.QueryRow("SELECT COUNT(*) FROM `auth`.`" + table + "`").Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			return n
+		},
+	})
+}
+
+func TestIntegration_MySQLMigrationsAreRepeatableAndCompareTextByteForByte(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration")
+	}
+	server, db := openMigrated(t)
+	config, _ := mysqlstore.Config(authLogin(map[string]string{
+		"host": server.Host, "port": server.Port, "database": "auth",
+		"username": "auth_admin", "password": "auth-admin-pw", "sslrootcert": server.CAPEM,
+	}))
+	if err := migrate.RunMySQL(context.Background(), config); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	rows, err := server.Root(t).Query(`SELECT TABLE_NAME, TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'auth'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	tables := map[string]string{}
+	for rows.Next() {
+		var name, collation string
+		if err := rows.Scan(&name, &collation); err != nil {
+			t.Fatal(err)
+		}
+		tables[name] = collation
+	}
+	for _, table := range []string{"users", "refresh_tokens", "api_keys", "email_verification_tokens", "password_reset_tokens", "role_changes"} {
+		if tables[table] != "utf8mb4_0900_bin" {
+			t.Errorf("%s collation = %q, want utf8mb4_0900_bin", table, tables[table])
+		}
+	}
+	_ = db
+}
+
+func TestMySQLConfigVerifiesTheServerAgainstTheRecordsCA(t *testing.T) {
+	config, err := mysqlstore.Config(mysqlstore.Login{
+		Host: "moco-p1-mysql-primary.ns.svc", Port: "3306", Database: "auth",
+		Username: "auth_admin", Password: "pw", ServerCA: testCA(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.TLS == nil || config.TLS.ServerName != "moco-p1-mysql-primary.ns.svc" || config.TLS.RootCAs == nil || config.TLS.InsecureSkipVerify {
+		t.Fatalf("tls = %+v", config.TLS)
+	}
+	if config.MultiStatements || config.InterpolateParams || config.AllowAllFiles || config.AllowCleartextPasswords {
+		t.Fatalf("unsafe options on: %+v", config)
+	}
+	if config.DBName != "auth" || config.User != "auth_admin" || config.Addr != "moco-p1-mysql-primary.ns.svc:3306" || !config.ParseTime {
+		t.Fatalf("config = %+v", config)
+	}
+}
+
+func TestMySQLConfigRefusesALoginWithoutAUsableCA(t *testing.T) {
+	for name, ca := range map[string]string{"missing": "", "not PEM": "not a certificate"} {
+		_, err := mysqlstore.Config(mysqlstore.Login{Host: "h", Port: "3306", Database: "auth", Username: "u", Password: "secret-pw", ServerCA: ca})
+		if err == nil {
+			t.Fatalf("%s CA accepted", name)
+		}
+		if contains(err.Error(), "secret-pw") {
+			t.Fatalf("error carries the password: %v", err)
+		}
+	}
+}
+
+// Whatever the instance's own sql_mode, auth's sessions are strict, so bad
+// values fail as they do on Postgres instead of being adjusted.
+func TestMySQLConfigPinsAStrictSQLMode(t *testing.T) {
+	config, err := mysqlstore.Config(mysqlstore.Login{Host: "h", Port: "3306", Database: "auth", Username: "u", Password: "p", ServerCA: testCA(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := config.Params["sql_mode"]; !contains(mode, "STRICT_ALL_TABLES") || !contains(mode, "NO_ZERO_DATE") {
+		t.Fatalf("sql_mode = %q", mode)
+	}
+}
