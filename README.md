@@ -6,7 +6,7 @@
 
 ## Overview
 
-Excalibase Auth is a **multi-tenant JWT authentication microservice** built in Go for the [Excalibase](https://github.com/excalibase) platform. It provides per-project user authentication with automatic schema migrations, issuing JWT access tokens that carry claims used by downstream services ([excalibase-graphql](https://github.com/excalibase/excalibase-graphql), excalibase-rest) to enforce **PostgreSQL Row-Level Security (RLS)**.
+Excalibase Auth is the **multi-tenant end-user authentication service** of [Excalibase](https://github.com/excalibase/excalibase), an open-source platform as a service. It is written in Go. It provides per-project user authentication with automatic schema migrations, issuing JWT access tokens whose claims (user id, project, role) the API engine ([excalibase-graphql](https://github.com/excalibase/excalibase-graphql)) uses to enforce **per-role permissions**: row filters and column lists, applied by the engine itself so they work the same on Postgres and MySQL.
 
 ### How It Fits in the Platform
 
@@ -15,8 +15,8 @@ Excalibase Auth is a **multi-tenant JWT authentication microservice** built in G
                           │         excalibase-graphql                  │
 ┌──────────┐    JWT       │  1. verifies JWT (public key from vault)   │
 │  Client   │────────────▶│  2. extracts userId, projectId, role       │
-│           │◀────────────│  3. set_config('request.user_id', ...)     │
-└──────────┘              │  4. executes query (RLS enforced)          │
+│           │◀────────────│  3. compiles the role's permissions in SQL │
+└──────────┘              │  4. executes one query (rows filtered)     │
      │                    └───────────────────────┬────────────────────┘
      │  register/login                            │
      ▼                                            ▼
