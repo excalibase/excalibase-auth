@@ -73,6 +73,8 @@ func parseTenantURL(record credentialRecord, sslMode string) (*pgxpool.Config, e
 		// pgx echoes the connection string in some parse errors, password included.
 		return nil, errors.New("credential record does not form a valid connection")
 	}
+	config.ConnConfig.ConnectTimeout = connectTimeout
+	config.ConnConfig.DialFunc = boundIO(config.ConnConfig.DialFunc, ioTimeout)
 	return config, nil
 }
 

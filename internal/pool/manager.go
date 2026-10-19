@@ -325,5 +325,6 @@ func defaultPoolCreator(ctx context.Context, config *pgxpool.Config) (*pgxpool.P
 	config.MaxConnLifetime = 30 * time.Minute
 	config.MaxConnIdleTime = 5 * time.Minute
 	config.HealthCheckPeriod = 30 * time.Second
+	config.PingTimeout = pingTimeout
 	return pgxpool.NewWithConfig(ctx, config)
 }
