@@ -16,6 +16,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,7 @@ type Server struct {
 	Host  string
 	Port  string
 	CAPEM string
+	id    string
 }
 
 // Start runs the server for the test and stops it afterwards.
@@ -86,7 +88,17 @@ func Start(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Server{Host: host, Port: port.Port(), CAPEM: pki.caPEM}
+	return &Server{Host: host, Port: port.Port(), CAPEM: pki.caPEM, id: container.GetContainerID()}
+}
+
+// Freeze pauses the server for the rest of the test: its connections stay
+// open but nothing answers, as when a database pod is replaced under them.
+func (s *Server) Freeze(t *testing.T) {
+	t.Helper()
+	if out, err := exec.Command("docker", "pause", s.id).CombinedOutput(); err != nil {
+		t.Fatalf("docker pause: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "unpause", s.id).Run() })
 }
 
 // TLS verifies the server against the test CA and the host name.
