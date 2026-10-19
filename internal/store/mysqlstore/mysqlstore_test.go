@@ -2,9 +2,12 @@ package mysqlstore_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/excalibase/auth/internal/migrate"
+	"github.com/excalibase/auth/internal/store"
 	"github.com/excalibase/auth/internal/store/mysqlstore"
 	"github.com/excalibase/auth/internal/store/storetest"
 	"github.com/excalibase/auth/internal/testmysql"
@@ -128,5 +131,37 @@ func TestMySQLConfigPinsAStrictSQLMode(t *testing.T) {
 	}
 	if mode := config.Params["sql_mode"]; !contains(mode, "STRICT_ALL_TABLES") || !contains(mode, "NO_ZERO_DATE") {
 		t.Fatalf("sql_mode = %q", mode)
+	}
+}
+
+// EXC-650: a login right after an in-place restore answered 504. A pooled
+// connection to a server that stopped answering must fail the call in
+// seconds, not hold the request until the edge gives up.
+func TestIntegration_MySQLStoreFailsFastWhenTheServerStopsAnswering(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration")
+	}
+	server, db := openMigrated(t)
+	ctx := context.Background()
+	if _, err := db.AccountByEmail(ctx, "nobody@example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("warm the pool: %v", err)
+	}
+	server.Freeze(t)
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := db.AccountByEmail(ctx, "nobody@example.com")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("a frozen server answered: %v", err)
+		}
+		if elapsed := time.Since(started); elapsed > 20*time.Second {
+			t.Fatalf("the call failed only after %s", elapsed)
+		}
+	case <-time.After(40 * time.Second):
+		t.Fatal("the call hung on a server that stopped answering")
 	}
 }

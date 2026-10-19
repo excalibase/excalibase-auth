@@ -25,6 +25,10 @@ import (
 // duplicateEntry is MySQL's ER_DUP_ENTRY.
 const duplicateEntry = 1062
 
+// ioTimeout bounds one read or write on a connection; every auth statement
+// is a short keyed read or write.
+const ioTimeout = 10 * time.Second
+
 // Login is the auth_admin record provisioning files for a MySQL project.
 type Login struct {
 	Host, Port, Database, Username, Password string
@@ -57,6 +61,10 @@ func Config(login Login) (*mysql.Config, error) {
 		"sql_mode": "'STRICT_ALL_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'",
 	}
 	config.Timeout = 10 * time.Second
+	// A server that stops answering (its pod replaced by a restore) fails
+	// the call instead of holding it until the edge answers 504 (EXC-650).
+	config.ReadTimeout = ioTimeout
+	config.WriteTimeout = ioTimeout
 	return config, nil
 }
 
