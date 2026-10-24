@@ -131,6 +131,14 @@ func (m *Manager) GetStore(ctx context.Context, orgSlug, projectID string) (stor
 	return m.createStore(ctx, orgSlug, projectID)
 }
 
+// Serves reports whether a store for the project is open: the vault knew it.
+func (m *Manager) Serves(projectID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.pools[projectID]
+	return ok
+}
+
 func (m *Manager) createStore(ctx context.Context, orgSlug, projectID string) (store.Store, error) {
 	record, err := m.fetchCredentials(ctx, orgSlug, projectID)
 	if err != nil {

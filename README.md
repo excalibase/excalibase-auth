@@ -219,6 +219,9 @@ All configuration is via environment variables:
 | `TRUSTED_PROXY_CIDRS` | — (empty) | Comma-separated CIDRs allowed to set `X-Forwarded-For` |
 | `CORS_ORIGINS` | `https://app.excalibase.io` | Platform (Studio) origins, trusted with credentials on every route. On `/auth/{org}/{project}/*` a `*` here is ignored: other origins come from the project's allowlist (`corsAllowedOrigins` on provisioning's `/projects/{id}/info`, the list the engine uses), exact match, no credentials; an allowlist that cannot be read refuses the origin |
 | `PROJECT_CORS_TTL_SECONDS` | `30` | How long a project's allowlist is cached; a failed refresh keeps the last list |
+| `REQUEST_METRICS_ENABLED` | `false` | `true` serves each project's request count, outcome and latency histogram on an internal listener for Studio's request charts. Off: no listener, nothing recorded |
+| `REQUEST_METRICS_PORT` | `9465` | That listener's port. It answers only `GET /metrics`; the chart admits only provisioning to it |
+| `REQUEST_METRICS_MAX_PROJECTS` | `1000` | Projects recorded per process; only projects whose vault record resolved are counted |
 | `TENANT_DB_SSLMODE` | `verify-full` | `disable` (docker AIO only: password login, no TLS) or a TLS mode. `require`, `verify-ca` and `verify-full` all mean verify-full with the client certificate from the vault record (`sslcert`/`sslkey`/`sslrootcert`); a record without them is refused. `prefer`/`allow` and anything else fail startup |
 
 ### CORS

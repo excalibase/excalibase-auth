@@ -24,6 +24,11 @@ import (
 
 func setupUnitRouter(t *testing.T) chi.Router {
 	t.Helper()
+	return setupUnitRouterWith(t, func(h *AuthHandler) *AuthHandler { return h })
+}
+
+func setupUnitRouterWith(t *testing.T, option handlerOption) chi.Router {
+	t.Helper()
 	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	b, _ := x509.MarshalECPrivateKey(priv)
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b}))
@@ -31,7 +36,7 @@ func setupUnitRouter(t *testing.T) chi.Router {
 	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", 3600)
 	// Pool manager with unreachable vault — all DB operations will fail
 	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
-	h := NewAuthHandler(mgr, jwtSvc, 604800)
+	h := option(NewAuthHandler(mgr, jwtSvc, 604800))
 
 	r := chi.NewRouter()
 	r.Route("/auth", h.Routes)

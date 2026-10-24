@@ -35,6 +35,29 @@ type Config struct {
 	TenantDBSSLMode string
 	// PasswordHashConcurrency is how many argon2id hashes may run at once.
 	PasswordHashConcurrency int
+	RequestMetrics          RequestMetrics
+}
+
+// RequestMetrics is the per-project request counting provisioning scrapes for
+// Studio's charts (EXC-656), served on its own internal port only when enabled.
+type RequestMetrics struct {
+	Enabled     bool
+	Port        string
+	MaxProjects int
+}
+
+const defaultRequestMetricsMaxProjects = 1000
+
+func loadRequestMetrics() RequestMetrics {
+	maxProjects := envInt("REQUEST_METRICS_MAX_PROJECTS", defaultRequestMetricsMaxProjects)
+	if maxProjects <= 0 {
+		maxProjects = defaultRequestMetricsMaxProjects
+	}
+	return RequestMetrics{
+		Enabled:     os.Getenv("REQUEST_METRICS_ENABLED") == "true",
+		Port:        envOr("REQUEST_METRICS_PORT", "9465"),
+		MaxProjects: maxProjects,
+	}
 }
 
 // RateLimit holds the credential-endpoint throttling knobs. Per-IP and
@@ -78,6 +101,7 @@ func Load() Config {
 		TenantDBSSLMode:     tenantDBSSLMode(),
 
 		PasswordHashConcurrency: hashConcurrency(),
+		RequestMetrics:          loadRequestMetrics(),
 	}
 }
 
