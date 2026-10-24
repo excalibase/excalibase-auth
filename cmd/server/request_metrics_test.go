@@ -29,10 +29,10 @@ func TestRequestMetricsServer_ListensOnItsOwnPortAndAnswersOnlyTheScrape(t *test
 }
 
 func TestRequestMetricsRecorder_FlagOffMeansNoRecorderAndNoListener(t *testing.T) {
-	if recorder := requestMetricsRecorder(config.RequestMetrics{Enabled: false, Port: "9465", MaxProjects: 10}, func(string) bool { return true }); recorder != nil {
+	if requestMetricsRecorder(config.RequestMetrics{Enabled: false, Port: "9465", MaxProjects: 10}, func(string) bool { return true }) != nil {
 		t.Error("with the flag off nothing is recorded and no listener starts")
 	}
-	if recorder := requestMetricsRecorder(config.RequestMetrics{Enabled: true, Port: "9465", MaxProjects: 10}, func(string) bool { return true }); recorder == nil {
+	if requestMetricsRecorder(config.RequestMetrics{Enabled: true, Port: "9465", MaxProjects: 10}, func(string) bool { return true }) == nil {
 		t.Error("with the flag on the recorder exists")
 	}
 }
