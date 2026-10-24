@@ -108,7 +108,7 @@ func TestScrape_LatencyBucketsAreTheFixedSetProvisioningMerges(t *testing.T) {
 func TestScrape_NamesThisProcessSoACounterResetIsSeen(t *testing.T) {
 	first := scrape(t, NewRecorder(knownProjects(), 10))
 	second := scrape(t, NewRecorder(knownProjects(), 10))
-	info := regexp.MustCompile(`excalibase_request_metrics_info\{instance="([0-9a-f-]{36})"\} (\S+)`)
+	info := regexp.MustCompile(`excalibase_request_metrics_info\{instance="([0-9a-f-]{36})"\} 1`)
 	a, b := info.FindStringSubmatch(first), info.FindStringSubmatch(second)
 	if a == nil || b == nil {
 		t.Fatalf("no info line:\n%s", first)
@@ -116,8 +116,9 @@ func TestScrape_NamesThisProcessSoACounterResetIsSeen(t *testing.T) {
 	if a[1] == b[1] {
 		t.Error("each process has its own instance id")
 	}
-	if a[2] == "0" {
-		t.Error("the info value is the start time")
+	started := regexp.MustCompile(`excalibase_request_metrics_start_time_seconds\{instance="` + a[1] + `"\} [1-9]`)
+	if !started.MatchString(first) {
+		t.Errorf("the start time is its own series, as the engine exposes it:\n%s", first)
 	}
 }
 

@@ -52,13 +52,20 @@ func NewRecorder(serves func(projectID string) bool, maxProjects int) *Recorder 
 		maxProjects: maxProjects,
 		admitted:    map[string]bool{},
 	}
+	instance := prometheus.Labels{"instance": uuid.NewString()}
 	info := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "excalibase_request_metrics_info",
-		Help:        "Start time of this process; a new instance means its counters restarted.",
-		ConstLabels: prometheus.Labels{"instance": uuid.NewString()},
+		Help:        "This process; a new instance means its counters restarted.",
+		ConstLabels: instance,
 	})
-	info.Set(float64(time.Now().Unix()))
-	registry.MustRegister(recorder.requests, recorder.dropped, info)
+	info.Set(1)
+	started := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "excalibase_request_metrics_start_time_seconds",
+		Help:        "Start time of this process.",
+		ConstLabels: instance,
+	})
+	started.SetToCurrentTime()
+	registry.MustRegister(recorder.requests, recorder.dropped, info, started)
 	return recorder
 }
 
