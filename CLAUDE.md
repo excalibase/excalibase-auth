@@ -63,6 +63,8 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 | `TRUSTED_PROXY_CIDRS` | — (XFF never trusted) | No |
 | `CORS_ORIGINS` | `https://app.excalibase.io` (platform/Studio; project routes add the project's allowlist) | No |
 | `PROJECT_CORS_TTL_SECONDS` | `30` | No |
+| `REQUEST_METRICS_ENABLED` | `false` (only `true` turns it on) | No. Per-project request counts and latency on an internal listener for Studio's request charts (EXC-656) |
+| `REQUEST_METRICS_PORT` / `REQUEST_METRICS_MAX_PROJECTS` | `9465` / `1000` | No |
 
 ## Testing Strategy
 

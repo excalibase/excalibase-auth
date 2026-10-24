@@ -16,6 +16,7 @@ import (
 	"github.com/excalibase/auth/internal/metrics"
 	"github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/pool"
+	"github.com/excalibase/auth/internal/requestmetrics"
 	"github.com/excalibase/auth/internal/service"
 	"github.com/excalibase/auth/internal/store"
 	"github.com/excalibase/auth/internal/throttle"
@@ -71,6 +72,8 @@ type AuthHandler struct {
 	// CORS on project routes; with no source no project origin is granted.
 	corsPlatform []string
 	corsOrigins  middleware.OriginResolver
+
+	requestMetrics *requestmetrics.Recorder // nil when the request charts are off
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
@@ -110,6 +113,12 @@ func (h *AuthHandler) WithCORS(platformOrigins []string, origins middleware.Orig
 	return h
 }
 
+// WithRequestMetrics counts every project route's calls for the request charts.
+func (h *AuthHandler) WithRequestMetrics(recorder *requestmetrics.Recorder) *AuthHandler {
+	h.requestMetrics = recorder
+	return h
+}
+
 // WithRateLimits enables throttling of the credential routes. It returns the
 // receiver so construction reads as a chain.
 func (h *AuthHandler) WithRateLimits(limits *middleware.RateLimits) *AuthHandler {
@@ -122,6 +131,9 @@ func (h *AuthHandler) Routes(r chi.Router) {
 	// customer backend verifies end-user tokens offline (EXC-600).
 	r.Get("/.well-known/jwks.json", h.JWKS)
 	r.Route("/{orgSlug}/{projectId}", func(r chi.Router) {
+		if h.requestMetrics != nil {
+			r.Use(h.requestMetrics.Middleware)
+		}
 		r.Use(middleware.ProjectCORS(h.corsPlatform, h.corsOrigins))
 		r.Use(middleware.TenantContext)
 		r.Get("/.well-known/jwks.json", h.JWKS)

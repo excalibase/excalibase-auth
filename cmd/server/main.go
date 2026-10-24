@@ -68,6 +68,11 @@ func main() {
 		log.Printf("rate limiting disabled (RATE_LIMIT_ENABLED=false)")
 	}
 
+	if recorder := requestMetricsRecorder(cfg.RequestMetrics, poolMgr.Serves); recorder != nil {
+		authHandler.WithRequestMetrics(recorder)
+		go serveRequestMetrics(newRequestMetricsServer(cfg.RequestMetrics.Port, recorder))
+	}
+
 	// Transactional mail goes out through provisioning, which owns the provider
 	// and the templates; auth carries no mail SDK of its own. email.Client
 	// consults tokens on every Send, so it also survives a PROVISIONING_PAT_FILE
