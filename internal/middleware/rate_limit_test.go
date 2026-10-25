@@ -346,8 +346,10 @@ func TestAllowSignupSharesTheProjectRegisterBudget(t *testing.T) {
 	r.With(limits.Register).Post("/auth/{orgSlug}/{projectId}/register", statusHandler(http.StatusCreated).ServeHTTP)
 	before := testutil.ToFloat64(metrics.RateLimited.WithLabelValues(routeRegister))
 
-	if !limits.AllowSignup("proj") || !limits.AllowSignup("proj") {
-		t.Fatal("a sign-up within the budget was refused")
+	for range 2 {
+		if !limits.AllowSignup("proj") {
+			t.Fatal("a sign-up within the budget was refused")
+		}
 	}
 	if w := post(r, testRegisterPath, "10.0.0.1", "{}"); w.Code != http.StatusCreated {
 		t.Fatalf("the last register within the budget: %d", w.Code)
