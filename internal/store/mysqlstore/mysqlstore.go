@@ -171,21 +171,29 @@ func (s *Store) ReplaceUnverified(ctx context.Context, email, passwordHash, full
 	return id, err
 }
 
-func (s *Store) AccountByEmail(ctx context.Context, email string) (store.Account, error) {
+// accountColumns reads an account; a provider-made account has no password.
+const accountColumns = "id, COALESCE(email, ''), COALESCE(password, ''), full_name, role, allowed_roles, enabled, email_verified"
+
+func scanAccount(row rowScanner) (store.Account, error) {
 	var (
 		account store.Account
 		allowed sql.NullString
 	)
-	err := s.db.QueryRowContext(ctx,
-		"SELECT id, email, password, full_name, role, allowed_roles, enabled, email_verified FROM users WHERE email = ?",
-		email,
-	).Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
-		&allowed, &account.Enabled, &account.EmailVerified)
-	if err != nil {
+	if err := row.Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
+		&allowed, &account.Enabled, &account.EmailVerified); err != nil {
 		return store.Account{}, notFound(err)
 	}
+	var err error
 	account.AllowedRoles, err = decodeRoles(allowed)
 	return account, err
+}
+
+func (s *Store) AccountByEmail(ctx context.Context, email string) (store.Account, error) {
+	return scanAccount(s.db.QueryRowContext(ctx, "SELECT "+accountColumns+" FROM users WHERE email = ?", email))
+}
+
+func (s *Store) AccountByID(ctx context.Context, id int64) (store.Account, error) {
+	return scanAccount(s.db.QueryRowContext(ctx, "SELECT "+accountColumns+" FROM users WHERE id = ?", id))
 }
 
 func (s *Store) TouchLastLogin(ctx context.Context, userID int64) error {

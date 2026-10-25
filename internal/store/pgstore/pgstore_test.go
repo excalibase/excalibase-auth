@@ -50,4 +50,19 @@ func TestIntegration_PostgresStoreKeepsTheStoreContract(t *testing.T) {
 			return n
 		},
 	})
+	t.Run("users.password and users.email accept NULL", func(t *testing.T) {
+		assertNullable(t, pool, "password", "email")
+	})
+}
+
+func assertNullable(t *testing.T, pool *pgxpool.Pool, columns ...string) {
+	t.Helper()
+	for _, column := range columns {
+		var nullable string
+		if err := pool.QueryRow(context.Background(),
+			`SELECT is_nullable FROM information_schema.columns WHERE table_schema = 'auth' AND table_name = 'users' AND column_name = $1`,
+			column).Scan(&nullable); err != nil || nullable != "YES" {
+			t.Fatalf("auth.users.%s nullable = %q err=%v", column, nullable, err)
+		}
+	}
 }

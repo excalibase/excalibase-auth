@@ -83,9 +83,17 @@ func TestIntegration_MySQLMigrationsAreRepeatableAndCompareTextByteForByte(t *te
 		}
 		tables[name] = collation
 	}
-	for _, table := range []string{"users", "refresh_tokens", "api_keys", "email_verification_tokens", "password_reset_tokens", "role_changes"} {
+	for _, table := range []string{"users", "refresh_tokens", "api_keys", "email_verification_tokens", "password_reset_tokens", "role_changes",
+		"identities", "flow_states", "auth_codes"} {
 		if tables[table] != "utf8mb4_0900_bin" {
 			t.Errorf("%s collation = %q, want utf8mb4_0900_bin", table, tables[table])
+		}
+	}
+	for _, column := range []string{"password", "email"} {
+		var nullable string
+		if err := server.Root(t).QueryRow(`SELECT IS_NULLABLE FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA = 'auth' AND TABLE_NAME = 'users' AND COLUMN_NAME = ?`, column).Scan(&nullable); err != nil || nullable != "YES" {
+			t.Errorf("auth.users.%s nullable = %q err=%v", column, nullable, err)
 		}
 	}
 	_ = db

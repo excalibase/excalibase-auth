@@ -63,6 +63,8 @@ func Run(t *testing.T, fx Fixture) {
 	t.Run("single-use tokens", func(t *testing.T) { runSingleUse(t, fx) })
 	t.Run("roles", func(t *testing.T) { runRoles(t, fx) })
 	t.Run("api keys", func(t *testing.T) { runAPIKeys(t, fx) })
+	t.Run("identities", func(t *testing.T) { runIdentities(t, fx) })
+	t.Run("sign-in flows", func(t *testing.T) { runSignInFlows(t, fx) })
 }
 
 func runUsers(t *testing.T, fx Fixture) {
