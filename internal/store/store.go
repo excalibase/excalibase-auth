@@ -27,6 +27,10 @@ var ErrNoAccount = errors.New("refresh token has no account")
 // ErrSignupsDisabled means the project takes no new accounts.
 var ErrSignupsDisabled = errors.New("new sign-ups are disabled")
 
+// ErrAmbiguousEmail means accounts differing only in the case of their
+// address match a provider sign-in and none matches it exactly.
+var ErrAmbiguousEmail = errors.New("more than one account matches the address")
+
 // TokenKind names one of the single-use link tables.
 type TokenKind int
 
@@ -101,6 +105,26 @@ type IdentityClaim struct {
 	Subject  string
 	Email    string
 	FullName string
+}
+
+// AddressMatch is an account whose address equals a provider's, ignoring case.
+type AddressMatch struct {
+	ID       int64
+	Exact    bool
+	Verified bool
+}
+
+// PickAddressMatch takes the exact match, else the only one; matches come
+// exact first. none is the engine's no-rows error.
+func PickAddressMatch(matches []AddressMatch, none error) (int64, bool, error) {
+	switch {
+	case len(matches) == 0:
+		return 0, false, none
+	case matches[0].Exact || len(matches) == 1:
+		return matches[0].ID, matches[0].Verified, nil
+	default:
+		return 0, false, ErrAmbiguousEmail
+	}
 }
 
 // IdentityOutcome says how a provider sign-in reached its account.

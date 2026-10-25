@@ -41,10 +41,7 @@ func resolveIdentity(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim, 
 		return 0, 0, err
 	}
 
-	var verified bool
-	err = tx.QueryRow(ctx,
-		"SELECT id, email_verified AND email_verified_at IS NOT NULL FROM auth.users WHERE email = $1 FOR UPDATE", claim.Email).
-		Scan(&userID, &verified)
+	userID, verified, err := accountForAddress(ctx, tx, claim.Email)
 	outcome := store.IdentityLinked
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -68,6 +65,22 @@ func resolveIdentity(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim, 
 		 VALUES ($1, $2, $3, $4, true, NOW())`,
 		userID, claim.Provider, claim.Subject, claim.Email)
 	return userID, outcome, err
+}
+
+// accountForAddress finds the account a provider address reaches: the exact
+// address, else the only one matching it whatever its case.
+func accountForAddress(ctx context.Context, tx pgx.Tx, email string) (int64, bool, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT id, email = $1, email_verified AND email_verified_at IS NOT NULL FROM auth.users
+		 WHERE lower(email) = lower($1) ORDER BY email = $1 DESC, id LIMIT 2 FOR UPDATE`, email)
+	if err != nil {
+		return 0, false, err
+	}
+	matches, err := pgx.CollectRows(rows, pgx.RowToStructByPos[store.AddressMatch])
+	if err != nil {
+		return 0, false, err
+	}
+	return store.PickAddressMatch(matches, pgx.ErrNoRows)
 }
 
 func createProviderUser(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim) (int64, error) {
