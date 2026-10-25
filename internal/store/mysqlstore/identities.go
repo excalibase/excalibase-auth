@@ -45,10 +45,7 @@ func resolveIdentity(ctx context.Context, tx *sql.Tx, claim store.IdentityClaim,
 		return 0, 0, err
 	}
 
-	var verified bool
-	err = tx.QueryRowContext(ctx,
-		"SELECT id, email_verified AND email_verified_at IS NOT NULL FROM users WHERE email = ? FOR UPDATE", claim.Email).
-		Scan(&userID, &verified)
+	userID, verified, err := accountForAddress(ctx, tx, claim.Email)
 	outcome := store.IdentityLinked
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -72,6 +69,29 @@ func resolveIdentity(ctx context.Context, tx *sql.Tx, claim store.IdentityClaim,
 		 VALUES (?, ?, ?, ?, TRUE, NOW(6))`,
 		userID, claim.Provider, claim.Subject, claim.Email)
 	return userID, outcome, err
+}
+
+// accountForAddress finds the account a provider address reaches; see pgstore.
+func accountForAddress(ctx context.Context, tx *sql.Tx, email string) (int64, bool, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, email = ?, email_verified AND email_verified_at IS NOT NULL FROM users
+		 WHERE LOWER(email) = LOWER(?) ORDER BY email = ? DESC, id LIMIT 2 FOR UPDATE`, email, email, email)
+	if err != nil {
+		return 0, false, err
+	}
+	defer rows.Close()
+	var matches []store.AddressMatch
+	for rows.Next() {
+		var match store.AddressMatch
+		if err := rows.Scan(&match.ID, &match.Exact, &match.Verified); err != nil {
+			return 0, false, err
+		}
+		matches = append(matches, match)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, err
+	}
+	return store.PickAddressMatch(matches, sql.ErrNoRows)
 }
 
 func createProviderUser(ctx context.Context, tx *sql.Tx, claim store.IdentityClaim) (int64, error) {

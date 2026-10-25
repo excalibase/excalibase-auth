@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +115,46 @@ func runIdentities(t *testing.T, fx Fixture) {
 		owner := signIn(t, db, claimFor("google", email), false, store.IdentityTookOver)
 		if owner.ID == id || owner.PasswordHash != "" {
 			t.Fatalf("a grandfathered account was linked: %+v", owner)
+		}
+	})
+
+	t.Run("the address matches whatever its case", func(t *testing.T) {
+		id, email := newUser(t, db, "Oauth-Case")
+		if _, err := db.MarkVerified(ctx, id, true, "!marker"); err != nil {
+			t.Fatal(err)
+		}
+		if linked := signIn(t, db, claimFor("google", strings.ToUpper(email)), false, store.IdentityLinked); linked.ID != id {
+			t.Fatalf("an upper-case address reached %+v, want account %d", linked, id)
+		}
+		squatID, squatted := newUser(t, db, "Oauth-Case-Squat")
+		if owner := signIn(t, db, claimFor("github", strings.ToLower(squatted)), false, store.IdentityTookOver); owner.ID == squatID {
+			t.Fatalf("a lower-case address did not take over the unverified account: %+v", owner)
+		}
+	})
+
+	t.Run("an exact address wins over one differing in case, and two such without it are refused", func(t *testing.T) {
+		email := uniqueEmail("oauth-twins")
+		exact, _, err := db.InsertUser(ctx, email, "hash-exact", "Exact")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := db.InsertUser(ctx, strings.ToUpper(email), "hash-upper", "Upper"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.MarkVerified(ctx, exact, true, "!marker"); err != nil {
+			t.Fatal(err)
+		}
+		if linked := signIn(t, db, claimFor("google", email), false, store.IdentityLinked); linked.ID != exact {
+			t.Fatalf("exact address reached %+v, want %d", linked, exact)
+		}
+		users, identities := fx.Count(t, "users"), fx.Count(t, "identities")
+		mixed := strings.ToUpper(email[:1]) + email[1:]
+		_, _, err = db.SignInWithIdentity(ctx, claimFor("github", mixed), true)
+		if !errors.Is(err, store.ErrAmbiguousEmail) {
+			t.Fatalf("err = %v, want ErrAmbiguousEmail", err)
+		}
+		if fx.Count(t, "users") != users || fx.Count(t, "identities") != identities {
+			t.Fatal("an ambiguous sign-in wrote rows")
 		}
 	})
 

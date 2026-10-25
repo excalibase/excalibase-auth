@@ -43,6 +43,7 @@ const (
 	codeSignupDisabled    = "signup_disabled"
 	codeAccountDisabled   = "account_disabled"
 	codeInvalidEmail      = "invalid_email"
+	codeRateLimited       = "rate_limited"
 	errSettingsUnreadable = "sign-in settings are unavailable, retry shortly"
 )
 
@@ -222,7 +223,14 @@ func (h *AuthHandler) finishSignIn(ctx context.Context, db store.Store, projectI
 
 func (h *AuthHandler) signInIdentity(ctx context.Context, db store.Store, projectID, provider string, identity oauth.Identity, allowCreate bool) (store.Account, string) {
 	claim := store.IdentityClaim{Provider: provider, Subject: identity.Subject, Email: identity.Email, FullName: displayName(identity)}
-	account, outcome, err := db.SignInWithIdentity(ctx, claim, allowCreate)
+	// Only a new account spends the sign-up budget /register draws on.
+	account, outcome, err := db.SignInWithIdentity(ctx, claim, false)
+	if errors.Is(err, store.ErrSignupsDisabled) && allowCreate {
+		if h.limits != nil && !h.limits.AllowSignup(projectID) {
+			return store.Account{}, codeRateLimited
+		}
+		account, outcome, err = db.SignInWithIdentity(ctx, claim, true)
+	}
 	switch {
 	case errors.Is(err, store.ErrSignupsDisabled):
 		return store.Account{}, codeSignupDisabled

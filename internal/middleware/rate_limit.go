@@ -105,6 +105,16 @@ func (rl *RateLimits) Register(next http.Handler) http.Handler {
 	})
 }
 
+// AllowSignup spends one of the project's sign-ups, the budget POST /register
+// draws on, for an account made elsewhere.
+func (rl *RateLimits) AllowSignup(projectID string) bool {
+	if rl.registerProject.Allow(projectID).Blocked() {
+		metrics.RateLimited.WithLabelValues(routeRegister).Inc()
+		return false
+	}
+	return true
+}
+
 // Login throttles POST /login per client IP and locks an identity after
 // repeated failures.
 func (rl *RateLimits) Login(next http.Handler) http.Handler {

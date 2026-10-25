@@ -104,3 +104,12 @@ func TestProviderSecretReadsTheProjectsVaultEntry(t *testing.T) {
 		t.Fatal("a provider name outside the known set reached the vault")
 	}
 }
+
+func TestAProviderWithoutAnAbsoluteCallbackIsOff(t *testing.T) {
+	for _, callback := range []string{"/auth/o/p1/callback/github", "api.test/auth/o/p1/callback/github", "ftp://api.test/cb", "https:///cb"} {
+		info := ProjectInfo{OAuthProviders: []OAuthProvider{{Provider: "github", ClientID: "gh-id", CallbackURL: callback}}}
+		if _, ok := info.OAuthProvider("github"); ok || info.OAuthEnabled() {
+			t.Fatalf("callback %q left the provider on", callback)
+		}
+	}
+}
