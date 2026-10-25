@@ -9,13 +9,19 @@ import (
 // port and path must match exactly; only the query may differ. It returns raw
 // as it will be redirected to.
 func AllowedRedirect(raw string, allowed []string) (string, bool) {
+	if raw != strings.TrimSpace(raw) {
+		return "", false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", false
+	}
 	target, ok := comparableForm(raw)
 	if !ok {
 		return "", false
 	}
 	for _, entry := range allowed {
 		if candidate, ok := comparableForm(entry); ok && candidate == target {
-			parsed, _ := url.Parse(raw)
 			return parsed.String(), true
 		}
 	}

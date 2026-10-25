@@ -5,6 +5,15 @@
 ALTER TABLE auth.users ALTER COLUMN password DROP NOT NULL;
 ALTER TABLE auth.users ALTER COLUMN email DROP NOT NULL;
 
+-- When the address was proven. 000003 marked every older account verified with
+-- no proof; only a redeemed link or a provider sign-in sets this, and only an
+-- account with it is linked to a provider sign-in.
+ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+UPDATE auth.users u SET email_verified_at = proof.at
+FROM (SELECT user_id, max(consumed_at) AS at FROM auth.email_verification_tokens
+      WHERE consumed_at IS NOT NULL GROUP BY user_id) proof
+WHERE u.id = proof.user_id AND u.email_verified AND u.email_verified_at IS NULL;
+
 -- A provider account (provider + its stable subject id) joined to one user.
 CREATE TABLE IF NOT EXISTS auth.identities (
     id              BIGSERIAL PRIMARY KEY,

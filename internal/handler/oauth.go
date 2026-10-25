@@ -29,6 +29,8 @@ const (
 	providerTimeout     = 10 * time.Second
 	maxFullName         = 100
 	maxRedirectLength   = 2048
+	// maxEmailLength is users.email's width.
+	maxEmailLength = 100
 )
 
 // Codes the app sees on its redirect URL; never the provider's own text.
@@ -40,6 +42,7 @@ const (
 	codeEmailUnverified   = "email_not_verified"
 	codeSignupDisabled    = "signup_disabled"
 	codeAccountDisabled   = "account_disabled"
+	codeInvalidEmail      = "invalid_email"
 	errSettingsUnreadable = "sign-in settings are unavailable, retry shortly"
 )
 
@@ -70,6 +73,20 @@ func defaultOAuthProviders() map[string]oauth.Provider {
 // an unreadable control plane is an error, never a default.
 func (h *AuthHandler) signInSettings(ctx context.Context, projectID string) (pool.ProjectInfo, error) {
 	return h.poolMgr.GetProjectInfoWithin(ctx, projectID, h.signInMaxAge)
+}
+
+// signupsOpen reads the sign-up switch no older than signInMaxAge. A project
+// whose control plane never sent the switch (the flag off) keeps today's
+// behaviour when it cannot be read; one that did fails closed.
+func (h *AuthHandler) signupsOpen(ctx context.Context, projectID string) (bool, error) {
+	info, err := h.signInSettings(ctx, projectID)
+	if err == nil {
+		return info.NewUsersAllowed(), nil
+	}
+	if cached, ok := h.poolMgr.CachedProjectInfo(projectID); ok && cached.AllowNewUsers != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // enabledProvider is a provider this service knows and the project switched on.
@@ -125,7 +142,7 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "failed to start sign-in", http.StatusInternalServerError)
 		return
 	}
-	bindToBrowser(w, r, settings.CallbackURL, flow.State)
+	bindToBrowser(w, settings.CallbackURL, flow.State)
 	client := oauth.Client{ID: settings.ClientID, RedirectURL: settings.CallbackURL}
 	redirect(w, r, provider.AuthCodeURL(client, flow))
 }
@@ -192,6 +209,9 @@ func (h *AuthHandler) finishSignIn(ctx context.Context, db store.Store, projectI
 			return "", codeEmailUnverified
 		}
 		return "", codeServerError
+	}
+	if len(identity.Email) > maxEmailLength {
+		return "", codeInvalidEmail
 	}
 	account, failure := h.signInIdentity(ctx, db, projectID, flow.Provider, identity, info.NewUsersAllowed())
 	if failure != "" {
@@ -310,25 +330,26 @@ func stateCookieName(state string) string {
 	return stateCookiePrefix + token.Hash(state)[:16]
 }
 
-func stateCookie(r *http.Request, path, state string, maxAge int) *http.Cookie {
+func stateCookie(path, state string, secure bool, maxAge int) *http.Cookie {
 	return &http.Cookie{
 		Name: stateCookieName(state), Value: state, Path: path, MaxAge: maxAge, HttpOnly: true,
-		Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https", SameSite: http.SameSiteLaxMode,
+		Secure: secure, SameSite: http.SameSiteLaxMode,
 	}
 }
 
 // bindToBrowser scopes the cookie to the registered callback, whose org
 // segment may differ from the one the app called /authorize with.
-func bindToBrowser(w http.ResponseWriter, r *http.Request, callbackURL, state string) {
-	path := "/"
+func bindToBrowser(w http.ResponseWriter, callbackURL, state string) {
+	path, secure := "/", true
 	if parsed, err := url.Parse(callbackURL); err == nil && parsed.Path != "" {
-		path = parsed.Path
+		path, secure = parsed.Path, parsed.Scheme == "https"
 	}
-	http.SetCookie(w, stateCookie(r, path, state, int(flowTTL.Seconds())))
+	http.SetCookie(w, stateCookie(path, state, secure, int(flowTTL.Seconds())))
 }
 
+// clearBrowserBinding runs on the callback, whose path is the one the cookie was set for.
 func clearBrowserBinding(w http.ResponseWriter, r *http.Request, state string) {
-	http.SetCookie(w, stateCookie(r, r.URL.Path, state, -1))
+	http.SetCookie(w, stateCookie(r.URL.Path, state, r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https", -1))
 }
 
 func boundToBrowser(r *http.Request, state string) bool {

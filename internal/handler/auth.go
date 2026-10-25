@@ -234,11 +234,14 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settings := h.settingsFor(r.Context(), projectID)
-	if !settings.allowNewUsers {
+	if open, err := h.signupsOpen(r.Context(), projectID); err != nil {
+		httpError(w, errSettingsUnreadable, http.StatusServiceUnavailable)
+		return
+	} else if !open {
 		httpError(w, errSignupDisabled.Error(), http.StatusForbidden)
 		return
 	}
+	settings := h.settingsFor(r.Context(), projectID)
 	if settings.requireEmailVerification && settings.siteURL == "" {
 		writeSiteURLRequired(w, projectID)
 		return

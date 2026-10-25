@@ -108,7 +108,7 @@ func (s *Store) MarkVerified(ctx context.Context, userID int64, keepPassword boo
 
 	var address string
 	if err := tx.QueryRow(ctx,
-		`UPDATE auth.users SET email_verified = true, updated_at = NOW(),
+		`UPDATE auth.users SET email_verified = true, email_verified_at = NOW(), updated_at = NOW(),
 		        password = CASE WHEN $2 THEN password ELSE $3 END
 		 WHERE id = $1 RETURNING email`,
 		userID, keepPassword, replacement,

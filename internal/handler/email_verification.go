@@ -43,17 +43,15 @@ type verifyEmailRequest struct {
 type projectSettings struct {
 	requireEmailVerification bool
 	siteURL                  string
-	allowNewUsers            bool
 }
 
 func (h *AuthHandler) settingsFor(ctx context.Context, projectID string) projectSettings {
-	settings := projectSettings{siteURL: h.siteURL, allowNewUsers: true}
+	settings := projectSettings{siteURL: h.siteURL}
 	info, err := h.poolMgr.GetProjectInfo(ctx, projectID)
 	if err != nil {
 		return settings
 	}
 	settings.requireEmailVerification = info.RequireEmailVerification
-	settings.allowNewUsers = info.NewUsersAllowed()
 	if own := normalizeSiteURL(info.SiteURL); own != "" {
 		settings.siteURL = own
 	}

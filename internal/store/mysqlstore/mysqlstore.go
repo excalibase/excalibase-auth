@@ -214,7 +214,7 @@ func (s *Store) MarkVerified(ctx context.Context, userID int64, keepPassword boo
 			return notFound(err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE users SET email_verified = TRUE, updated_at = NOW(6),
+			`UPDATE users SET email_verified = TRUE, email_verified_at = NOW(6), updated_at = NOW(6),
 			        password = IF(?, password, ?)
 			 WHERE id = ?`,
 			keepPassword, replacement, userID); err != nil {

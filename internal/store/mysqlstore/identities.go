@@ -46,7 +46,8 @@ func resolveIdentity(ctx context.Context, tx *sql.Tx, claim store.IdentityClaim,
 	}
 
 	var verified bool
-	err = tx.QueryRowContext(ctx, "SELECT id, email_verified FROM users WHERE email = ? FOR UPDATE", claim.Email).
+	err = tx.QueryRowContext(ctx,
+		"SELECT id, email_verified AND email_verified_at IS NOT NULL FROM users WHERE email = ? FOR UPDATE", claim.Email).
 		Scan(&userID, &verified)
 	outcome := store.IdentityLinked
 	switch {
@@ -61,7 +62,7 @@ func resolveIdentity(ctx context.Context, tx *sql.Tx, claim store.IdentityClaim,
 	case err != nil:
 		return 0, 0, err
 	case !verified:
-		if err := takeOver(ctx, tx, userID); err != nil {
+		if userID, err = takeOver(ctx, tx, userID, claim); err != nil {
 			return 0, 0, err
 		}
 		outcome = store.IdentityTookOver
@@ -75,8 +76,8 @@ func resolveIdentity(ctx context.Context, tx *sql.Tx, claim store.IdentityClaim,
 
 func createProviderUser(ctx context.Context, tx *sql.Tx, claim store.IdentityClaim) (int64, error) {
 	result, err := tx.ExecContext(ctx,
-		`INSERT INTO users (email, password, full_name, role, enabled, email_verified, created_at, updated_at)
-		 VALUES (?, NULL, ?, 'user', TRUE, TRUE, NOW(6), NOW(6))`,
+		`INSERT INTO users (email, password, full_name, role, enabled, email_verified, email_verified_at, created_at, updated_at)
+		 VALUES (?, NULL, ?, 'user', TRUE, TRUE, NOW(6), NOW(6), NOW(6))`,
 		claim.Email, claim.FullName)
 	if err != nil {
 		return 0, err
@@ -84,20 +85,13 @@ func createProviderUser(ctx context.Context, tx *sql.Tx, claim store.IdentityCla
 	return result.LastInsertId()
 }
 
-// takeOver hands an unproven account to the provider-verified owner of its
-// address: whoever set the password never proved the inbox.
-func takeOver(ctx context.Context, tx *sql.Tx, userID int64) error {
-	for _, statement := range []string{
-		"UPDATE users SET password = NULL, email_verified = TRUE, updated_at = NOW(6) WHERE id = ?",
-		"UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ? AND revoked = FALSE",
-		"UPDATE email_verification_tokens SET consumed_at = NOW(6) WHERE user_id = ? AND consumed_at IS NULL",
-		"UPDATE password_reset_tokens SET consumed_at = NOW(6) WHERE user_id = ? AND consumed_at IS NULL",
-	} {
-		if _, err := tx.ExecContext(ctx, statement, userID); err != nil {
-			return err
-		}
+// takeOver replaces an account whose address nobody proved with a new one for
+// the provider-verified owner; see pgstore.
+func takeOver(ctx context.Context, tx *sql.Tx, userID int64, claim store.IdentityClaim) (int64, error) {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM users WHERE id = ?", userID); err != nil {
+		return 0, err
 	}
-	return nil
+	return createProviderUser(ctx, tx, claim)
 }
 
 func (s *Store) SaveFlowState(ctx context.Context, state store.FlowState) error {

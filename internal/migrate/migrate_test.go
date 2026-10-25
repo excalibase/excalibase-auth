@@ -244,3 +244,42 @@ func TestMigrate_RefreshTokensHashedInPlace(t *testing.T) {
 		t.Error("legacy token must be given a family")
 	}
 }
+
+func TestMigrate_OnlyARedeemedLinkCountsAsProofOfAddress(t *testing.T) {
+	connStr, cleanup := setupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := ensureAuthSchema(ctx, poolFor(t, connStr)); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	m, err := newMigrate(poolFor(t, connStr))
+	if err != nil {
+		t.Fatalf("newMigrate: %v", err)
+	}
+	defer m.Close()
+	if err := m.Migrate(7); err != nil {
+		t.Fatalf("migrate to 7: %v", err)
+	}
+	db, err := pgxpool.New(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO auth.users (id, email, password, full_name, email_verified) VALUES
+			(1, 'proven@test.com', 'x', 'P', true), (2, 'grandfathered@test.com', 'x', 'G', true);
+		INSERT INTO auth.email_verification_tokens (token_hash, user_id, expires_at, consumed_at)
+			VALUES (repeat('a', 64), 1, NOW(), NOW());
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := Run(ctx, poolFor(t, connStr)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for id, wantProof := range map[int]bool{1: true, 2: false} {
+		var proven bool
+		if err := db.QueryRow(ctx, "SELECT email_verified_at IS NOT NULL FROM auth.users WHERE id = $1", id).Scan(&proven); err != nil || proven != wantProof {
+			t.Errorf("user %d proven = %v (err %v), want %v", id, proven, err, wantProof)
+		}
+	}
+}

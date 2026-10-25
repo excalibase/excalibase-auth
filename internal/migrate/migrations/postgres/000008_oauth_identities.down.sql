@@ -6,3 +6,4 @@ DROP TABLE IF EXISTS auth.identities;
 UPDATE auth.users SET password = '!no-password' WHERE password IS NULL;
 ALTER TABLE auth.users ALTER COLUMN password SET NOT NULL;
 ALTER TABLE auth.users ALTER COLUMN email SET NOT NULL;
+ALTER TABLE auth.users DROP COLUMN IF EXISTS email_verified_at;

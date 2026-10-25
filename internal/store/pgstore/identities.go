@@ -42,7 +42,8 @@ func resolveIdentity(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim, 
 	}
 
 	var verified bool
-	err = tx.QueryRow(ctx, "SELECT id, email_verified FROM auth.users WHERE email = $1 FOR UPDATE", claim.Email).
+	err = tx.QueryRow(ctx,
+		"SELECT id, email_verified AND email_verified_at IS NOT NULL FROM auth.users WHERE email = $1 FOR UPDATE", claim.Email).
 		Scan(&userID, &verified)
 	outcome := store.IdentityLinked
 	switch {
@@ -57,7 +58,7 @@ func resolveIdentity(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim, 
 	case err != nil:
 		return 0, 0, err
 	case !verified:
-		if err := takeOver(ctx, tx, userID); err != nil {
+		if userID, err = takeOver(ctx, tx, userID, claim); err != nil {
 			return 0, 0, err
 		}
 		outcome = store.IdentityTookOver
@@ -72,26 +73,21 @@ func resolveIdentity(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim, 
 func createProviderUser(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim) (int64, error) {
 	var id int64
 	err := tx.QueryRow(ctx,
-		`INSERT INTO auth.users (email, password, full_name, role, enabled, email_verified, created_at, updated_at)
-		 VALUES ($1, NULL, $2, 'user', true, true, NOW(), NOW()) RETURNING id`,
+		`INSERT INTO auth.users (email, password, full_name, role, enabled, email_verified, email_verified_at, created_at, updated_at)
+		 VALUES ($1, NULL, $2, 'user', true, true, NOW(), NOW(), NOW()) RETURNING id`,
 		claim.Email, claim.FullName).Scan(&id)
 	return id, err
 }
 
-// takeOver hands an unproven account to the provider-verified owner of its
-// address: whoever set the password never proved the inbox.
-func takeOver(ctx context.Context, tx pgx.Tx, userID int64) error {
-	for _, statement := range []string{
-		"UPDATE auth.users SET password = NULL, email_verified = true, updated_at = NOW() WHERE id = $1",
-		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false",
-		"UPDATE auth.email_verification_tokens SET consumed_at = NOW() WHERE user_id = $1 AND consumed_at IS NULL",
-		"UPDATE auth.password_reset_tokens SET consumed_at = NOW() WHERE user_id = $1 AND consumed_at IS NULL",
-	} {
-		if _, err := tx.Exec(ctx, statement, userID); err != nil {
-			return err
-		}
+// takeOver replaces an account whose address nobody proved with a new one for
+// the provider-verified owner. A new id means nothing issued to the old
+// account, an access token included, reaches the owner's; the old account's
+// sessions, links and keys go with it.
+func takeOver(ctx context.Context, tx pgx.Tx, userID int64, claim store.IdentityClaim) (int64, error) {
+	if _, err := tx.Exec(ctx, "DELETE FROM auth.users WHERE id = $1", userID); err != nil {
+		return 0, err
 	}
-	return nil
+	return createProviderUser(ctx, tx, claim)
 }
 
 func (s *Store) SaveFlowState(ctx context.Context, state store.FlowState) error {

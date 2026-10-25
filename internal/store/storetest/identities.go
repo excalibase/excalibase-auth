@@ -79,7 +79,7 @@ func runIdentities(t *testing.T, fx Fixture) {
 		}
 	})
 
-	t.Run("an unverified account is taken over: password cleared, sessions and links ended", func(t *testing.T) {
+	t.Run("an unverified account is replaced by a new one: its sessions, links and password go", func(t *testing.T) {
 		id, email := newUser(t, db, "oauth-squat")
 		live, link, reset := hash(t), hash(t), hash(t)
 		if err := db.InsertRefreshToken(ctx, live, id, session(time.Hour)); err != nil {
@@ -92,19 +92,28 @@ func runIdentities(t *testing.T, fx Fixture) {
 			t.Fatal(err)
 		}
 		owner := signIn(t, db, claimFor("github", email), false, store.IdentityTookOver)
-		if owner.ID != id || owner.PasswordHash != "" || !owner.EmailVerified {
-			t.Fatalf("taken over = %+v", owner)
+		if owner.ID == id || owner.PasswordHash != "" || !owner.EmailVerified || owner.Email != email {
+			t.Fatalf("taken over = %+v (squatted id %d)", owner, id)
 		}
-		if account, _ := db.AccountByEmail(ctx, email); account.PasswordHash != "" || !account.EmailVerified {
-			t.Fatalf("stored after takeover = %+v", account)
+		if _, err := db.AccountByID(ctx, id); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("the squatted account survived: %v", err)
 		}
-		if state, _ := db.RefreshTokenState(ctx, live); !state.Revoked {
-			t.Fatal("the squatter's session survived the takeover")
+		if _, err := db.RefreshTokenState(ctx, live); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("the squatter's session survived the takeover: %v", err)
 		}
 		for kind, digest := range map[store.TokenKind]string{store.EmailVerification: link, store.PasswordReset: reset} {
 			if _, err := db.LookupToken(ctx, kind, digest); !errors.Is(err, store.ErrNotFound) {
 				t.Fatalf("link of kind %d survived the takeover: %v", kind, err)
 			}
+		}
+	})
+
+	t.Run("an account marked verified without proof is taken over, not linked", func(t *testing.T) {
+		id, email := newUser(t, db, "oauth-grandfathered")
+		fx.Grandfather(t, email)
+		owner := signIn(t, db, claimFor("google", email), false, store.IdentityTookOver)
+		if owner.ID == id || owner.PasswordHash != "" {
+			t.Fatalf("a grandfathered account was linked: %+v", owner)
 		}
 	})
 

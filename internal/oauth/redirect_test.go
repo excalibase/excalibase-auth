@@ -30,6 +30,9 @@ func TestRedirectAllowListIsAnExactMatch(t *testing.T) {
 		"http://localhost:3001/cb":                   false,
 		"":                                           false,
 		"https://app.example.com/a/../auth/callback": false,
+		" https://app.example.com":                   false,
+		"https://app.example.com/auth/callback\t":    false,
+		"https://app.example.com/auth/callback\x7f":  false,
 	}
 	for raw, want := range cases {
 		if _, got := oauth.AllowedRedirect(raw, allowed); got != want {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	neturl "net/url"
 	"sync"
 	"time"
 
@@ -310,7 +311,7 @@ func (m *Manager) GetProjectInfoWithin(ctx context.Context, projectID string, ma
 	m.mu.RUnlock()
 
 	var info ProjectInfo
-	if err := m.getJSON(ctx, fmt.Sprintf("%s/projects/%s/info", m.provisioningURL, projectID), "project info", &info); err != nil {
+	if err := m.getJSON(ctx, fmt.Sprintf("%s/projects/%s/info", m.provisioningURL, neturl.PathEscape(projectID)), "project info", &info); err != nil {
 		return ProjectInfo{}, err
 	}
 	m.mu.Lock()

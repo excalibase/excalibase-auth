@@ -25,10 +25,11 @@ const (
 
 // keySet is a provider's JWKS, cached.
 type keySet struct {
-	url       string
-	mu        sync.Mutex
-	keys      map[string]*rsa.PublicKey
-	fetchedAt time.Time
+	url         string
+	mu          sync.Mutex
+	keys        map[string]*rsa.PublicKey
+	fetchedAt   time.Time
+	lastAttempt time.Time
 }
 
 func newKeySet(url string) *keySet {
@@ -36,24 +37,43 @@ func newKeySet(url string) *keySet {
 }
 
 func (k *keySet) key(ctx context.Context, httpClient *http.Client, kid string) (*rsa.PublicKey, error) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	age := time.Since(k.fetchedAt)
-	if key, ok := k.keys[kid]; ok && age < keysMaxAge {
+	if key, ok := k.cached(kid); ok {
 		return key, nil
 	}
-	if !k.fetchedAt.IsZero() && age < keysMinRefetch {
+	if !k.mayRefetch() {
 		return nil, fmt.Errorf("%w: unknown signing key", ErrIDToken)
 	}
+	// Fetched outside the lock, so a slow key endpoint holds up only the
+	// sign-ins that need a new key.
 	keys, err := fetchKeys(ctx, httpClient, k.url)
 	if err != nil {
 		return nil, err
 	}
+	k.mu.Lock()
 	k.keys, k.fetchedAt = keys, time.Now()
+	k.mu.Unlock()
 	if key, ok := keys[kid]; ok {
 		return key, nil
 	}
 	return nil, fmt.Errorf("%w: unknown signing key", ErrIDToken)
+}
+
+func (k *keySet) cached(kid string) (*rsa.PublicKey, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	key, ok := k.keys[kid]
+	return key, ok && time.Since(k.fetchedAt) < keysMaxAge
+}
+
+// mayRefetch allows one fetch per keysMinRefetch, claimed under the lock.
+func (k *keySet) mayRefetch() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.lastAttempt.IsZero() && time.Since(k.lastAttempt) < keysMinRefetch {
+		return false
+	}
+	k.lastAttempt = time.Now()
+	return true
 }
 
 func fetchKeys(ctx context.Context, httpClient *http.Client, url string) (map[string]*rsa.PublicKey, error) {
@@ -104,6 +124,7 @@ type idClaims struct {
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
 	Name          string `json:"name"`
+	AuthorizedBy  string `json:"azp"`
 }
 
 // googleIssuers are the two spellings Google documents for iss.
@@ -131,6 +152,9 @@ func verifyIDToken(ctx context.Context, httpClient *http.Client, keys *keySet, r
 			return Identity{}, err
 		}
 		return Identity{}, fmt.Errorf("%w: %s", ErrIDToken, "signature or claims")
+	}
+	if len(claims.Audience) > 1 && claims.AuthorizedBy != audience {
+		return Identity{}, fmt.Errorf("%w: authorized party", ErrIDToken)
 	}
 	if !acceptedIssuers(issuer)[claims.Issuer] || claims.Nonce != nonce || claims.Subject == "" {
 		return Identity{}, fmt.Errorf("%w: issuer, nonce or subject", ErrIDToken)

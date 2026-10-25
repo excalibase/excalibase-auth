@@ -1,6 +1,14 @@
 -- EXC-662: sign-in through Google or GitHub; the twin of Postgres 000008.
 
-ALTER TABLE users MODIFY password VARCHAR(255) NULL, MODIFY email VARCHAR(100) NULL;
+ALTER TABLE users MODIFY password VARCHAR(255) NULL, MODIFY email VARCHAR(100) NULL,
+    ADD COLUMN email_verified_at DATETIME(6) NULL;
+
+-- Only a redeemed link proves an address; see Postgres 000008.
+UPDATE users u
+JOIN (SELECT user_id, MAX(consumed_at) AS proven FROM email_verification_tokens
+      WHERE consumed_at IS NOT NULL GROUP BY user_id) proof ON proof.user_id = u.id
+SET u.email_verified_at = proof.proven
+WHERE u.email_verified AND u.email_verified_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS identities (
     id              BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,

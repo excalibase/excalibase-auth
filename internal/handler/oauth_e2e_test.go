@@ -75,8 +75,8 @@ func oauthTakeover(t *testing.T, fx *oauthFixture) {
 	squatter := tokenResponse(t, postJSON(fx.srv, oauthProject+"/register", map[string]string{
 		"email": victim.Email, "password": squatterPassword, "fullName": "Squatter"}), "register")
 	owner := fx.signIn(t, "github", victim)
-	if userIDOf(owner) != userIDOf(squatter) {
-		t.Fatalf("takeover reached user %v, want the squatted account %v", userIDOf(owner), userIDOf(squatter))
+	if userIDOf(owner) == userIDOf(squatter) || userIDOf(owner) <= 0 {
+		t.Fatalf("the owner got the squatted account %v; the squatter's access token would still reach it", userIDOf(squatter))
 	}
 	if resp := postJSON(fx.srv, oauthProject+"/login", map[string]string{"email": victim.Email, "password": squatterPassword}); resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("the squatter's password still signs in: %d", resp.StatusCode)
@@ -213,6 +213,12 @@ func oauthProviderErrors(t *testing.T, fx *oauthFixture) {
 		t.Fatalf("headers = %v", denied.Header)
 	}
 
+	long := person("long")
+	long.Email = strings.Repeat("a", 101) + "@oauth.test"
+	if landed, _ := fx.browserSignIn(t, "github", long); landed.Query().Get("error") != "invalid_email" {
+		t.Fatalf("an address wider than the column landed at %s", landed)
+	}
+
 	fx.settings.set(func(s *signInSettings) { s.secretMissing = true })
 	defer fx.settings.set(func(s *signInSettings) { s.secretMissing = false })
 	missing, _ := fx.browserSignIn(t, "github", person("nosecret"))
@@ -231,6 +237,10 @@ func oauthFailsClosed(t *testing.T, fx *oauthFixture) {
 	}
 	if resp, _ := fx.exchange(landed.Query().Get("code"), verifier); resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("exchange with settings unreadable: %d", resp.StatusCode)
+	}
+	if resp := postJSON(fx.srv, oauthProject+"/register", map[string]string{
+		"email": person("down").Email, "password": oauthPassword, "fullName": "Down"}); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("password sign-up while the sign-up switch is unreadable: %d", resp.StatusCode)
 	}
 	fx.settings.set(func(s *signInSettings) { s.infoDown = false; s.providers = nil })
 	defer fx.settings.set(func(s *signInSettings) { s.providers = []string{"google", "github"} })
