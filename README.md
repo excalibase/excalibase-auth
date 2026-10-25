@@ -46,6 +46,8 @@ All endpoints are scoped under `/auth/{orgSlug}/{projectName}/`:
 | `POST` | `/auth/{orgSlug}/{projectName}/validate` | Validate a JWT and return claims |
 | `POST` | `/auth/{orgSlug}/{projectName}/refresh` | Exchange refresh token for new token pair |
 | `POST` | `/auth/{orgSlug}/{projectName}/logout` | Revoke a refresh token |
+| `GET`  | `/auth/{orgSlug}/{projectName}/authorize` | Start a Google or GitHub sign-in (PKCE) |
+| `GET`  | `/auth/{orgSlug}/{projectName}/callback/{provider}` | The provider's redirect back; hands the app a single-use code |
 | `GET`  | `/auth/{orgSlug}/{projectName}/users` | List the project's accounts (user admin or service token) |
 | `PUT`  | `/auth/{orgSlug}/{projectName}/users/{userId}/role` | Set an account's role and allowed roles (user admin or service token) |
 | `GET`  | `/healthz` | Health check |
@@ -123,6 +125,16 @@ curl -X POST http://localhost:24000/auth/my-org/my-project/logout \
   -H "Content-Type: application/json" \
   -d '{"refreshToken": "550e8400-e29b-41d4-a716-446655440000"}'
 ```
+
+### Google and GitHub sign-in
+
+On only for a project whose control plane lists the provider in `/info` (flag `authoauth`, the project's own client id, its client secret in the vault at `projects/{id}/auth/providers/{provider}`). Otherwise `/authorize` answers `404 method_not_enabled`, and `503` when the settings cannot be read.
+
+1. The app sends the browser to `/authorize?provider=github&redirect_to=<url>&code_challenge=<S256 of its verifier>&code_challenge_method=S256`. `redirect_to` must equal the site URL or one of the project's redirect URLs (scheme, host, port and path; the query may differ).
+2. After the provider, the browser lands on `redirect_to?code=…`, or `redirect_to?error=<code>` (`access_denied`, `email_not_verified`, `signup_disabled`, `account_disabled`, `invalid_email`, `method_not_enabled`, `temporarily_unavailable`, `server_error`).
+3. The app redeems the code once, within 5 minutes: `POST /token {"grant_type":"pkce","auth_code":"…","code_verifier":"…"}`.
+
+Only a provider-verified address is accepted. It joins an account with the same address when that account is verified; an unverified one is taken over (password cleared, sessions and pending links ended). Provider tokens are not stored.
 
 ### End-user roles
 

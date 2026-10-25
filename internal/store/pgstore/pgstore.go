@@ -71,13 +71,21 @@ func (s *Store) ReplaceUnverified(ctx context.Context, email, passwordHash, full
 }
 
 func (s *Store) AccountByEmail(ctx context.Context, email string) (store.Account, error) {
+	return scanAccount(s.pool.QueryRow(ctx, "SELECT "+accountColumns+" FROM users WHERE email = $1", email))
+}
+
+// accountColumns reads an account; a provider-made account has no password.
+const accountColumns = "id, COALESCE(email, ''), COALESCE(password, ''), full_name, role, allowed_roles, enabled, email_verified"
+
+func scanAccount(row pgx.Row) (store.Account, error) {
 	var account store.Account
-	err := s.pool.QueryRow(ctx,
-		"SELECT id, email, password, full_name, role, allowed_roles, enabled, email_verified FROM users WHERE email = $1",
-		email,
-	).Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
+	err := row.Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
 		&account.AllowedRoles, &account.Enabled, &account.EmailVerified)
 	return account, notFound(err)
+}
+
+func (s *Store) AccountByID(ctx context.Context, id int64) (store.Account, error) {
+	return scanAccount(s.pool.QueryRow(ctx, "SELECT "+accountColumns+" FROM auth.users WHERE id = $1", id))
 }
 
 func (s *Store) TouchLastLogin(ctx context.Context, userID int64) error {
@@ -100,7 +108,7 @@ func (s *Store) MarkVerified(ctx context.Context, userID int64, keepPassword boo
 
 	var address string
 	if err := tx.QueryRow(ctx,
-		`UPDATE auth.users SET email_verified = true, updated_at = NOW(),
+		`UPDATE auth.users SET email_verified = true, email_verified_at = NOW(), updated_at = NOW(),
 		        password = CASE WHEN $2 THEN password ELSE $3 END
 		 WHERE id = $1 RETURNING email`,
 		userID, keepPassword, replacement,

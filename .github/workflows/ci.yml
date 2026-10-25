@@ -33,7 +33,7 @@ jobs:
       run: go test ./... -short -count=1
 
     - name: Run integration tests
-      run: go test ./... -count=1 -timeout=300s
+      run: go test ./... -count=1 -timeout=600s
 
   build:
     name: Build

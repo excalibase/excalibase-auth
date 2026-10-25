@@ -24,6 +24,9 @@ var ErrUnavailable = errors.New("project database unavailable")
 // ErrNoAccount means a live refresh token's account could not be read.
 var ErrNoAccount = errors.New("refresh token has no account")
 
+// ErrSignupsDisabled means the project takes no new accounts.
+var ErrSignupsDisabled = errors.New("new sign-ups are disabled")
+
 // TokenKind names one of the single-use link tables.
 type TokenKind int
 
@@ -92,6 +95,49 @@ type RoleChange struct {
 	Actor   string
 }
 
+// IdentityClaim is a provider account whose email address the provider verified.
+type IdentityClaim struct {
+	Provider string
+	Subject  string
+	Email    string
+	FullName string
+}
+
+// IdentityOutcome says how a provider sign-in reached its account.
+type IdentityOutcome int
+
+const (
+	// IdentityKnown is a provider account that signed in before.
+	IdentityKnown IdentityOutcome = iota + 1
+	// IdentityLinked joined a verified account with the same address.
+	IdentityLinked
+	// IdentityTookOver claimed an unverified account with the same address:
+	// its password was cleared and its sessions and links ended.
+	IdentityTookOver
+	// IdentityCreated is a new account.
+	IdentityCreated
+)
+
+// FlowState is a provider sign-in between /authorize and the callback.
+type FlowState struct {
+	StateHash           string
+	Provider            string
+	IDPCodeVerifier     string
+	Nonce               string
+	ClientCodeChallenge string
+	RedirectTo          string
+	ExpiresAt           time.Time
+}
+
+// AuthCode is the single-use code a sign-in hands back to the app, redeemed
+// with the PKCE verifier whose challenge it carries.
+type AuthCode struct {
+	CodeHash      string
+	UserID        int64
+	CodeChallenge string
+	ExpiresAt     time.Time
+}
+
 // Store is one project's end-user database.
 type Store interface {
 	// InsertUser creates an account with role 'user' unless the address is
@@ -100,6 +146,7 @@ type Store interface {
 	// ReplaceUnverified sets a new password and name on an unverified account.
 	ReplaceUnverified(ctx context.Context, email, passwordHash, fullName string) (int64, error)
 	AccountByEmail(ctx context.Context, email string) (Account, error)
+	AccountByID(ctx context.Context, id int64) (Account, error)
 	TouchLastLogin(ctx context.Context, userID int64) error
 	SetPassword(ctx context.Context, userID int64, passwordHash string) error
 	// MarkVerified records the proof, revokes every refresh token and, unless
@@ -127,6 +174,19 @@ type Store interface {
 	LookupToken(ctx context.Context, kind TokenKind, hash string) (SingleUseToken, error)
 	// ClaimToken consumes a looked-up row; false when another request did.
 	ClaimToken(ctx context.Context, kind TokenKind, rowID int64) (bool, error)
+
+	// SignInWithIdentity finds or creates the account of a provider account in
+	// one transaction. ErrSignupsDisabled when it would create one and
+	// allowCreate is false.
+	SignInWithIdentity(ctx context.Context, claim IdentityClaim, allowCreate bool) (Account, IdentityOutcome, error)
+	// SaveFlowState stores a sign-in in flight and drops expired ones.
+	SaveFlowState(ctx context.Context, state FlowState) error
+	// ConsumeFlowState returns and deletes a live state; ErrNotFound otherwise.
+	ConsumeFlowState(ctx context.Context, stateHash string) (FlowState, error)
+	// SaveAuthCode stores a code and drops expired ones.
+	SaveAuthCode(ctx context.Context, code AuthCode) error
+	// RedeemAuthCode spends a live code once; ErrNotFound otherwise.
+	RedeemAuthCode(ctx context.Context, codeHash string) (AuthCode, error)
 
 	CreateAPIKey(ctx context.Context, hash, prefix, keyType, name string) (int64, time.Time, error)
 	ListAPIKeys(ctx context.Context) ([]APIKeyListing, error)

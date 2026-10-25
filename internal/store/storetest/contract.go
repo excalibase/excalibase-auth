@@ -23,6 +23,9 @@ import (
 type Fixture struct {
 	Store store.Store
 	Count func(t *testing.T, table string) int
+	// Grandfather marks an account verified with no proof, as Postgres
+	// migration 000003 did for every account it found.
+	Grandfather func(t *testing.T, email string)
 }
 
 var sequence atomic.Int64
@@ -63,6 +66,8 @@ func Run(t *testing.T, fx Fixture) {
 	t.Run("single-use tokens", func(t *testing.T) { runSingleUse(t, fx) })
 	t.Run("roles", func(t *testing.T) { runRoles(t, fx) })
 	t.Run("api keys", func(t *testing.T) { runAPIKeys(t, fx) })
+	t.Run("identities", func(t *testing.T) { runIdentities(t, fx) })
+	t.Run("sign-in flows", func(t *testing.T) { runSignInFlows(t, fx) })
 }
 
 func runUsers(t *testing.T, fx Fixture) {
