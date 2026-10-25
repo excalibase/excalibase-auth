@@ -24,11 +24,17 @@ var knownProviders = map[string]bool{"google": true, "github": true}
 // OAuthProvider returns the named provider when the project enabled it.
 func (info ProjectInfo) OAuthProvider(name string) (OAuthProvider, bool) {
 	for _, provider := range info.OAuthProviders {
-		if provider.Provider == name && provider.ClientID != "" && provider.CallbackURL != "" {
+		if provider.Provider == name && provider.ClientID != "" && absoluteURL(provider.CallbackURL) {
 			return provider, true
 		}
 	}
 	return OAuthProvider{}, false
+}
+
+// absoluteURL refuses a callback a browser would resolve against some other page.
+func absoluteURL(raw string) bool {
+	parsed, err := neturl.Parse(raw)
+	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != ""
 }
 
 // OAuthEnabled reports whether any provider sign-in is on for the project.
