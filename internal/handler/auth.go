@@ -9,12 +9,14 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/domain"
 	"github.com/excalibase/auth/internal/email"
 	"github.com/excalibase/auth/internal/metrics"
 	"github.com/excalibase/auth/internal/middleware"
+	"github.com/excalibase/auth/internal/oauth"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/excalibase/auth/internal/requestmetrics"
 	"github.com/excalibase/auth/internal/service"
@@ -74,6 +76,11 @@ type AuthHandler struct {
 	corsOrigins  middleware.OriginResolver
 
 	requestMetrics *requestmetrics.Recorder // nil when the request charts are off
+
+	// Provider sign-in (EXC-662): on for a project only when /info lists it.
+	oauthProviders map[string]oauth.Provider
+	oauthHTTP      *http.Client
+	signInMaxAge   time.Duration
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
@@ -87,6 +94,9 @@ func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshE
 		resendThrottle: throttle.New(resendVerificationLimit, resendVerificationWindow),
 		forgotThrottle: throttle.New(forgotPasswordLimit, forgotPasswordWindow),
 		hasher:         auth.NewHasher(auth.DefaultHashSlots, auth.DefaultHashWait),
+		oauthProviders: defaultOAuthProviders(),
+		oauthHTTP:      &http.Client{Timeout: providerTimeout},
+		signInMaxAge:   defaultSignInMaxAge,
 	}
 }
 
@@ -155,6 +165,9 @@ func (h *AuthHandler) Routes(r chi.Router) {
 		// OAuth2-shaped unified endpoint. Legacy routes above still work and
 		// share the same exchange helpers — no HTTP re-dispatch.
 		r.With(h.limit(rateLimitToken)).Post("/token", h.Token)
+		// Provider sign-in (EXC-662); a project without providers answers 404.
+		r.With(h.limit(rateLimitToken)).Get("/authorize", h.Authorize)
+		r.With(h.limit(rateLimitToken)).Get("/callback/{provider}", h.Callback)
 
 		// API key management — protected by JWT. Mounting RequireJWT here at
 		// the route registration site (instead of inside apikey.go) makes the
@@ -222,6 +235,10 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	settings := h.settingsFor(r.Context(), projectID)
+	if !settings.allowNewUsers {
+		httpError(w, errSignupDisabled.Error(), http.StatusForbidden)
+		return
+	}
 	if settings.requireEmailVerification && settings.siteURL == "" {
 		writeSiteURLRequired(w, projectID)
 		return
@@ -373,7 +390,7 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 	if !user.Enabled {
 		return nil, 403, errAccountDisabled
 	}
-	matched, err := h.hasher.Check(r.Context(), password, user.PasswordHash)
+	matched, err := h.checkPassword(r.Context(), password, user.PasswordHash)
 	if err != nil {
 		return nil, 503, errHashingBusy
 	}
@@ -734,6 +751,8 @@ func (h *AuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		resp, code, err = h.exchangeAPIKey(r, projectID, req.APIKey)
 	case "refresh_token":
 		resp, code, err = h.exchangeRefreshToken(r, projectID, req.RefreshToken)
+	case "pkce":
+		resp, code, err = h.exchangePKCE(r, projectID, req.AuthCode, req.CodeVerifier)
 	default:
 		httpError(w, errUnsupportedGrant.Error(), 400)
 		return

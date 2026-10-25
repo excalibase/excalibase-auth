@@ -40,6 +40,11 @@ type ProjectInfo struct {
 	// SiteURL is the project's own front end, used as the base for links in
 	// verification and reset emails. Falls back to AUTH_SITE_URL when empty.
 	SiteURL string `json:"siteUrl"`
+	// The sign-in settings below are sent only when the control plane's
+	// sign-in flag is on (EXC-662); absent reads as no providers, sign-ups open.
+	RedirectURLs   []string        `json:"redirectUrls,omitempty"`
+	AllowNewUsers  *bool           `json:"allowNewUsers,omitempty"`
+	OAuthProviders []OAuthProvider `json:"oauthProviders,omitempty"`
 }
 
 type infoEntry struct {
@@ -290,41 +295,53 @@ func (m *Manager) fetchCredentials(ctx context.Context, orgSlug, projectID strin
 // Returns (zero value, error) on lookup failure — callers should treat info as
 // optional and fall through to URL-derived values.
 func (m *Manager) GetProjectInfo(ctx context.Context, projectID string) (ProjectInfo, error) {
+	return m.GetProjectInfoWithin(ctx, projectID, m.ttl)
+}
+
+// GetProjectInfoWithin serves a cached copy younger than maxAge and otherwise
+// asks provisioning; a failed ask is an error, never the older copy.
+func (m *Manager) GetProjectInfoWithin(ctx context.Context, projectID string, maxAge time.Duration) (ProjectInfo, error) {
 	m.mu.RLock()
-	if entry, ok := m.infos[projectID]; ok && time.Since(entry.createdAt) < m.ttl {
+	if entry, ok := m.infos[projectID]; ok && time.Since(entry.createdAt) < maxAge {
 		info := entry.info
 		m.mu.RUnlock()
 		return info, nil
 	}
 	m.mu.RUnlock()
 
-	url := fmt.Sprintf("%s/projects/%s/info", m.provisioningURL, projectID)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
+	var info ProjectInfo
+	if err := m.getJSON(ctx, fmt.Sprintf("%s/projects/%s/info", m.provisioningURL, projectID), "project info", &info); err != nil {
 		return ProjectInfo{}, err
 	}
-	tok, err := m.tokens.Get()
-	if err != nil {
-		return ProjectInfo{}, fmt.Errorf("provisioning token: %w", err)
-	}
-	req.Header.Set(authorizationHeader, bearerPrefix+tok)
-	resp, err := m.httpClient.Do(req)
-	if err != nil {
-		return ProjectInfo{}, fmt.Errorf("project info request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return ProjectInfo{}, fmt.Errorf("project info returned %d", resp.StatusCode)
-	}
-	var info ProjectInfo
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return ProjectInfo{}, fmt.Errorf("decode project info: %w", err)
-	}
-
 	m.mu.Lock()
 	m.infos[projectID] = &infoEntry{info: info, createdAt: time.Now()}
 	m.mu.Unlock()
 	return info, nil
+}
+
+// getJSON GETs a provisioning URL with the service token and decodes a 200.
+func (m *Manager) getJSON(ctx context.Context, url, what string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	tok, err := m.tokens.Get()
+	if err != nil {
+		return fmt.Errorf("provisioning token: %w", err)
+	}
+	req.Header.Set(authorizationHeader, bearerPrefix+tok)
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s request: %w", what, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("%s returned %d", what, resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode %s: %w", what, err)
+	}
+	return nil
 }
 
 func defaultPoolCreator(ctx context.Context, config *pgxpool.Config) (*pgxpool.Pool, error) {

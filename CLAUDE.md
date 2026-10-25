@@ -40,10 +40,11 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 - `internal/handler` — HTTP handlers for register, login, validate, refresh, logout. All routes scoped under `/auth/{projectId}/`.
 - `internal/ratelimit` — keyed token-bucket limiter (in-memory, per replica) plus client-IP resolution behind trusted proxies and hashed identity keys.
 - `internal/middleware` — CORS, security headers, tenant context, JWT guard, and the per-route rate-limit middleware (`RateLimits`) wired into the handler via `WithRateLimits`.
+- `internal/oauth` — Google/GitHub sign-in: PKCE, Google id_token checks, redirect allow-list. `internal/testutil/idpfake` fakes both providers.
 - `internal/domain` — Domain types and DTOs.
 - `internal/config` — Env-based config.
 
-**Database schema** (per tenant, `auth` schema): `users` table + `refresh_tokens` table. Managed by golang-migrate migrations in `internal/migrate/migrations/`.
+**Database schema** (per tenant, `auth` schema): `users` (password NULL for provider-made accounts), `refresh_tokens`, `identities`, `flow_states`, `auth_codes`, and the link/key tables. Managed by golang-migrate migrations in `internal/migrate/migrations/`.
 
 ## Environment Variables
 

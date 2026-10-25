@@ -27,6 +27,9 @@ type TokenRequest struct {
 	Password     string `json:"password,omitempty"`
 	APIKey       string `json:"api_key,omitempty"`
 	RefreshToken string `json:"refresh_token,omitempty"`
+	// AuthCode and CodeVerifier redeem a provider sign-in (grant_type=pkce).
+	AuthCode     string `json:"auth_code,omitempty"`
+	CodeVerifier string `json:"code_verifier,omitempty"`
 }
 
 // CreateAPIKeyRequest is the body for POST /api-keys. The plaintext key
