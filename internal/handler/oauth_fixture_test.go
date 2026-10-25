@@ -105,7 +105,7 @@ func (s *signInSettings) provisioning(record any, authURL *string) http.Handler 
 	})
 }
 
-func newOAuthFixture(t *testing.T, record any, configure func(*pool.Manager)) *oauthFixture {
+func newOAuthFixture(t *testing.T, record any, configure func(*pool.Manager), tune ...func(*AuthHandler)) *oauthFixture {
 	t.Helper()
 	settings := &signInSettings{providers: []string{"google", "github"}, redirectURLs: []string{appCallback}, allowNewUsers: true}
 	var authURL string
@@ -129,6 +129,9 @@ func newOAuthFixture(t *testing.T, record any, configure func(*pool.Manager)) *o
 	}, http.DefaultClient)
 	// Every sign-in step reads the settings afresh, so a test sees its own change.
 	h.signInMaxAge = 0
+	for _, apply := range tune {
+		apply(h)
+	}
 	r := chi.NewRouter()
 	r.Route("/auth", h.Routes)
 	srv := httptest.NewServer(r)
@@ -137,7 +140,7 @@ func newOAuthFixture(t *testing.T, record any, configure func(*pool.Manager)) *o
 	return &oauthFixture{integrationFixture: &integrationFixture{srv: srv, signingKey: priv, jwtSvc: jwtSvc}, idp: idp, settings: settings}
 }
 
-func newPostgresOAuthFixture(t *testing.T) *oauthFixture {
+func newPostgresOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFixture {
 	t.Helper()
 	ctx := context.Background()
 	container, err := postgres.Run(ctx, "postgres:16-alpine",
@@ -151,7 +154,7 @@ func newPostgresOAuthFixture(t *testing.T) *oauthFixture {
 	host, _ := container.Host(ctx)
 	port, _ := container.MappedPort(ctx, "5432/tcp")
 	record := map[string]string{"host": host, "port": port.Port(), "database": "testdb", "username": "testuser", "password": "testpass"}
-	fx := newOAuthFixture(t, record, func(mgr *pool.Manager) { mgr.SetMigrator(migrate.Run) })
+	fx := newOAuthFixture(t, record, func(mgr *pool.Manager) { mgr.SetMigrator(migrate.Run) }, tune...)
 	direct, err := pgxpool.New(ctx, fmt.Sprintf("postgres://testuser:testpass@%s:%s/testdb?sslmode=disable", host, port.Port()))
 	if err != nil {
 		t.Fatal(err)

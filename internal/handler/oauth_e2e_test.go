@@ -7,7 +7,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/oauth"
 	"github.com/excalibase/auth/internal/testutil/idpfake"
 )
@@ -24,6 +26,29 @@ func TestIntegration_OAuthSignInOnMySQL(t *testing.T) {
 		t.Skip("skipping integration test")
 	}
 	runOAuthFlows(t, newMySQLOAuthFixture(t))
+}
+
+func TestIntegration_OAuthSignUpsSpendTheProjectSignUpBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	limits := middleware.NewRateLimits(middleware.RateLimitConfig{
+		Window: time.Hour, RegisterPerIP: 100, LoginPerIP: 100, TokenPerIP: 100,
+		RegisterPerProject: 1, LoginFailures: 100, FailureWindow: time.Hour,
+	})
+	fx := newPostgresOAuthFixture(t, func(h *AuthHandler) { h.WithRateLimits(limits) })
+
+	first := person("budget")
+	fx.signIn(t, "github", first)
+	fx.signIn(t, "github", first)
+	landed, _ := fx.browserSignIn(t, "github", person("over-budget"))
+	if landed.Query().Get("error") != "rate_limited" || landed.Query().Get("code") != "" {
+		t.Fatalf("a sign-up past the project's budget landed at %s", landed)
+	}
+	if resp := postJSON(fx.srv, oauthProject+"/register", map[string]string{
+		"email": person("pw").Email, "password": oauthPassword, "fullName": "Over"}); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("password sign-up after a provider sign-up spent the budget: %d", resp.StatusCode)
+	}
 }
 
 var oauthSeq atomic.Int64
