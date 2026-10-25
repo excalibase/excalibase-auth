@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -124,7 +125,7 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "failed to start sign-in", http.StatusInternalServerError)
 		return
 	}
-	bindToBrowser(w, r, flow.State)
+	bindToBrowser(w, r, settings.CallbackURL, flow.State)
 	client := oauth.Client{ID: settings.ClientID, RedirectURL: settings.CallbackURL}
 	redirect(w, r, provider.AuthCodeURL(client, flow))
 }
@@ -309,23 +310,25 @@ func stateCookieName(state string) string {
 	return stateCookiePrefix + token.Hash(state)[:16]
 }
 
-func callbackPath(r *http.Request) string {
-	return "/auth/" + chi.URLParam(r, "orgSlug") + "/" + projectKey(r) + "/callback/"
-}
-
-func stateCookie(r *http.Request, state string, maxAge int) *http.Cookie {
+func stateCookie(r *http.Request, path, state string, maxAge int) *http.Cookie {
 	return &http.Cookie{
-		Name: stateCookieName(state), Value: state, Path: callbackPath(r), MaxAge: maxAge, HttpOnly: true,
+		Name: stateCookieName(state), Value: state, Path: path, MaxAge: maxAge, HttpOnly: true,
 		Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https", SameSite: http.SameSiteLaxMode,
 	}
 }
 
-func bindToBrowser(w http.ResponseWriter, r *http.Request, state string) {
-	http.SetCookie(w, stateCookie(r, state, int(flowTTL.Seconds())))
+// bindToBrowser scopes the cookie to the registered callback, whose org
+// segment may differ from the one the app called /authorize with.
+func bindToBrowser(w http.ResponseWriter, r *http.Request, callbackURL, state string) {
+	path := "/"
+	if parsed, err := url.Parse(callbackURL); err == nil && parsed.Path != "" {
+		path = parsed.Path
+	}
+	http.SetCookie(w, stateCookie(r, path, state, int(flowTTL.Seconds())))
 }
 
 func clearBrowserBinding(w http.ResponseWriter, r *http.Request, state string) {
-	http.SetCookie(w, stateCookie(r, state, -1))
+	http.SetCookie(w, stateCookie(r, r.URL.Path, state, -1))
 }
 
 func boundToBrowser(r *http.Request, state string) bool {

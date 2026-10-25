@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -40,6 +41,7 @@ func runOAuthFlows(t *testing.T, fx *oauthFixture) {
 	t.Run("AnAddressTheProviderDidNotVerifyIsRefused", func(t *testing.T) { oauthUnverifiedAtProvider(t, fx) })
 	t.Run("ClosedSignUpsRefuseNewAccountsOnly", func(t *testing.T) { oauthSignUpsClosed(t, fx) })
 	t.Run("AuthorizeRefusesBeforeTheProvider", func(t *testing.T) { oauthAuthorizeRefusals(t, fx) })
+	t.Run("AuthorizeUnderTheProjectIDAsOrgFinishesAtTheRegisteredCallback", func(t *testing.T) { oauthOrgDefaultsToProject(t, fx) })
 	t.Run("TheStateAndTheCodeAreSpentOnce", func(t *testing.T) { oauthSingleUse(t, fx) })
 	t.Run("ProviderErrorsReachTheAppAsCodesOnly", func(t *testing.T) { oauthProviderErrors(t, fx) })
 	t.Run("SettingsThatCannotBeReadFailClosed", func(t *testing.T) { oauthFailsClosed(t, fx) })
@@ -235,5 +237,24 @@ func oauthFailsClosed(t *testing.T, fx *oauthFixture) {
 	resp, body := fx.exchange(landed.Query().Get("code"), verifier)
 	if resp.StatusCode != http.StatusBadRequest || body["error"] != errUnsupportedGrant.Error() {
 		t.Fatalf("pkce with sign-in off must read as today's unknown grant: %d %v", resp.StatusCode, body)
+	}
+}
+
+// The SDK calls auth with the project id as org segment unless told the org;
+// the provider still returns to the registered callback under the real org.
+func oauthOrgDefaultsToProject(t *testing.T, fx *oauthFixture) {
+	fx.idp.SignInAs(person("sdkdefault"))
+	flow, _ := oauth.NewFlow()
+	raw := strings.Replace(fx.authorizeURL("github", appCallback, oauth.S256(flow.Verifier)), "/auth/test-org/", "/auth/test-project/", 1)
+	started := get(t, raw)
+	atProvider := get(t, started.Header.Get("Location"))
+	callback := atProvider.Header.Get("Location")
+	if !strings.Contains(callback, oauthProject+"/callback/github") {
+		t.Fatalf("provider returned to %s", callback)
+	}
+	landed := get(t, callback)
+	location, _ := url.Parse(landed.Header.Get("Location"))
+	if landed.StatusCode != http.StatusFound || location.Query().Get("code") == "" {
+		t.Fatalf("callback: %d %s", landed.StatusCode, location)
 	}
 }
