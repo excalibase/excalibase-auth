@@ -338,3 +338,27 @@ func TestRateLimitConfigFrom(t *testing.T) {
 		t.Errorf("cidrs: got %v", got.TrustedProxyCIDRs)
 	}
 }
+
+func TestAllowSignupSharesTheProjectRegisterBudget(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	limits := NewRateLimits(testConfig(), ratelimit.WithClock(clock.Now))
+	r := chi.NewRouter()
+	r.With(limits.Register).Post("/auth/{orgSlug}/{projectId}/register", statusHandler(http.StatusCreated).ServeHTTP)
+	before := testutil.ToFloat64(metrics.RateLimited.WithLabelValues(routeRegister))
+
+	if !limits.AllowSignup("proj") || !limits.AllowSignup("proj") {
+		t.Fatal("a sign-up within the budget was refused")
+	}
+	if w := post(r, testRegisterPath, "10.0.0.1", "{}"); w.Code != http.StatusCreated {
+		t.Fatalf("the last register within the budget: %d", w.Code)
+	}
+	if limits.AllowSignup("proj") {
+		t.Fatal("a sign-up past the budget /register spent was allowed")
+	}
+	if !limits.AllowSignup("other") {
+		t.Fatal("another project's budget was spent")
+	}
+	if got := testutil.ToFloat64(metrics.RateLimited.WithLabelValues(routeRegister)) - before; got != 1 {
+		t.Fatalf("rate-limited metric moved by %v, want 1", got)
+	}
+}
