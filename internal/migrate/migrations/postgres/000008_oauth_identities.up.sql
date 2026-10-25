@@ -1,6 +1,6 @@
--- EXC-662: sign-in through Google or GitHub. An account made by a provider has
--- no password, so password may be NULL; email may be NULL for the anonymous
--- accounts of a later step. Nothing writes a NULL email yet.
+-- EXC-662: sign-in through Google or GitHub. Accounts made by a provider carry
+-- no password. Anonymous accounts of a later step carry no address; nothing
+-- writes one without an address yet.
 
 ALTER TABLE auth.users ALTER COLUMN password DROP NOT NULL;
 ALTER TABLE auth.users ALTER COLUMN email DROP NOT NULL;

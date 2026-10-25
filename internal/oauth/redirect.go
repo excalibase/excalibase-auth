@@ -9,12 +9,12 @@ import (
 // port and path must match exactly; only the query may differ. It returns raw
 // as it will be redirected to.
 func AllowedRedirect(raw string, allowed []string) (string, bool) {
-	target, ok := comparable(raw)
+	target, ok := comparableForm(raw)
 	if !ok {
 		return "", false
 	}
 	for _, entry := range allowed {
-		if candidate, ok := comparable(entry); ok && candidate == target {
+		if candidate, ok := comparableForm(entry); ok && candidate == target {
 			parsed, _ := url.Parse(raw)
 			return parsed.String(), true
 		}
@@ -22,9 +22,9 @@ func AllowedRedirect(raw string, allowed []string) (string, bool) {
 	return "", false
 }
 
-// comparable is the scheme, host, port and path of an absolute http(s) URL with
+// comparableForm is the scheme, host, port and path of an absolute http(s) URL with
 // no userinfo or fragment, lower-cased where the URL is case-insensitive.
-func comparable(raw string) (string, bool) {
+func comparableForm(raw string) (string, bool) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || parsed.Opaque != "" {
 		return "", false
