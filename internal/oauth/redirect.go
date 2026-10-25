@@ -39,6 +39,9 @@ func comparableForm(raw string) (string, bool) {
 	if scheme != "https" && scheme != "http" {
 		return "", false
 	}
+	if !plainPath(parsed) || strings.Contains(parsed.Host, "*") {
+		return "", false
+	}
 	host := strings.ToLower(parsed.Hostname())
 	if port := parsed.Port(); port != "" && port != defaultPort(scheme) {
 		host += ":" + port
@@ -80,4 +83,20 @@ func WithError(raw, code string) string {
 	query.Set("error", code)
 	parsed.RawQuery = query.Encode()
 	return parsed.String()
+}
+
+// plainPath refuses dot segments, encoded slashes and control characters,
+// which a browser or server may read differently from the stored entry.
+func plainPath(parsed *url.URL) bool {
+	for _, r := range parsed.Path {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	for _, segment := range strings.Split(parsed.Path, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return !strings.Contains(strings.ToLower(parsed.EscapedPath()), "%2f")
 }
