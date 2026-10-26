@@ -26,6 +26,8 @@ import (
 const (
 	TemplateVerifyEmail   = "verify_email"
 	TemplatePasswordReset = "password_reset"
+	TemplateMagicLink     = "magic_link"
+	TemplateEmailOTP      = "email_otp"
 )
 
 // sendPath is provisioning's PAT-authenticated transport endpoint.

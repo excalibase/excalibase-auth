@@ -31,6 +31,9 @@ var ErrSignupsDisabled = errors.New("new sign-ups are disabled")
 // address match a provider sign-in and none matches it exactly.
 var ErrAmbiguousEmail = errors.New("more than one account matches the address")
 
+// ErrRateLimited means a send would pass the address's or the project's budget.
+var ErrRateLimited = errors.New("too many codes sent")
+
 // TokenKind names one of the single-use link tables.
 type TokenKind int
 
@@ -162,6 +165,48 @@ type AuthCode struct {
 	ExpiresAt     time.Time
 }
 
+// Kinds of emailed sign-in secret.
+const (
+	OTPMagicLink = "magiclink"
+	OTPEmailCode = "email"
+)
+
+// EmailOTP is one emailed sign-in: a link, stored as its SHA-256, or a code,
+// stored as an HMAC. Either is spent once, with the PKCE verifier whose
+// challenge it carries.
+type EmailOTP struct {
+	Email         string
+	Kind          string
+	LinkHash      string
+	CodeHMAC      string
+	CodeChallenge string
+	CreateUser    bool
+	Attempts      int
+	ExpiresAt     time.Time
+}
+
+// OTPLimits are the send budgets, counted from the rows themselves so every
+// replica shares them.
+type OTPLimits struct {
+	MinInterval    time.Duration
+	PerAddressHour int
+	PerProjectDay  int
+}
+
+// OTPLookup finds a link by its hash, or else the address's live code.
+type OTPLookup struct {
+	LinkHash string
+	Email    string
+}
+
+// AuditEvent is one row of the project's sign-in trail.
+type AuditEvent struct {
+	UserID int64 // zero when no account is known
+	Event  string
+	Method string
+	IP     string
+}
+
 // Store is one project's end-user database.
 type Store interface {
 	// InsertUser creates an account with role 'user' unless the address is
@@ -211,6 +256,21 @@ type Store interface {
 	SaveAuthCode(ctx context.Context, code AuthCode) error
 	// RedeemAuthCode spends a live code once; ErrNotFound otherwise.
 	RedeemAuthCode(ctx context.Context, codeHash string) (AuthCode, error)
+
+	// SaveEmailOTP records a send within the limits, ends the address's earlier
+	// live links and codes, and drops rows older than a day. ErrRateLimited
+	// past a budget.
+	SaveEmailOTP(ctx context.Context, otp EmailOTP, limits OTPLimits) error
+	// RedeemEmailOTP spends the live row the lookup finds when check accepts
+	// it. A refusal counts an attempt and spends a link, or a code at its last
+	// attempt. ErrNotFound for no row and for a refusal alike.
+	RedeemEmailOTP(ctx context.Context, lookup OTPLookup, maxAttempts int, check func(EmailOTP) bool) (EmailOTP, error)
+	// SignInWithEmail finds or creates the account of an address its owner
+	// just proved, by the rule a provider sign-in follows.
+	SignInWithEmail(ctx context.Context, email, fullName string, allowCreate bool) (Account, IdentityOutcome, error)
+	// AccountByAddress is the account an address reaches, whatever its case.
+	AccountByAddress(ctx context.Context, email string) (Account, error)
+	RecordAudit(ctx context.Context, event AuditEvent) error
 
 	CreateAPIKey(ctx context.Context, hash, prefix, keyType, name string) (int64, time.Time, error)
 	ListAPIKeys(ctx context.Context) ([]APIKeyListing, error)

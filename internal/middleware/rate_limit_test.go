@@ -49,6 +49,7 @@ func testConfig() RateLimitConfig {
 		RegisterPerProject: 3,
 		LoginFailures:      2,
 		FailureWindow:      15 * time.Minute,
+		OTPPerIP:           2,
 	}
 }
 
@@ -326,8 +327,11 @@ func TestRateLimitConfigFrom(t *testing.T) {
 	got := RateLimitConfigFrom(config.RateLimit{
 		WindowSeconds: 60, RegisterPerIP: 5, LoginPerIP: 10, TokenPerIP: 30,
 		RegisterPerProject: 60, LoginFailures: 5, LoginFailureWindowSeconds: 900,
-		TrustedProxyCIDRs: nets,
+		TrustedProxyCIDRs: nets, OTPPerIP: 6,
 	})
+	if got.OTPPerIP != 6 {
+		t.Errorf("otp per ip: got %d", got.OTPPerIP)
+	}
 	if got.Window != time.Minute || got.FailureWindow != 15*time.Minute {
 		t.Errorf("windows: got %v / %v", got.Window, got.FailureWindow)
 	}
@@ -362,5 +366,24 @@ func TestAllowSignupSharesTheProjectRegisterBudget(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(metrics.RateLimited.WithLabelValues(routeRegister)) - before; got != 1 {
 		t.Fatalf("rate-limited metric moved by %v, want 1", got)
+	}
+}
+
+func TestOTPThrottlesSendsPerClientIP(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	limits := NewRateLimits(testConfig(), ratelimit.WithClock(clock.Now))
+	r := chi.NewRouter()
+	r.With(limits.OTP).Post("/auth/{orgSlug}/{projectId}/otp", statusHandler(http.StatusOK).ServeHTTP)
+	path := "/auth/org/proj/otp"
+	for i := range 2 {
+		if w := post(r, path, "10.0.0.1", "{}"); w.Code != http.StatusOK {
+			t.Fatalf("send %d within the budget: %d", i+1, w.Code)
+		}
+	}
+	if w := post(r, path, "10.0.0.1", "{}"); w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("a send past the budget: %d", w.Code)
+	}
+	if w := post(r, path, "10.0.0.2", "{}"); w.Code != http.StatusOK {
+		t.Fatalf("another client shares the budget: %d", w.Code)
 	}
 }

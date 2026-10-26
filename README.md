@@ -48,6 +48,8 @@ All endpoints are scoped under `/auth/{orgSlug}/{projectName}/`:
 | `POST` | `/auth/{orgSlug}/{projectName}/logout` | Revoke a refresh token |
 | `GET`  | `/auth/{orgSlug}/{projectName}/authorize` | Start a Google or GitHub sign-in (PKCE) |
 | `GET`  | `/auth/{orgSlug}/{projectName}/callback/{provider}` | The provider's redirect back; hands the app a single-use code |
+| `POST` | `/auth/{orgSlug}/{projectName}/otp` | Email a sign-in link or six-digit code (PKCE) |
+| `POST` | `/auth/{orgSlug}/{projectName}/verify` | Spend an emailed link or code with the PKCE verifier; returns a session |
 | `GET`  | `/auth/{orgSlug}/{projectName}/users` | List the project's accounts (user admin or service token) |
 | `PUT`  | `/auth/{orgSlug}/{projectName}/users/{userId}/role` | Set an account's role and allowed roles (user admin or service token) |
 | `GET`  | `/healthz` | Health check |
@@ -135,6 +137,16 @@ On only for a project whose control plane lists the provider in `/info` (flag `a
 3. The app redeems the code once, within 5 minutes: `POST /token {"grant_type":"pkce","auth_code":"…","code_verifier":"…"}`.
 
 Only a provider-verified address is accepted. It joins an account with the same address when that account is verified; an unverified one is taken over (password cleared, sessions and pending links ended). Provider tokens are not stored.
+
+### Sign-in by emailed link or code
+
+On only for a project whose control plane sends `emailOtpEnabled: true` on `/info` (flag `authotp`, then the project's own switch). Otherwise both routes answer `404 method_not_enabled`, and `503` when the settings cannot be read.
+
+1. The app keeps a PKCE verifier and asks: `POST /otp {"email":"…","type":"magiclink"|"email","create_user":true,"redirect_to":"<url>","code_challenge":"<S256>","code_challenge_method":"S256"}`. A link goes to `redirect_to` (default: the site URL), which must be on the redirect allow-list; a code needs none.
+2. The answer is the same `200` for every address. Mail goes only to an address with an enabled account, or to a new one when `create_user` is true and sign-ups are open. An address may ask once a minute and five times an hour, and a project 500 times a day (`429 rate_limited`); these budgets are counted in the project's own database.
+3. The link lands on `redirect_to?token_hash=…&type=magiclink`; the code arrives in the mail. Either is good for 10 minutes and once: `POST /verify {"type":"magiclink","token_hash":"…","code_verifier":"…"}` or `{"type":"email","email":"…","token":"123456","code_verifier":"…"}`. The verifier must be the one whose challenge asked, so a link opened in another browser, or a code typed elsewhere, does not sign in. A link is spent by its first try; a code by its fifth wrong one.
+
+A mail scanner that fetches the link spends nothing: only the POST does. The code is stored as an HMAC under a key derived from the signing key, so reading the `auth` schema does not reveal it. An account is reached as a provider sign-in reaches it: a verified one keeps its password, an unverified one is taken over, a new one is made only when sign-ups are open and the project's sign-up budget allows. Each sign-in writes `auth.audit_log` (user, `sign_in`/`sign_up`/`takeover`, method, client IP).
 
 ### End-user roles
 
@@ -228,6 +240,7 @@ All configuration is via environment variables:
 | `RATE_LIMIT_REGISTER_PER_PROJECT` | `60` | `/register` requests per project per window, across all IPs |
 | `RATE_LIMIT_LOGIN_FAILURES` | `5` | Failed logins per identity before the identity is locked |
 | `RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS` | `900` | Window over which login failures are counted |
+| `RATE_LIMIT_OTP_PER_IP` | `5` | `/otp` requests per client IP per window (the per-address and per-project budgets live in the project database) |
 | `TRUSTED_PROXY_CIDRS` | — (empty) | Comma-separated CIDRs allowed to set `X-Forwarded-For` |
 | `CORS_ORIGINS` | `https://app.excalibase.io` | Platform (Studio) origins, trusted with credentials on every route. On `/auth/{org}/{project}/*` a `*` here is ignored: other origins come from the project's allowlist (`corsAllowedOrigins` on provisioning's `/projects/{id}/info`, the list the engine uses), exact match, no credentials; an allowlist that cannot be read refuses the origin |
 | `PROJECT_CORS_TTL_SECONDS` | `30` | How long a project's allowlist is cached; a failed refresh keeps the last list |

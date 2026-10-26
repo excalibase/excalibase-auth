@@ -37,6 +37,19 @@ func TestSignInSettingsDecodeAndDefault(t *testing.T) {
 	}
 }
 
+func TestEmailSignInIsOnOnlyWhenTheControlPlaneSaysSo(t *testing.T) {
+	hits := 0
+	srv := newInfoServer(t, `{"projectId":"p1","emailOtpEnabled":true}`, &hits)
+	defer srv.Close()
+	info, err := NewManager(srv.URL, token.Literal("pat"), time.Hour).GetProjectInfo(context.Background(), "p1")
+	if err != nil || !info.EmailOTPEnabled {
+		t.Fatalf("info = %+v %v", info, err)
+	}
+	if (ProjectInfo{}).EmailOTPEnabled {
+		t.Fatal("an older control plane must read as email sign-in off")
+	}
+}
+
 func TestGetProjectInfoWithinRefetchesAnOlderCopy(t *testing.T) {
 	hits := 0
 	srv := newInfoServer(t, `{"projectId":"p1"}`, &hits)

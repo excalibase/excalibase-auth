@@ -82,9 +82,13 @@ func oauthSignUpThenIn(t *testing.T, fx *oauthFixture, provider string) {
 	if first["refreshToken"] == "" || userIDOf(first) <= 0 {
 		t.Fatalf("session = %v", first)
 	}
+	auditRows := fx.count(t, "audit_log")
 	again := fx.signIn(t, provider, user)
 	if userIDOf(again) != userIDOf(first) {
 		t.Fatalf("second sign-in reached user %v, want %v", userIDOf(again), userIDOf(first))
+	}
+	if got := fx.count(t, "audit_log"); got != auditRows+1 {
+		t.Fatalf("a provider sign-in wrote %d audit rows, want 1", got-auditRows)
 	}
 	if !fx.passwordIsNull(t, user.Email) {
 		t.Fatal("a provider-made account got a password")

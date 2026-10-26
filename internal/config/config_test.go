@@ -101,6 +101,7 @@ func TestRateLimitDefaults(t *testing.T) {
 		"RATE_LIMIT_ENABLED", "RATE_LIMIT_WINDOW_SECONDS", "RATE_LIMIT_REGISTER_PER_IP",
 		"RATE_LIMIT_LOGIN_PER_IP", "RATE_LIMIT_TOKEN_PER_IP", "RATE_LIMIT_REGISTER_PER_PROJECT",
 		"RATE_LIMIT_LOGIN_FAILURES", "RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS", "TRUSTED_PROXY_CIDRS",
+		"RATE_LIMIT_OTP_PER_IP",
 	} {
 		os.Unsetenv(key)
 	}
@@ -114,6 +115,9 @@ func TestRateLimitDefaults(t *testing.T) {
 	}
 	if rl.RegisterPerProject != 60 {
 		t.Errorf("register per project: got %d, want 60", rl.RegisterPerProject)
+	}
+	if rl.OTPPerIP != 5 {
+		t.Errorf("otp per ip: got %d, want 5", rl.OTPPerIP)
 	}
 	if rl.LoginFailures != 5 || rl.LoginFailureWindowSeconds != 900 {
 		t.Errorf("login failure defaults: got %d/%d, want 5/900", rl.LoginFailures, rl.LoginFailureWindowSeconds)
@@ -133,8 +137,12 @@ func TestRateLimitFromEnv(t *testing.T) {
 	t.Setenv("RATE_LIMIT_LOGIN_FAILURES", "3")
 	t.Setenv("RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS", "600")
 	t.Setenv("TRUSTED_PROXY_CIDRS", "10.0.0.0/8, 192.168.0.0/16")
+	t.Setenv("RATE_LIMIT_OTP_PER_IP", "4")
 
 	rl := Load().RateLimit
+	if rl.OTPPerIP != 4 {
+		t.Errorf("otp per ip env: got %d", rl.OTPPerIP)
+	}
 	if rl.Enabled {
 		t.Error("RATE_LIMIT_ENABLED=false must disable")
 	}

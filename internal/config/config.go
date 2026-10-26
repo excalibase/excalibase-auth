@@ -75,6 +75,8 @@ type RateLimit struct {
 	LoginFailures             int
 	LoginFailureWindowSeconds int
 	TrustedProxyCIDRs         []*net.IPNet
+	// OTPPerIP caps emailed sign-in links and codes asked for per client IP.
+	OTPPerIP int
 }
 
 // patFileEnv names the env var holding the path of the rotatable token file.
@@ -138,6 +140,7 @@ func loadRateLimit() RateLimit {
 		RegisterPerProject:        envInt("RATE_LIMIT_REGISTER_PER_PROJECT", 60),
 		LoginFailures:             envInt("RATE_LIMIT_LOGIN_FAILURES", 5),
 		LoginFailureWindowSeconds: envInt("RATE_LIMIT_LOGIN_FAILURE_WINDOW_SECONDS", 900),
+		OTPPerIP:                  envInt("RATE_LIMIT_OTP_PER_IP", 5),
 		TrustedProxyCIDRs:         trustedProxyCIDRs(),
 	}
 }

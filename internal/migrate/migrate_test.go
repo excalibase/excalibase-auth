@@ -283,3 +283,31 @@ func TestMigrate_OnlyARedeemedLinkCountsAsProofOfAddress(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrate_EmailSignInTablesComeAndGo(t *testing.T) {
+	connStr, cleanup := setupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := Run(ctx, poolFor(t, connStr)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	tables := []string{"email_otps", "email_otp_lock", "audit_log"}
+	for _, table := range tables {
+		if !tableExists(t, connStr, "auth", table) {
+			t.Errorf("auth.%s missing after migration", table)
+		}
+	}
+	m, err := newMigrate(poolFor(t, connStr))
+	if err != nil {
+		t.Fatalf("newMigrate: %v", err)
+	}
+	defer m.Close()
+	if err := m.Migrate(9); err != nil {
+		t.Fatalf("migrate down to 9: %v", err)
+	}
+	for _, table := range tables {
+		if tableExists(t, connStr, "auth", table) {
+			t.Errorf("auth.%s left after the down migration", table)
+		}
+	}
+}

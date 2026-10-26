@@ -177,7 +177,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		redirect(w, r, oauth.WithError(flow.RedirectTo, code))
 		return
 	}
-	code, failure := h.finishSignIn(r.Context(), db, projectID, flow, query.Get("code"))
+	code, failure := h.finishSignIn(r.Context(), db, projectID, flow, query.Get("code"), h.clientIP(r))
 	if failure != "" {
 		redirect(w, r, oauth.WithError(flow.RedirectTo, failure))
 		return
@@ -186,7 +186,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 }
 
 // finishSignIn returns the app's code, or the error code to send it instead.
-func (h *AuthHandler) finishSignIn(ctx context.Context, db store.Store, projectID string, flow store.FlowState, providerCode string) (string, string) {
+func (h *AuthHandler) finishSignIn(ctx context.Context, db store.Store, projectID string, flow store.FlowState, providerCode, clientIP string) (string, string) {
 	info, err := h.signInSettings(ctx, projectID)
 	if err != nil {
 		return "", codeUnavailable
@@ -214,37 +214,38 @@ func (h *AuthHandler) finishSignIn(ctx context.Context, db store.Store, projectI
 	if len(identity.Email) > maxEmailLength {
 		return "", codeInvalidEmail
 	}
-	account, failure := h.signInIdentity(ctx, db, projectID, flow.Provider, identity, info.NewUsersAllowed())
+	account, outcome, failure := h.signInIdentity(ctx, db, projectID, flow.Provider, identity, info.NewUsersAllowed())
 	if failure != "" {
 		return "", failure
 	}
+	h.audit(ctx, db, projectID, store.AuditEvent{UserID: account.ID, Method: flow.Provider, IP: clientIP}, outcome)
 	return h.issueAuthCode(ctx, db, account.ID, flow.ClientCodeChallenge)
 }
 
-func (h *AuthHandler) signInIdentity(ctx context.Context, db store.Store, projectID, provider string, identity oauth.Identity, allowCreate bool) (store.Account, string) {
+func (h *AuthHandler) signInIdentity(ctx context.Context, db store.Store, projectID, provider string, identity oauth.Identity, allowCreate bool) (store.Account, store.IdentityOutcome, string) {
 	claim := store.IdentityClaim{Provider: provider, Subject: identity.Subject, Email: identity.Email, FullName: displayName(identity)}
 	// Only a new account spends the sign-up budget /register draws on.
 	account, outcome, err := db.SignInWithIdentity(ctx, claim, false)
 	if errors.Is(err, store.ErrSignupsDisabled) && allowCreate {
 		if h.limits != nil && !h.limits.AllowSignup(projectID) {
-			return store.Account{}, codeRateLimited
+			return store.Account{}, 0, codeRateLimited
 		}
 		account, outcome, err = db.SignInWithIdentity(ctx, claim, true)
 	}
 	switch {
 	case errors.Is(err, store.ErrSignupsDisabled):
-		return store.Account{}, codeSignupDisabled
+		return store.Account{}, 0, codeSignupDisabled
 	case err != nil:
 		log.Printf("auth.oauth.account_failed project=%s provider=%s", safeLog(projectID), provider)
-		return store.Account{}, codeServerError
+		return store.Account{}, 0, codeServerError
 	case !account.Enabled:
-		return store.Account{}, codeAccountDisabled
+		return store.Account{}, 0, codeAccountDisabled
 	}
 	if err := (accountRoles{role: account.Role, allowed: account.AllowedRoles}).validate(); err != nil {
-		return store.Account{}, codeAccessDenied
+		return store.Account{}, 0, codeAccessDenied
 	}
 	log.Printf("auth.oauth.signed_in project=%s provider=%s userId=%d outcome=%d", safeLog(projectID), provider, account.ID, outcome)
-	return account, ""
+	return account, outcome, ""
 }
 
 func (h *AuthHandler) issueAuthCode(ctx context.Context, db store.Store, userID int64, challenge string) (string, string) {
