@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
 
 	"github.com/excalibase/auth/internal/store"
 )
@@ -39,17 +38,19 @@ func (s *Store) SaveEmailOTP(ctx context.Context, otp store.EmailOTP, limits sto
 // withinOTPLimits counts the sends the budgets allow, under the lock row, and
 // says whether this one may be mailed.
 func withinOTPLimits(ctx context.Context, tx *sql.Tx, otp store.EmailOTP, limits store.OTPLimits) (bool, error) {
-	var recent, lastHour, fromIP, mailedToday sql.NullInt64
+	var recent, lastHour, fromIP, mailedToday, links sql.NullInt64
 	if err := tx.QueryRowContext(ctx,
 		`SELECT SUM(LOWER(email) = LOWER(?) AND created_at > NOW(6) - INTERVAL ? MICROSECOND),
 		        SUM(LOWER(email) = LOWER(?) AND created_at > NOW(6) - INTERVAL 1 HOUR),
 		        SUM(ip <=> ?),
-		        SUM(mailed)
+		        SUM(mailed),
+		        SUM(link_user_id <=> ?)
 		 FROM email_otps WHERE created_at > NOW(6) - INTERVAL 1 DAY`,
-		otp.Email, limits.MinInterval.Microseconds(), otp.Email, otp.IP).Scan(&recent, &lastHour, &fromIP, &mailedToday); err != nil {
+		otp.Email, limits.MinInterval.Microseconds(), otp.Email, otp.IP, otp.LinkUserID).Scan(&recent, &lastHour, &fromIP, &mailedToday, &links); err != nil {
 		return false, err
 	}
-	if recent.Int64 > 0 || lastHour.Int64 >= int64(limits.PerAddressHour) || fromIP.Int64 >= int64(limits.PerIPDay) {
+	overLinks := otp.LinkUserID != 0 && limits.LinksPerAccountDay > 0 && links.Int64 >= int64(limits.LinksPerAccountDay)
+	if recent.Int64 > 0 || lastHour.Int64 >= int64(limits.PerAddressHour) || fromIP.Int64 >= int64(limits.PerIPDay) || overLinks {
 		return false, store.ErrRateLimited
 	}
 	return otp.Mailed && mailedToday.Int64 < int64(limits.PerProjectDay), nil
@@ -139,10 +140,7 @@ func (s *Store) SignInWithEmail(ctx context.Context, email, fullName string, all
 }
 
 func (s *Store) AccountByAddress(ctx context.Context, email string) (store.Account, error) {
-	linked, err := scanAccount(s.db.QueryRowContext(ctx, "SELECT "+accountColumns+` FROM users
-		WHERE id = (SELECT user_id FROM identities WHERE provider = ? AND subject = ?)`,
-		store.EmailProvider, strings.ToLower(email)))
-	if !errors.Is(err, store.ErrNotFound) {
+	if linked, ok, err := s.linkedAccount(ctx, email); ok || err != nil {
 		return linked, err
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT "+accountColumns+`, email = ? FROM users
@@ -170,6 +168,23 @@ func (s *Store) AccountByAddress(ctx context.Context, email string) (store.Accou
 		return store.Account{}, err
 	}
 	return accounts[0], nil
+}
+
+// linkedAccount is the account an address was linked to; see pgstore.
+func (s *Store) linkedAccount(ctx context.Context, email string) (store.Account, bool, error) {
+	var (
+		account store.Account
+		ok      bool
+	)
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		match, found, err := linkedAddress(ctx, tx, email)
+		if ok = found; !found || err != nil {
+			return err
+		}
+		account, err = scanAccount(tx.QueryRowContext(ctx, "SELECT "+accountColumns+" FROM users WHERE id = ?", match.ID))
+		return err
+	})
+	return account, ok, err
 }
 
 func (s *Store) RecordAudit(ctx context.Context, event store.AuditEvent) error {

@@ -52,6 +52,11 @@ func TestIntegration_PostgresStoreKeepsTheStoreContract(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		SetEmail: func(t *testing.T, id int64, email string) {
+			if _, err := pool.Exec(ctx, "UPDATE auth.users SET email = $2 WHERE id = $1", id, email); err != nil {
+				t.Fatal(err)
+			}
+		},
 		Count: func(t *testing.T, table string) int {
 			var n int
 			if err := pool.QueryRow(ctx, "SELECT count(*) FROM auth."+table).Scan(&n); err != nil {

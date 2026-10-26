@@ -40,7 +40,7 @@ const (
 // defaultOTPLimits pace the mail: an address once a minute and five times an
 // hour, a client fifty times a day, and a project's mailed sends a day, which
 // guards the shared sending reputation.
-var defaultOTPLimits = store.OTPLimits{MinInterval: time.Minute, PerAddressHour: 5, PerProjectDay: 500, PerIPDay: 50}
+var defaultOTPLimits = store.OTPLimits{MinInterval: time.Minute, PerAddressHour: 5, PerProjectDay: 500, PerIPDay: 50, LinksPerAccountDay: 10}
 
 var codeGuessLimits = store.OTPAttempts{PerCode: otpMaxAttempts}
 

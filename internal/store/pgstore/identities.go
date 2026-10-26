@@ -3,7 +3,6 @@ package pgstore
 import (
 	"context"
 	"errors"
-	"strings"
 
 	"github.com/excalibase/auth/internal/store"
 	"github.com/jackc/pgx/v5"
@@ -98,7 +97,7 @@ func linkedAddress(ctx context.Context, tx pgx.Tx, email string) (store.AddressM
 	err := tx.QueryRow(ctx,
 		`SELECT u.id, u.enabled FROM auth.identities i JOIN auth.users u ON u.id = i.user_id
 		 WHERE i.provider = $1 AND i.subject = $2 FOR UPDATE`,
-		store.EmailProvider, strings.ToLower(email)).Scan(&match.ID, &match.Enabled)
+		store.EmailProvider, store.AddressKey(email)).Scan(&match.ID, &match.Enabled)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return match, false, nil
@@ -107,7 +106,22 @@ func linkedAddress(ctx context.Context, tx pgx.Tx, email string) (store.AddressM
 	case !match.Enabled:
 		return match, true, store.ErrAccountDisabled
 	}
-	return match, true, nil
+	return match, true, provenElsewhere(ctx, tx, match.ID, email)
+}
+
+// provenElsewhere refuses a linked address another proven account answers to,
+// rather than choose between them.
+func provenElsewhere(ctx context.Context, tx pgx.Tx, linkedTo int64, email string) error {
+	var other bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM auth.users WHERE lower(email) = lower($1) AND id <> $2
+		 AND email_verified AND email_verified_at IS NOT NULL)`, email, linkedTo).Scan(&other); err != nil {
+		return err
+	}
+	if other {
+		return store.ErrAmbiguousEmail
+	}
+	return nil
 }
 
 func createProviderUser(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim) (int64, error) {

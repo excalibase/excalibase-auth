@@ -142,13 +142,17 @@ func decodeRoles(raw sql.NullString) ([]string, error) {
 func (s *Store) InsertUser(ctx context.Context, email, passwordHash, fullName string) (int64, bool, error) {
 	result, err := s.db.ExecContext(ctx,
 		`INSERT INTO users (email, password, full_name, role, enabled, created_at, updated_at)
-		 VALUES (?, ?, ?, 'user', TRUE, NOW(6), NOW(6))`,
-		email, passwordHash, fullName)
+		 SELECT ?, ?, ?, 'user', TRUE, NOW(6), NOW(6) FROM DUAL
+		 WHERE NOT EXISTS (SELECT 1 FROM identities WHERE provider = ? AND subject = ?)`,
+		email, passwordHash, fullName, store.EmailProvider, store.AddressKey(email))
 	var mysqlErr *mysql.MySQLError
 	if errors.As(err, &mysqlErr) && mysqlErr.Number == duplicateEntry {
 		return 0, false, nil
 	}
 	if err != nil {
+		return 0, false, err
+	}
+	if inserted, err := result.RowsAffected(); err != nil || inserted == 0 {
 		return 0, false, err
 	}
 	id, err := result.LastInsertId()
@@ -427,10 +431,21 @@ func (s *Store) RevokeRefreshToken(ctx context.Context, hash string) error {
 	return err
 }
 
+// RevokeUserRefreshTokens also ends the links in flight; see pgstore.
 func (s *Store) RevokeUserRefreshTokens(ctx context.Context, userID int64) error {
-	_, err := s.db.ExecContext(ctx,
-		"UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ? AND revoked = FALSE", userID)
-	return err
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		for _, statement := range []string{
+			"UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ? AND revoked = FALSE",
+			"DELETE FROM flow_states WHERE link_user_id = ?",
+			"DELETE FROM auth_codes WHERE user_id = ? AND link_provider IS NOT NULL",
+			"DELETE FROM email_otps WHERE link_user_id = ?",
+		} {
+			if _, err := tx.ExecContext(ctx, statement, userID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // tokenQueries are literals per table, so no identifier is ever interpolated.

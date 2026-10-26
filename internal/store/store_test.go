@@ -28,3 +28,15 @@ func TestPickAddressMatch(t *testing.T) {
 		t.Fatalf("two in other cases: %v", err)
 	}
 }
+
+func TestAddressKeyLowersOnlyASCIILetters(t *testing.T) {
+	for in, want := range map[string]string{
+		"Mixed.Case@Example.COM": "mixed.case@example.com",
+		"Kbc@x.test":             "Kbc@x.test",
+		"ÄBC@x.test":             "Äbc@x.test",
+	} {
+		if got := AddressKey(in); got != want {
+			t.Errorf("AddressKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -619,11 +619,15 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 // generateAuthResponse starts a new session for the user.
 func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool) (*domain.AuthResponse, error) {
+	return h.startSession(r, projectID, user, roles, emailVerified, h.newRefreshSession())
+}
+
+// startSession stores the session's first refresh token and signs its access token.
+func (h *AuthHandler) startSession(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool, session store.RefreshSession) (*domain.AuthResponse, error) {
 	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return nil, err
 	}
-	session := h.newRefreshSession()
 	refreshToken, err := storeRefreshToken(r.Context(), db, user.ID, session)
 	if err != nil {
 		return nil, err

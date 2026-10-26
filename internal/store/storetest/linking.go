@@ -20,12 +20,12 @@ func provenUser(t *testing.T, db store.Store, name string) (int64, string) {
 }
 
 func emailClaim(address string) store.IdentityClaim {
-	return store.IdentityClaim{Provider: store.EmailProvider, Subject: strings.ToLower(address), Email: address}
+	return store.IdentityClaim{Provider: store.EmailProvider, Subject: store.AddressKey(address), Email: address}
 }
 
 func link(t *testing.T, db store.Store, userID int64, claim store.IdentityClaim) {
 	t.Helper()
-	if err := db.LinkIdentity(context.Background(), userID, claim); err != nil {
+	if _, err := db.LinkIdentity(context.Background(), userID, claim); err != nil {
 		t.Fatalf("link %+v to %d: %v", claim, userID, err)
 	}
 }
@@ -64,6 +64,131 @@ func runLinking(t *testing.T, fx Fixture) {
 	t.Run("a session keeps when its owner signed in across rotations", func(t *testing.T) {
 		sessionKeepsAuthTime(t, fx.Store)
 	})
+	t.Run("a linked address cannot be registered again", func(t *testing.T) {
+		linkedAddressIsTaken(t, fx.Store)
+	})
+	t.Run("ending an account's sessions ends its links in flight", func(t *testing.T) {
+		revokeEndsLinksInFlight(t, fx)
+	})
+	t.Run("an account asks for a bounded number of address links a day", func(t *testing.T) {
+		addressLinksPerAccount(t, fx.Store)
+	})
+	t.Run("whether an account may take a link is read up front", func(t *testing.T) {
+		linkableAccounts(t, fx)
+	})
+	t.Run("a password nobody can use is no way in", func(t *testing.T) {
+		unusablePasswordIsNoWayIn(t, fx.Store)
+	})
+	t.Run("a linked address another proven account also answers to reaches neither", func(t *testing.T) {
+		linkedAddressCollision(t, fx)
+	})
+}
+
+func linkableAccounts(t *testing.T, fx Fixture) {
+	ctx := context.Background()
+	db := fx.Store
+	proven, _ := provenUser(t, db, "linkable")
+	unproven, _ := newUser(t, db, "linkable-unproven")
+	disabled, address := provenUser(t, db, "linkable-disabled")
+	fx.Disable(t, address)
+	for userID, want := range map[int64]error{proven: nil, unproven: store.ErrAddressUnproven,
+		disabled: store.ErrAccountDisabled, 1 << 50: store.ErrNotFound} {
+		if err := db.LinkableAccount(ctx, userID); !errors.Is(err, want) {
+			t.Errorf("account %d: %v, want %v", userID, err, want)
+		}
+	}
+}
+
+func unusablePasswordIsNoWayIn(t *testing.T, db store.Store) {
+	ctx := context.Background()
+	id, _ := newUser(t, db, "unlink-marker")
+	if _, err := db.MarkVerified(ctx, id, false, "!reset-required"); err != nil {
+		t.Fatal(err)
+	}
+	link(t, db, id, claimFor("google", uniqueEmail("unlink-marker")))
+	if _, err := db.UnlinkIdentity(ctx, id, identitiesOf(t, db, id)[0].ID); !errors.Is(err, store.ErrLastSignInMethod) {
+		t.Fatalf("unlink beside an unusable password: %v", err)
+	}
+}
+
+func linkedAddressCollision(t *testing.T, fx Fixture) {
+	ctx := context.Background()
+	db := fx.Store
+	owner, _ := provenUser(t, db, "collision-owner")
+	address := uniqueEmail("collision")
+	link(t, db, owner, emailClaim(address))
+	other, _ := provenUser(t, db, "collision-other")
+	fx.SetEmail(t, other, address)
+	if _, _, err := db.SignInWithEmail(ctx, address, "Name", false); !errors.Is(err, store.ErrAmbiguousEmail) {
+		t.Fatalf("mail sign-in: %v, want ErrAmbiguousEmail", err)
+	}
+	if _, err := db.AccountByAddress(ctx, address); !errors.Is(err, store.ErrAmbiguousEmail) {
+		t.Fatalf("lookup: %v, want ErrAmbiguousEmail", err)
+	}
+}
+
+func linkedAddressIsTaken(t *testing.T, db store.Store) {
+	ctx := context.Background()
+	id, _ := provenUser(t, db, "link-taken-address")
+	address := uniqueEmail("link-registered")
+	link(t, db, id, emailClaim(address))
+	for _, attempt := range []string{address, strings.ToUpper(address)} {
+		if other, created, err := db.InsertUser(ctx, attempt, "hash", "Other"); err != nil || created || other != 0 {
+			t.Fatalf("register %s: id=%d created=%v err=%v", attempt, other, created, err)
+		}
+	}
+}
+
+func revokeEndsLinksInFlight(t *testing.T, fx Fixture) {
+	ctx := context.Background()
+	db := fx.Store
+	id, _ := provenUser(t, db, "link-revoked")
+	bystander, _ := provenUser(t, db, "link-bystander")
+	state := store.FlowState{StateHash: hash(t), Provider: "github", IDPCodeVerifier: "v", ClientCodeChallenge: "c",
+		RedirectTo: "https://app.test", LinkUserID: id, ExpiresAt: time.Now().Add(time.Minute)}
+	if err := db.SaveFlowState(ctx, state); err != nil {
+		t.Fatal(err)
+	}
+	linkCode := store.AuthCode{CodeHash: hash(t), UserID: id, CodeChallenge: "c", Link: claimFor("github", uniqueEmail("x")),
+		ExpiresAt: time.Now().Add(time.Minute)}
+	signInCode := store.AuthCode{CodeHash: hash(t), UserID: bystander, CodeChallenge: "c", ExpiresAt: time.Now().Add(time.Minute)}
+	for _, code := range []store.AuthCode{linkCode, signInCode} {
+		if err := db.SaveAuthCode(ctx, code); err != nil {
+			t.Fatal(err)
+		}
+	}
+	otp := codeOTP(t, uniqueEmail("link-revoked-otp"))
+	otp.LinkUserID = id
+	save(t, db, otp)
+	if err := db.RevokeUserRefreshTokens(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ConsumeFlowState(ctx, state.StateHash); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a link flow survived: %v", err)
+	}
+	if _, err := db.RedeemAuthCode(ctx, linkCode.CodeHash); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a link code survived: %v", err)
+	}
+	if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: otp.Email, CodeChallenge: otp.CodeChallenge}, perCode(5), accept); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("an address link survived: %v", err)
+	}
+	if _, err := db.RedeemAuthCode(ctx, signInCode.CodeHash); err != nil {
+		t.Fatalf("another account's code was ended: %v", err)
+	}
+}
+
+func addressLinksPerAccount(t *testing.T, db store.Store) {
+	id, _ := provenUser(t, db, "link-budget")
+	limits := roomyLimits
+	limits.LinksPerAccountDay = 2
+	for i := 0; i < 3; i++ {
+		otp := codeOTP(t, uniqueEmail("link-budget"))
+		otp.LinkUserID = id
+		_, err := db.SaveEmailOTP(context.Background(), otp, limits)
+		if want := i == 2; errors.Is(err, store.ErrRateLimited) != want {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
 }
 
 func linkProviderIdentity(t *testing.T, db store.Store) {
@@ -94,7 +219,7 @@ func linkTakenIdentity(t *testing.T, fx Fixture) {
 	link(t, db, owner, claim)
 	before := fx.Count(t, "identities")
 	for _, userID := range []int64{other, owner} {
-		if err := db.LinkIdentity(ctx, userID, claim); !errors.Is(err, store.ErrIdentityExists) {
+		if _, err := db.LinkIdentity(ctx, userID, claim); !errors.Is(err, store.ErrIdentityExists) {
 			t.Fatalf("link to %d: %v, want ErrIdentityExists", userID, err)
 		}
 	}
@@ -113,16 +238,16 @@ func linkRefusedAccounts(t *testing.T, fx Fixture) {
 	grandfathered, address := newUser(t, db, "link-grandfathered")
 	fx.Grandfather(t, address)
 	for _, userID := range []int64{unproven, grandfathered} {
-		if err := db.LinkIdentity(ctx, userID, claimFor("google", uniqueEmail("x"))); !errors.Is(err, store.ErrAddressUnproven) {
+		if _, err := db.LinkIdentity(ctx, userID, claimFor("google", uniqueEmail("x"))); !errors.Is(err, store.ErrAddressUnproven) {
 			t.Fatalf("account %d: %v, want ErrAddressUnproven", userID, err)
 		}
 	}
 	disabled, disabledAddress := provenUser(t, db, "link-disabled")
 	fx.Disable(t, disabledAddress)
-	if err := db.LinkIdentity(ctx, disabled, claimFor("google", uniqueEmail("x"))); !errors.Is(err, store.ErrAccountDisabled) {
+	if _, err := db.LinkIdentity(ctx, disabled, claimFor("google", uniqueEmail("x"))); !errors.Is(err, store.ErrAccountDisabled) {
 		t.Fatalf("disabled account: %v", err)
 	}
-	if err := db.LinkIdentity(ctx, 1<<50, claimFor("google", uniqueEmail("x"))); !errors.Is(err, store.ErrNotFound) {
+	if _, err := db.LinkIdentity(ctx, 1<<50, claimFor("google", uniqueEmail("x"))); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown account: %v", err)
 	}
 }
@@ -153,17 +278,19 @@ func linkAddressConflicts(t *testing.T, db store.Store) {
 	id, own := provenUser(t, db, "link-conflict")
 	_, proven := provenUser(t, db, "link-proven-elsewhere")
 	for _, address := range []string{own, strings.ToUpper(own), proven} {
-		if err := db.LinkIdentity(ctx, id, emailClaim(address)); !errors.Is(err, store.ErrIdentityExists) {
+		if _, err := db.LinkIdentity(ctx, id, emailClaim(address)); !errors.Is(err, store.ErrIdentityExists) {
 			t.Fatalf("link %s: %v, want ErrIdentityExists", address, err)
 		}
 	}
 	squatter, squatted := newUser(t, db, "link-squatted")
-	link(t, db, id, emailClaim(squatted))
+	if deleted, err := db.LinkIdentity(ctx, id, emailClaim(squatted)); err != nil || len(deleted) != 1 || deleted[0] != squatter {
+		t.Fatalf("link over a squatter: deleted=%v %v", deleted, err)
+	}
 	if _, err := db.AccountByID(ctx, squatter); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("the unproven account holding the address survived: %v", err)
 	}
 	other, _ := provenUser(t, db, "link-second-owner")
-	if err := db.LinkIdentity(ctx, other, emailClaim(strings.ToUpper(squatted))); !errors.Is(err, store.ErrIdentityExists) {
+	if _, err := db.LinkIdentity(ctx, other, emailClaim(strings.ToUpper(squatted))); !errors.Is(err, store.ErrIdentityExists) {
 		t.Fatalf("an address linked elsewhere: %v", err)
 	}
 }

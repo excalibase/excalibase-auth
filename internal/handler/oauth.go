@@ -175,7 +175,8 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flow, err := db.ConsumeFlowState(r.Context(), token.Hash(query.Get("state")))
-	if err != nil || flow.Provider != chi.URLParam(r, "provider") {
+	// A link ticket's row has no provider verifier; it is never a state.
+	if err != nil || flow.Provider != chi.URLParam(r, "provider") || flow.IDPCodeVerifier == "" {
 		httpError(w, errFlowInvalid.Error(), http.StatusBadRequest)
 		return
 	}
@@ -308,12 +309,13 @@ func (h *AuthHandler) exchangePKCE(r *http.Request, projectID, code, verifier st
 	if err != nil || code == "" || !oauth.VerifierMatches(verifier, redeemed.CodeChallenge) {
 		return nil, http.StatusBadRequest, errInvalidGrant
 	}
-	if redeemed.Link.Provider != "" {
+	linking := redeemed.Link.Provider != ""
+	if linking {
 		if status, err := h.commitLink(r.Context(), db, projectID, redeemed.UserID, redeemed.Link, h.clientIP(r)); err != nil {
 			return nil, status, err
 		}
 	}
-	return h.accountSession(r, db, projectID, redeemed.UserID)
+	return h.accountSession(r, db, projectID, redeemed.UserID, !linking)
 }
 
 // redirect sends the browser on without leaking the URL onwards or caching it.

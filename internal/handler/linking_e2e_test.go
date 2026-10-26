@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/excalibase/auth/internal/auth"
+	"github.com/excalibase/auth/internal/email"
 	"github.com/excalibase/auth/internal/oauth"
 	"github.com/excalibase/auth/internal/testutil/idpfake"
 )
@@ -40,6 +41,7 @@ func runLinkingFlows(t *testing.T, fx *otpFixture) {
 	t.Run("OffOrUnreadableSettingsRefuseEveryRoute", func(t *testing.T) { linkFailsClosed(t, fx) })
 	t.Run("ALinkStartIsCheckedBeforeAnythingIsSaved", func(t *testing.T) { linkStartRefusals(t, fx) })
 	t.Run("AnAccountDisabledMidwayGetsNoLink", func(t *testing.T) { linkDisabledMidway(t, fx) })
+	t.Run("AnAddressLinkRefusesNonASCIIAndAuditsTheAccountItReplaces", func(t *testing.T) { linkAddressRefusals(t, fx) })
 }
 
 const identitiesPath = oauthProject + "/user/identities"
@@ -145,8 +147,13 @@ func linkProviderThenSignIn(t *testing.T, fx *otpFixture) {
 	if resp.StatusCode != http.StatusOK || userIDOf(linked) != userIDOf(owner) {
 		t.Fatalf("link: %d %v, want a session for user %v", resp.StatusCode, linked, userIDOf(owner))
 	}
-	if claims := jwtPayload(t, accessTokenOf(linked)); claims["auth_time"] == nil {
-		t.Fatalf("the linked session has no sign-in time: %v", claims)
+	if claims := jwtPayload(t, accessTokenOf(linked)); claims["auth_time"] != nil {
+		t.Fatalf("a link made the session look freshly signed in: %v", claims)
+	}
+	if resp, body := fx.call(http.MethodPost, identitiesPath+"/authorize", accessTokenOf(linked), map[string]string{
+		"provider": "google", "redirect_to": appCallback, "code_challenge": oauth.S256(newVerifier(t)),
+		"code_challenge_method": "S256"}); resp.StatusCode != http.StatusForbidden || body["error"] != codeReauthRequired {
+		t.Fatalf("a second link from the linked session: %d %v", resp.StatusCode, body)
 	}
 	if got := fx.count(t, "audit_log"); got != audits+1 {
 		t.Fatalf("a link wrote %d audit rows, want 1", got-audits)
@@ -188,6 +195,14 @@ func linkNeedsTheVerifier(t *testing.T, fx *otpFixture) {
 	}
 	if resp := get(t, fx.srv.URL+oauthProject+"/callback/github?state="+url.QueryEscape(ticket)); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("a ticket presented as a state: %d", resp.StatusCode)
+	}
+	fresh, _ := fx.startLink(t, accessTokenOf(owner), "github")
+	forged := newBrowser()
+	callback, _ := url.Parse(fx.srv.URL + oauthProject + "/callback/github")
+	state := "link|" + fresh
+	forged.Jar.SetCookies(callback, []*http.Cookie{{Name: stateCookieName(state), Value: state, Path: callback.Path}})
+	if resp := getWith(t, forged, callback.String()+"?code=x&state="+url.QueryEscape(state)); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a ticket forged into a state with its cookie: %d", resp.StatusCode)
 	}
 	if fresh := fx.signIn(t, "github", github); userIDOf(fresh) == userIDOf(owner) {
 		t.Fatal("the identity reached the account without its link being redeemed")
@@ -243,9 +258,13 @@ func linkUnprovenAccount(t *testing.T, fx *otpFixture) {
 	address := person("link-unproven").Email
 	session := tokenResponse(t, postJSON(fx.srv, oauthProject+"/register", map[string]string{
 		"email": address, "password": oauthPassword, "fullName": "Unproven"}), "register")
-	resp, body := fx.link(t, accessTokenOf(session), "github", person("link-unproven-gh"))
-	if resp.StatusCode != http.StatusForbidden || body["error"] != codeEmailUnverified {
-		t.Fatalf("link to an unproven account: %d %v", resp.StatusCode, body)
+	for _, path := range []string{"/authorize", "/email"} {
+		resp, body := fx.call(http.MethodPost, identitiesPath+path, accessTokenOf(session), map[string]string{
+			"provider": "github", "email": mailbox("unproven"), "type": "email", "redirect_to": appCallback,
+			"code_challenge": oauth.S256(newVerifier(t)), "code_challenge_method": "S256"})
+		if resp.StatusCode != http.StatusForbidden || body["error"] != codeEmailUnverified {
+			t.Fatalf("%s for an unproven account: %d %v", path, resp.StatusCode, body)
+		}
 	}
 }
 
@@ -259,10 +278,7 @@ func linkAddressByCode(t *testing.T, fx *otpFixture) {
 	if resp.StatusCode != http.StatusOK || body["message"] != otpSentMessage {
 		t.Fatalf("address link: %d %v", resp.StatusCode, body)
 	}
-	if fx.sender.last(t).To != address {
-		t.Fatalf("the code went to %s", fx.sender.last(t).To)
-	}
-	resp, linked := fx.verifyCode(address, fx.lastCode(t), verifier)
+	resp, linked := fx.verifyCode(address, fx.linkCode(t, address), verifier)
 	if resp.StatusCode != http.StatusOK || userIDOf(linked) != userIDOf(owner) {
 		t.Fatalf("verify the address: %d %v", resp.StatusCode, linked)
 	}
@@ -278,7 +294,7 @@ func linkAddressByCode(t *testing.T, fx *otpFixture) {
 	otpWait(t, nil)
 	fx.call(http.MethodPost, identitiesPath+"/email", accessTokenOf(other), map[string]string{
 		"email": address, "type": "email", "code_challenge": oauth.S256(verifier), "code_challenge_method": "S256"})
-	if resp, body := fx.verifyCode(address, fx.lastCode(t), verifier); resp.StatusCode != http.StatusConflict || body["error"] != "identity_already_exists" {
+	if resp, body := fx.verifyCode(address, fx.linkCode(t, address), verifier); resp.StatusCode != http.StatusConflict || body["error"] != "identity_already_exists" {
 		t.Fatalf("an address linked elsewhere: %d %v", resp.StatusCode, body)
 	}
 }
@@ -393,5 +409,40 @@ func linkDisabledMidway(t *testing.T, fx *otpFixture) {
 	fx.disable(t, user.Email)
 	if resp, body := fx.exchange(landed.Query().Get("code"), verifier); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("link to a disabled account: %d %v", resp.StatusCode, body)
+	}
+}
+
+// linkCode is the code of the address-link mail, which says it adds an address.
+func (fx *otpFixture) linkCode(t *testing.T, address string) string {
+	t.Helper()
+	msg := fx.sender.last(t)
+	if msg.Template != email.TemplateLinkEmailOTP || msg.To != address {
+		t.Fatalf("mail = %s to %s", msg.Template, msg.To)
+	}
+	return msg.Data["code"]
+}
+
+func linkAddressRefusals(t *testing.T, fx *otpFixture) {
+	owner := accessTokenOf(fx.signIn(t, "google", person("link-mail-refusals")))
+	resp, body := fx.call(http.MethodPost, identitiesPath+"/email", owner, map[string]string{
+		"email": "\u212Aate@otp.test", "type": "email", "code_challenge": oauth.S256(newVerifier(t)), "code_challenge_method": "S256"})
+	if resp.StatusCode != http.StatusBadRequest || body["error"] != codeInvalidEmail {
+		t.Fatalf("a non-ASCII address: %d %v", resp.StatusCode, body)
+	}
+	squatted := mailbox("link-squatted")
+	tokenResponse(t, postJSON(fx.srv, oauthProject+"/register", map[string]string{
+		"email": squatted, "password": oauthPassword, "fullName": "Squatter"}), "register")
+	audits := fx.count(t, "audit_log")
+	verifier := newVerifier(t)
+	fx.call(http.MethodPost, identitiesPath+"/email", owner, map[string]string{
+		"email": squatted, "type": "email", "code_challenge": oauth.S256(verifier), "code_challenge_method": "S256"})
+	if resp, body := fx.verifyCode(squatted, fx.linkCode(t, squatted), verifier); resp.StatusCode != http.StatusOK {
+		t.Fatalf("link over a squatter: %d %v", resp.StatusCode, body)
+	}
+	if got := fx.count(t, "audit_log"); got != audits+2 {
+		t.Fatalf("a link that replaced an account wrote %d audit rows, want 2", got-audits)
+	}
+	if resp := postJSON(fx.srv, oauthProject+"/login", map[string]string{"email": squatted, "password": oauthPassword}); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("the squatter still signs in: %d", resp.StatusCode)
 	}
 }

@@ -7,11 +7,12 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/excalibase/auth/internal/auth"
 	"github.com/excalibase/auth/internal/domain"
+	"github.com/excalibase/auth/internal/email"
 	"github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/oauth"
 	"github.com/excalibase/auth/internal/pool"
@@ -136,7 +137,7 @@ func (h *AuthHandler) ListIdentities(w http.ResponseWriter, r *http.Request) {
 		listed = append(listed, domain.Identity{ID: identity.ID, Provider: identity.Provider, Email: identity.Email,
 			CreatedAt: identity.CreatedAt, LastSignInAt: identity.LastSignInAt})
 	}
-	writeJSON(w, domain.IdentitiesResponse{Identities: listed, HasPassword: account.PasswordHash != ""})
+	writeJSON(w, domain.IdentitiesResponse{Identities: listed, HasPassword: store.HasUsablePassword(account.PasswordHash)})
 }
 
 // StartProviderLink hands the app a short-lived ticket for /authorize, where
@@ -170,7 +171,7 @@ func (h *AuthHandler) StartProviderLink(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	db, ok := h.storeFor(w, r)
-	if !ok {
+	if !ok || !linkable(w, r, db, claims.UserID) {
 		return
 	}
 	ticket, _, err := token.New()
@@ -188,8 +189,8 @@ func (h *AuthHandler) StartProviderLink(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, map[string]any{"linkTicket": ticket, "expiresIn": int(linkTicketTTL.Seconds())})
 }
 
-// linkTicketHash keeps tickets apart from states in flow_states: a ticket
-// presented as a state, or a state as a ticket, hashes to no row.
+// linkTicketHash is where a ticket is kept in flow_states. A state is
+// attacker input, so a ticket row is told apart by its empty provider verifier.
 func linkTicketHash(ticket string) string {
 	return token.Hash("link|" + ticket)
 }
@@ -207,7 +208,7 @@ func (h *AuthHandler) authorizeLink(w http.ResponseWriter, r *http.Request, tick
 		return
 	}
 	pending, err := db.ConsumeFlowState(r.Context(), linkTicketHash(ticket))
-	if err != nil || pending.LinkUserID == 0 {
+	if err != nil || pending.LinkUserID == 0 || pending.IDPCodeVerifier != "" {
 		httpError(w, errFlowInvalid.Error(), http.StatusBadRequest)
 		return
 	}
@@ -238,6 +239,10 @@ func (h *AuthHandler) StartAddressLink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !asciiOnly(req.Email) {
+		httpError(w, errInvalidEmail.Error(), http.StatusBadRequest)
+		return
+	}
 	redirectTo := ""
 	if req.Type == store.OTPMagicLink {
 		if redirectTo, ok = magicLinkTarget(w, req, info); !ok {
@@ -245,7 +250,7 @@ func (h *AuthHandler) StartAddressLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	db, ok := h.storeFor(w, r)
-	if !ok {
+	if !ok || !linkable(w, r, db, claims.UserID) {
 		return
 	}
 	projectID := projectKey(r)
@@ -254,13 +259,40 @@ func (h *AuthHandler) StartAddressLink(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	msg.Template = linkTemplates[msg.Template]
 	otp.LinkUserID, otp.Mailed, otp.IP = claims.UserID, true, otpSenderKey(h.clientIP(r))
 	h.saveAndMail(w, r, db, projectID, otp, msg)
 }
 
-func (h *AuthHandler) commitLink(ctx context.Context, db store.Store, projectID string, userID int64, claim store.IdentityClaim, clientIP string) (int, error) {
-	err := db.LinkIdentity(ctx, userID, claim)
+var linkTemplates = map[string]string{
+	email.TemplateMagicLink: email.TemplateLinkMagicLink,
+	email.TemplateEmailOTP:  email.TemplateLinkEmailOTP,
+}
+
+// asciiOnly keeps linked addresses to ones every engine and Go lower alike.
+func asciiOnly(address string) bool {
+	for i := 0; i < len(address); i++ {
+		if address[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// linkable answers for an account that may not take a link before anything is
+// saved or mailed for it.
+func linkable(w http.ResponseWriter, r *http.Request, db store.Store, userID int64) bool {
+	if status, err := linkFailure(db.LinkableAccount(r.Context(), userID)); err != nil {
+		httpError(w, err.Error(), status)
+		return false
+	}
+	return true
+}
+
+func linkFailure(err error) (int, error) {
 	switch {
+	case err == nil:
+		return http.StatusOK, nil
 	case errors.Is(err, store.ErrIdentityExists):
 		return http.StatusConflict, errors.New(codeIdentityExists)
 	case errors.Is(err, store.ErrAddressUnproven):
@@ -271,9 +303,21 @@ func (h *AuthHandler) commitLink(ctx context.Context, db store.Store, projectID 
 		return http.StatusBadRequest, errInvalidGrant
 	case errors.Is(err, store.ErrUnavailable):
 		return http.StatusServiceUnavailable, errProjectDBUnavailable
-	case err != nil:
-		log.Printf("auth.link.failed project=%s userId=%d provider=%s", safeLog(projectID), userID, claim.Provider)
+	default:
 		return http.StatusInternalServerError, errors.New("failed to link identity")
+	}
+}
+
+func (h *AuthHandler) commitLink(ctx context.Context, db store.Store, projectID string, userID int64, claim store.IdentityClaim, clientIP string) (int, error) {
+	replaced, err := db.LinkIdentity(ctx, userID, claim)
+	if status, failure := linkFailure(err); failure != nil {
+		if status == http.StatusInternalServerError {
+			log.Printf("auth.link.failed project=%s userId=%d provider=%s", safeLog(projectID), userID, claim.Provider)
+		}
+		return status, failure
+	}
+	for _, squatter := range replaced {
+		h.recordAudit(ctx, db, projectID, store.AuditEvent{UserID: squatter, Event: "takeover", Method: claim.Provider, IP: clientIP})
 	}
 	h.recordAudit(ctx, db, projectID, store.AuditEvent{UserID: userID, Event: "identity_linked", Method: claim.Provider, IP: clientIP})
 	return http.StatusOK, nil
@@ -283,12 +327,12 @@ func (h *AuthHandler) commitLink(ctx context.Context, db store.Store, projectID 
 // spent, and starts a session for the account it was linked to.
 func (h *AuthHandler) finishAddressLink(w http.ResponseWriter, r *http.Request, db store.Store, otp store.EmailOTP) {
 	projectID := projectKey(r)
-	claim := store.IdentityClaim{Provider: store.EmailProvider, Subject: strings.ToLower(otp.Email), Email: otp.Email}
+	claim := store.IdentityClaim{Provider: store.EmailProvider, Subject: store.AddressKey(otp.Email), Email: otp.Email}
 	if status, err := h.commitLink(r.Context(), db, projectID, otp.LinkUserID, claim, h.clientIP(r)); err != nil {
 		httpError(w, err.Error(), status)
 		return
 	}
-	resp, status, err := h.accountSession(r, db, projectID, otp.LinkUserID)
+	resp, status, err := h.accountSession(r, db, projectID, otp.LinkUserID, false)
 	if err != nil {
 		httpError(w, err.Error(), status)
 		return
@@ -296,8 +340,10 @@ func (h *AuthHandler) finishAddressLink(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, resp)
 }
 
-// accountSession starts a session for an account that just proved itself.
-func (h *AuthHandler) accountSession(r *http.Request, db store.Store, projectID string, userID int64) (*domain.AuthResponse, int, error) {
+// accountSession starts a session for an account that just proved itself. A
+// session after a link does not count as a sign-in, so one fresh sign-in
+// cannot be stretched by linking again and again.
+func (h *AuthHandler) accountSession(r *http.Request, db store.Store, projectID string, userID int64, signedIn bool) (*domain.AuthResponse, int, error) {
 	account, err := db.AccountByID(r.Context(), userID)
 	if err != nil {
 		return nil, http.StatusBadRequest, errInvalidGrant
@@ -311,7 +357,11 @@ func (h *AuthHandler) accountSession(r *http.Request, db store.Store, projectID 
 	}
 	_ = db.TouchLastLogin(r.Context(), account.ID)
 	user := domain.UserInfo{ID: account.ID, Email: account.Email, FullName: account.FullName}
-	resp, err := h.generateAuthResponse(r, projectID, user, roles, account.EmailVerified)
+	session := h.newRefreshSession()
+	if !signedIn {
+		session.AuthTime = time.Time{}
+	}
+	resp, err := h.startSession(r, projectID, user, roles, account.EmailVerified, session)
 	if err != nil {
 		return nil, http.StatusInternalServerError, errTokenGeneration
 	}

@@ -14,9 +14,14 @@ type querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.IdentityClaim) error {
-	return s.inTx(ctx, func(tx *sql.Tx) error {
-		if err := lockLinkTarget(ctx, tx, userID); err != nil {
+func (s *Store) LinkableAccount(ctx context.Context, userID int64) error {
+	return linkTarget(s.db.QueryRowContext(ctx, linkTargetQuery, userID))
+}
+
+func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.IdentityClaim) ([]int64, error) {
+	var deleted []int64
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := linkTarget(tx.QueryRowContext(ctx, linkTargetQuery+" FOR UPDATE", userID)); err != nil {
 			return err
 		}
 		var owner int64
@@ -29,7 +34,7 @@ func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.Iden
 			return err
 		}
 		if claim.Provider == store.EmailProvider {
-			if err := claimAddress(ctx, tx, userID, claim.Email); err != nil {
+			if deleted, err = claimAddress(ctx, tx, userID, claim.Email); err != nil {
 				return err
 			}
 		}
@@ -42,14 +47,18 @@ func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.Iden
 		}
 		return err
 	})
+	if err != nil {
+		return nil, err
+	}
+	return deleted, nil
 }
 
-// lockLinkTarget holds the account for the link; see pgstore.
-func lockLinkTarget(ctx context.Context, tx *sql.Tx, userID int64) error {
+const linkTargetQuery = "SELECT email_verified AND email_verified_at IS NOT NULL, enabled FROM users WHERE id = ?"
+
+// linkTarget reads whether the account may take a link; see pgstore.
+func linkTarget(row *sql.Row) error {
 	var proven, enabled bool
-	err := tx.QueryRowContext(ctx,
-		"SELECT email_verified AND email_verified_at IS NOT NULL, enabled FROM users WHERE id = ? FOR UPDATE",
-		userID).Scan(&proven, &enabled)
+	err := row.Scan(&proven, &enabled)
 	switch {
 	case err != nil:
 		return notFound(err)
@@ -63,12 +72,27 @@ func lockLinkTarget(ctx context.Context, tx *sql.Tx, userID int64) error {
 
 // claimAddress refuses an address held by the account, a proven or a
 // disabled account, and deletes the unproven ones; see pgstore.
-func claimAddress(ctx context.Context, tx *sql.Tx, userID int64, email string) error {
+func claimAddress(ctx context.Context, tx *sql.Tx, userID int64, email string) ([]int64, error) {
+	squatters, err := addressHolders(ctx, tx, userID, email)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range squatters {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM users WHERE id = ?", id); err != nil {
+			return nil, err
+		}
+	}
+	return squatters, nil
+}
+
+// addressHolders are the unproven accounts answering to the address; any
+// other holder is ErrIdentityExists.
+func addressHolders(ctx context.Context, tx *sql.Tx, userID int64, email string) ([]int64, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id, (email_verified AND email_verified_at IS NOT NULL) OR NOT enabled FROM users
 		 WHERE LOWER(email) = LOWER(?) FOR UPDATE`, email)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 	var squatters []int64
@@ -78,22 +102,14 @@ func claimAddress(ctx context.Context, tx *sql.Tx, userID int64, email string) e
 			held bool
 		)
 		if err := rows.Scan(&id, &held); err != nil {
-			return err
+			return nil, err
 		}
 		if id == userID || held {
-			return store.ErrIdentityExists
+			return nil, store.ErrIdentityExists
 		}
 		squatters = append(squatters, id)
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, id := range squatters {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM users WHERE id = ?", id); err != nil {
-			return err
-		}
-	}
-	return nil
+	return squatters, rows.Err()
 }
 
 func (s *Store) ListIdentities(ctx context.Context, userID int64) ([]store.Identity, error) {
@@ -129,7 +145,7 @@ func (s *Store) UnlinkIdentity(ctx context.Context, userID, identityID int64) (s
 	var removed store.Identity
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		var hasPassword bool
-		if err := tx.QueryRowContext(ctx, "SELECT password IS NOT NULL FROM users WHERE id = ? FOR UPDATE",
+		if err := tx.QueryRowContext(ctx, "SELECT password IS NOT NULL AND password NOT LIKE '!%' FROM users WHERE id = ? FOR UPDATE",
 			userID).Scan(&hasPassword); err != nil {
 			return notFound(err)
 		}

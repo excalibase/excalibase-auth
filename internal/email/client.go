@@ -28,6 +28,9 @@ const (
 	TemplatePasswordReset = "password_reset"
 	TemplateMagicLink     = "magic_link"
 	TemplateEmailOTP      = "email_otp"
+	// The address-link mails say they add the address to an account.
+	TemplateLinkMagicLink = "link_magic_link"
+	TemplateLinkEmailOTP  = "link_email_otp"
 )
 
 // sendPath is provisioning's PAT-authenticated transport endpoint.

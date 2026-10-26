@@ -28,6 +28,8 @@ type Fixture struct {
 	Grandfather func(t *testing.T, email string)
 	// Disable switches an account off, as an admin does.
 	Disable func(t *testing.T, email string)
+	// SetEmail changes an account's address straight in the database.
+	SetEmail func(t *testing.T, id int64, email string)
 }
 
 var sequence atomic.Int64
