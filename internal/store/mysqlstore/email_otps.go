@@ -54,13 +54,15 @@ func withinOTPLimits(ctx context.Context, tx *sql.Tx, otp store.EmailOTP, limits
 	return otp.Mailed && mailedToday.Int64 < int64(limits.PerProjectDay), nil
 }
 
-const liveOTPColumns = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
-	FROM email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW(6) AND `
-
+// The live sign-in lookups: an unspent, unexpired, mailed row.
 const (
-	liveLinkQuery = liveOTPColumns + "link_hash = ? AND kind = ? FOR UPDATE"
-	liveCodeQuery = liveOTPColumns + `LOWER(email) = LOWER(?) AND kind = ? AND attempts < ?
-		AND code_challenge = ? ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`
+	liveLinkQuery = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
+		FROM email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW(6)
+		AND link_hash = ? AND kind = ? FOR UPDATE`
+	liveCodeQuery = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
+		FROM email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW(6)
+		AND LOWER(email) = LOWER(?) AND kind = ? AND attempts < ? AND code_challenge = ?
+		ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`
 )
 
 func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, limits store.OTPAttempts, check func(store.EmailOTP) bool) (store.EmailOTP, error) {
