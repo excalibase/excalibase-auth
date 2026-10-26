@@ -40,3 +40,11 @@ func TestAddressKeyLowersOnlyASCIILetters(t *testing.T) {
 		}
 	}
 }
+
+func TestHasUsablePasswordRefusesNoHashAndMarkers(t *testing.T) {
+	for hash, want := range map[string]bool{"$argon2id$v=19$x": true, "": false, "!reset-required": false} {
+		if got := HasUsablePassword(hash); got != want {
+			t.Errorf("%q: %v, want %v", hash, got, want)
+		}
+	}
+}
