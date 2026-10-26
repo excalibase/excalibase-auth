@@ -74,7 +74,7 @@ func resolveIdentity(ctx context.Context, tx *sql.Tx, claim store.IdentityClaim,
 // accountForAddress finds the account a provider address reaches, refusing a
 // disabled one; see pgstore.
 func accountForAddress(ctx context.Context, tx *sql.Tx, email string) (int64, bool, error) {
-	if linked, ok, err := linkedAddress(ctx, tx, email); err != nil || ok {
+	if linked, ok, err := linkedAddress(ctx, tx, email, " FOR UPDATE"); err != nil || ok {
 		return linked.ID, linked.Verified, err
 	}
 	rows, err := tx.QueryContext(ctx,
@@ -103,11 +103,11 @@ func accountForAddress(ctx context.Context, tx *sql.Tx, email string) (int64, bo
 }
 
 // linkedAddress is the account an address was linked to; see pgstore.
-func linkedAddress(ctx context.Context, tx *sql.Tx, email string) (store.AddressMatch, bool, error) {
+func linkedAddress(ctx context.Context, tx *sql.Tx, email, lock string) (store.AddressMatch, bool, error) {
 	match := store.AddressMatch{Exact: true, Verified: true}
 	err := tx.QueryRowContext(ctx,
 		`SELECT u.id, u.enabled FROM identities i JOIN users u ON u.id = i.user_id
-		 WHERE i.provider = ? AND i.subject = ? FOR UPDATE`,
+		 WHERE i.provider = ? AND i.subject = ?`+lock,
 		store.EmailProvider, store.AddressKey(email)).Scan(&match.ID, &match.Enabled)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):

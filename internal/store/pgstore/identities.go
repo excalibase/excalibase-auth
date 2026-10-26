@@ -71,7 +71,7 @@ func resolveIdentity(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim, 
 // address, else the only one matching it whatever its case. A disabled one is
 // refused, so it is neither signed in to nor taken over.
 func accountForAddress(ctx context.Context, tx pgx.Tx, email string) (int64, bool, error) {
-	if linked, ok, err := linkedAddress(ctx, tx, email); err != nil || ok {
+	if linked, ok, err := linkedAddress(ctx, tx, email, " FOR UPDATE"); err != nil || ok {
 		return linked.ID, linked.Verified, err
 	}
 	rows, err := tx.Query(ctx,
@@ -92,11 +92,11 @@ func accountForAddress(ctx context.Context, tx pgx.Tx, email string) (int64, boo
 }
 
 // linkedAddress is the account an address was linked to; it was proven then.
-func linkedAddress(ctx context.Context, tx pgx.Tx, email string) (store.AddressMatch, bool, error) {
+func linkedAddress(ctx context.Context, tx pgx.Tx, email, lock string) (store.AddressMatch, bool, error) {
 	match := store.AddressMatch{Exact: true, Verified: true}
 	err := tx.QueryRow(ctx,
 		`SELECT u.id, u.enabled FROM auth.identities i JOIN auth.users u ON u.id = i.user_id
-		 WHERE i.provider = $1 AND i.subject = $2 FOR UPDATE`,
+		 WHERE i.provider = $1 AND i.subject = $2`+lock,
 		store.EmailProvider, store.AddressKey(email)).Scan(&match.ID, &match.Enabled)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):

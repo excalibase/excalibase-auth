@@ -281,7 +281,7 @@ func (s *Store) RevokeUserRefreshTokens(ctx context.Context, userID int64) error
 		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false",
 		"DELETE FROM auth.flow_states WHERE link_user_id = $1",
 		"DELETE FROM auth.auth_codes WHERE user_id = $1 AND link_provider IS NOT NULL",
-		"DELETE FROM auth.email_otps WHERE link_user_id = $1",
+		"UPDATE auth.email_otps SET consumed_at = NOW() WHERE link_user_id = $1 AND consumed_at IS NULL",
 	} {
 		if _, err := tx.Exec(ctx, statement, userID); err != nil {
 			return err

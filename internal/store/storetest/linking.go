@@ -182,11 +182,16 @@ func addressLinksPerAccount(t *testing.T, db store.Store) {
 	limits := roomyLimits
 	limits.LinksPerAccountDay = 2
 	for i := 0; i < 3; i++ {
+		if i == 2 {
+			if err := db.RevokeUserRefreshTokens(context.Background(), id); err != nil {
+				t.Fatal(err)
+			}
+		}
 		otp := codeOTP(t, uniqueEmail("link-budget"))
 		otp.LinkUserID = id
 		_, err := db.SaveEmailOTP(context.Background(), otp, limits)
 		if want := i == 2; errors.Is(err, store.ErrRateLimited) != want {
-			t.Fatalf("send %d: %v", i, err)
+			t.Fatalf("send %d (ending the sessions must not reset the budget): %v", i, err)
 		}
 	}
 }

@@ -186,7 +186,7 @@ func (s *Store) linkedAccount(ctx context.Context, email string) (store.Account,
 		return store.Account{}, false, fmt.Errorf("%w: %w", store.ErrUnavailable, err)
 	}
 	defer tx.Rollback(ctx)
-	match, ok, err := linkedAddress(ctx, tx, email)
+	match, ok, err := linkedAddress(ctx, tx, email, "")
 	if !ok || err != nil {
 		return store.Account{}, ok, err
 	}
