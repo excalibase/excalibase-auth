@@ -38,6 +38,16 @@ var ErrAccountDisabled = errors.New("account is disabled")
 // ErrRateLimited means a send would pass the address's or the project's budget.
 var ErrRateLimited = errors.New("too many codes sent")
 
+// ErrIdentityExists means the identity, or the address, already belongs to an account.
+var ErrIdentityExists = errors.New("identity already exists")
+
+// ErrAddressUnproven means the account's own address was never proven, so
+// nothing may be linked to it.
+var ErrAddressUnproven = errors.New("account address is not proven")
+
+// ErrLastSignInMethod means an unlink would leave the account no way to sign in.
+var ErrLastSignInMethod = errors.New("last sign-in method")
+
 // TokenKind names one of the single-use link tables.
 type TokenKind int
 
@@ -63,6 +73,8 @@ type Account struct {
 type RefreshSession struct {
 	FamilyID uuid.UUID
 	Expiry   time.Time
+	// AuthTime is when the owner signed in; zero for sessions older than it.
+	AuthTime time.Time
 }
 
 // RefreshState is what a presented refresh token's row says about it.
@@ -106,12 +118,25 @@ type RoleChange struct {
 	Actor   string
 }
 
+// EmailProvider names an address linked to an account; its subject is the
+// address in lower case.
+const EmailProvider = "email"
+
 // IdentityClaim is a provider account whose email address the provider verified.
 type IdentityClaim struct {
 	Provider string
 	Subject  string
 	Email    string
 	FullName string
+}
+
+// Identity is one way an account signs in besides its own address.
+type Identity struct {
+	ID           int64
+	Provider     string
+	Email        string
+	CreatedAt    time.Time
+	LastSignInAt *time.Time
 }
 
 // AddressMatch is an account whose address equals a provider's, ignoring case.
@@ -158,7 +183,9 @@ type FlowState struct {
 	Nonce               string
 	ClientCodeChallenge string
 	RedirectTo          string
-	ExpiresAt           time.Time
+	// LinkUserID is the signed-in account a linking flow adds the identity to.
+	LinkUserID int64
+	ExpiresAt  time.Time
 }
 
 // AuthCode is the single-use code a sign-in hands back to the app, redeemed
@@ -167,7 +194,9 @@ type AuthCode struct {
 	CodeHash      string
 	UserID        int64
 	CodeChallenge string
-	ExpiresAt     time.Time
+	// Link is the identity the redemption links to UserID; empty for a sign-in.
+	Link      IdentityClaim
+	ExpiresAt time.Time
 }
 
 // Kinds of emailed sign-in secret.
@@ -192,6 +221,8 @@ type EmailOTP struct {
 	IP        string
 	Attempts  int
 	ExpiresAt time.Time
+	// LinkUserID is the signed-in account the address is linked to once proven.
+	LinkUserID int64
 }
 
 // OTPLimits are the send budgets, counted from the rows themselves so every
@@ -291,6 +322,16 @@ type Store interface {
 	// AccountByAddress is the account an address reaches, whatever its case.
 	AccountByAddress(ctx context.Context, email string) (Account, error)
 	RecordAudit(ctx context.Context, event AuditEvent) error
+
+	// LinkIdentity adds an identity to an enabled account whose own address is
+	// proven. ErrIdentityExists when any account holds the identity, or, for an
+	// address, when another proven account answers to it; an unproven one
+	// answering to it is deleted.
+	LinkIdentity(ctx context.Context, userID int64, claim IdentityClaim) error
+	ListIdentities(ctx context.Context, userID int64) ([]Identity, error)
+	// UnlinkIdentity removes one of the account's identities unless no other
+	// identity nor a password would be left: ErrLastSignInMethod.
+	UnlinkIdentity(ctx context.Context, userID, identityID int64) (Identity, error)
 
 	CreateAPIKey(ctx context.Context, hash, prefix, keyType, name string) (int64, time.Time, error)
 	ListAPIKeys(ctx context.Context) ([]APIKeyListing, error)

@@ -311,3 +311,55 @@ func TestMigrate_EmailSignInTablesComeAndGo(t *testing.T) {
 		}
 	}
 }
+
+func columnExists(t *testing.T, connStr, table, column string) bool {
+	t.Helper()
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, connStr)
+	if err != nil {
+		t.Fatalf("connect for column check: %v", err)
+	}
+	defer pool.Close()
+	var exists bool
+	if err := pool.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = 'auth' AND table_name = $1 AND column_name = $2)",
+		table, column).Scan(&exists); err != nil {
+		t.Fatalf("query column existence: %v", err)
+	}
+	return exists
+}
+
+func TestMigrate_IdentityLinkingColumnsComeAndGo(t *testing.T) {
+	connStr, cleanup := setupTestDB(t)
+	defer cleanup()
+	if err := Run(context.Background(), poolFor(t, connStr)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	columns := map[string][]string{
+		"refresh_tokens": {"last_auth_at"},
+		"auth_codes":     {"link_provider", "link_subject", "link_email"},
+		"email_otps":     {"link_user_id"},
+	}
+	for table, names := range columns {
+		for _, column := range names {
+			if !columnExists(t, connStr, table, column) {
+				t.Errorf("auth.%s.%s missing after migration", table, column)
+			}
+		}
+	}
+	m, err := newMigrate(poolFor(t, connStr))
+	if err != nil {
+		t.Fatalf("newMigrate: %v", err)
+	}
+	defer m.Close()
+	if err := m.Migrate(10); err != nil {
+		t.Fatalf("migrate down to 10: %v", err)
+	}
+	for table, names := range columns {
+		for _, column := range names {
+			if columnExists(t, connStr, table, column) {
+				t.Errorf("auth.%s.%s left after the down migration", table, column)
+			}
+		}
+	}
+}

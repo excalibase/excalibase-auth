@@ -190,11 +190,19 @@ func (s *Store) ApplyRoleChange(ctx context.Context, change store.RoleChange) (d
 
 func (s *Store) InsertRefreshToken(ctx context.Context, hash string, userID int64, session store.RefreshSession) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, created_at, revoked)
-		 VALUES ($1, $2, $3, $4, NOW(), false)`,
-		hash, session.FamilyID, userID, session.Expiry,
+		`INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, created_at, revoked)
+		 VALUES ($1, $2, $3, $4, $5, NOW(), false)`,
+		hash, session.FamilyID, userID, session.Expiry, authTime(session),
 	)
 	return err
+}
+
+// authTime is the session's sign-in time, NULL when it predates the column.
+func authTime(session store.RefreshSession) *time.Time {
+	if session.AuthTime.IsZero() {
+		return nil
+	}
+	return &session.AuthTime
 }
 
 // RotateRefreshToken revokes the live token in one statement, so of two
@@ -207,16 +215,20 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 	defer tx.Rollback(ctx)
 
 	var (
-		userID  int64
-		session store.RefreshSession
+		userID   int64
+		session  store.RefreshSession
+		signedIn *time.Time
 	)
 	if err := tx.QueryRow(ctx,
 		`UPDATE auth.refresh_tokens SET revoked = true
 		 WHERE token_hash = $1 AND revoked = false AND expiry_date > NOW()
-		 RETURNING user_id, family_id, expiry_date`,
+		 RETURNING user_id, family_id, expiry_date, last_auth_at`,
 		presented,
-	).Scan(&userID, &session.FamilyID, &session.Expiry); err != nil {
+	).Scan(&userID, &session.FamilyID, &session.Expiry, &signedIn); err != nil {
 		return store.Account{}, store.RefreshSession{}, notFound(err)
+	}
+	if signedIn != nil {
+		session.AuthTime = *signedIn
 	}
 	var account store.Account
 	if err := tx.QueryRow(ctx,
@@ -228,9 +240,9 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 		return store.Account{}, store.RefreshSession{}, err
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, created_at, revoked)
-		 VALUES ($1, $2, $3, $4, NOW(), false)`,
-		successor, session.FamilyID, userID, session.Expiry,
+		`INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, created_at, revoked)
+		 VALUES ($1, $2, $3, $4, $5, NOW(), false)`,
+		successor, session.FamilyID, userID, session.Expiry, signedIn,
 	); err != nil {
 		return store.Account{}, store.RefreshSession{}, err
 	}

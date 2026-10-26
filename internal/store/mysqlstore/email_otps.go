@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 
 	"github.com/excalibase/auth/internal/store"
 )
@@ -27,9 +28,9 @@ func (s *Store) SaveEmailOTP(ctx context.Context, otp store.EmailOTP, limits sto
 			return err
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO email_otps (email, kind, link_hash, code_hmac, code_challenge, create_user, mailed, ip, expires_at)
-			 VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?)`,
-			otp.Email, otp.Kind, otp.LinkHash, otp.CodeHMAC, otp.CodeChallenge, otp.CreateUser, mailed, otp.IP, otp.ExpiresAt.UTC())
+			`INSERT INTO email_otps (email, kind, link_hash, code_hmac, code_challenge, create_user, mailed, ip, expires_at, link_user_id)
+			 VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, 0))`,
+			otp.Email, otp.Kind, otp.LinkHash, otp.CodeHMAC, otp.CodeChallenge, otp.CreateUser, mailed, otp.IP, otp.ExpiresAt.UTC(), otp.LinkUserID)
 		return err
 	})
 	return mailed, err
@@ -56,10 +57,12 @@ func withinOTPLimits(ctx context.Context, tx *sql.Tx, otp store.EmailOTP, limits
 
 // The live sign-in lookups: an unspent, unexpired, mailed row.
 const (
-	liveLinkQuery = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
+	liveLinkQuery = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at,
+		COALESCE(link_user_id, 0)
 		FROM email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW(6)
 		AND link_hash = ? AND kind = ? FOR UPDATE`
-	liveCodeQuery = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
+	liveCodeQuery = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at,
+		COALESCE(link_user_id, 0)
 		FROM email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW(6)
 		AND LOWER(email) = LOWER(?) AND kind = ? AND attempts < ? AND code_challenge = ?
 		ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`
@@ -79,7 +82,7 @@ func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, limi
 		}
 		var id int64
 		if err := row.Scan(&id, &otp.Email, &otp.Kind, &otp.LinkHash, &otp.CodeHMAC, &otp.CodeChallenge,
-			&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt); err != nil {
+			&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt, &otp.LinkUserID); err != nil {
 			return notFound(err)
 		}
 		accepted = check(otp)
@@ -136,6 +139,12 @@ func (s *Store) SignInWithEmail(ctx context.Context, email, fullName string, all
 }
 
 func (s *Store) AccountByAddress(ctx context.Context, email string) (store.Account, error) {
+	linked, err := scanAccount(s.db.QueryRowContext(ctx, "SELECT "+accountColumns+` FROM users
+		WHERE id = (SELECT user_id FROM identities WHERE provider = ? AND subject = ?)`,
+		store.EmailProvider, strings.ToLower(email)))
+	if !errors.Is(err, store.ErrNotFound) {
+		return linked, err
+	}
 	rows, err := s.db.QueryContext(ctx, "SELECT "+accountColumns+`, email = ? FROM users
 		WHERE LOWER(email) = LOWER(?) ORDER BY email = ? DESC, id LIMIT 2`, email, email, email)
 	if err != nil {

@@ -369,3 +369,20 @@ func TestVerify_ReadsUserAdminActor(t *testing.T) {
 		t.Errorf("actor %q token_use %q", claims.Actor, claims.TokenUse)
 	}
 }
+
+func TestSignVerify_AuthTimeRoundTripsAndIsOmittedWhenUnknown(t *testing.T) {
+	svc, _ := NewJWTService(testKeyPEM(t), "excalibase", 3600)
+	signedIn := time.Now().Add(-time.Minute).Unix()
+	withTime, _ := svc.Sign(Claims{ProjectID: "p", UserID: 9, AuthTime: signedIn})
+	if got := parseUnverified(t, withTime)["auth_time"]; got != float64(signedIn) {
+		t.Errorf("auth_time: got %v, want %d", got, signedIn)
+	}
+	claims, err := svc.Verify(withTime)
+	if err != nil || claims.AuthTime != signedIn {
+		t.Fatalf("verified auth time = %v %v", claims, err)
+	}
+	withoutTime, _ := svc.Sign(Claims{ProjectID: "p", UserID: 9})
+	if _, present := parseUnverified(t, withoutTime)["auth_time"]; present {
+		t.Error("auth_time must be omitted when unknown")
+	}
+}

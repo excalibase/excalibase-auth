@@ -97,6 +97,9 @@ type Claims struct {
 	EmailVerified bool `json:"email_verified"`
 	// Actor is the platform user a user-admin token acts for.
 	Actor string `json:"actor,omitempty"`
+	// AuthTime is when the end user signed in (unix seconds), kept across
+	// refreshes; zero when unknown.
+	AuthTime int64 `json:"auth_time,omitempty"`
 	// IssuedAt and ExpiresAt are read back by Verify (unix seconds).
 	IssuedAt  int64 `json:"-"`
 	ExpiresAt int64 `json:"-"`
@@ -178,6 +181,9 @@ func (s *JWTService) Sign(claims Claims) (string, error) {
 	}
 	if claims.KeyID != 0 {
 		mc["keyId"] = claims.KeyID
+	}
+	if claims.AuthTime != 0 {
+		mc["auth_time"] = claims.AuthTime
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodES256, mc).SignedString(s.privateKey)
 }
@@ -304,7 +310,9 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	actor, _ := mapClaims["actor"].(string)
 	issuedAt, _ := mapClaims["iat"].(float64)
 	expiresAt, _ := mapClaims["exp"].(float64)
+	authTime, _ := mapClaims["auth_time"].(float64)
 	return &Claims{
+		AuthTime:      int64(authTime),
 		IssuedAt:      int64(issuedAt),
 		ExpiresAt:     int64(expiresAt),
 		Audience:      audienceClaim(mapClaims["aud"]),

@@ -72,6 +72,7 @@ func Run(t *testing.T, fx Fixture) {
 	t.Run("sign-in flows", func(t *testing.T) { runSignInFlows(t, fx) })
 	t.Run("email codes", func(t *testing.T) { runEmailOTPs(t, fx) })
 	t.Run("email sign-in", func(t *testing.T) { runEmailSignIn(t, fx) })
+	t.Run("identity linking", func(t *testing.T) { runLinking(t, fx) })
 }
 
 func runUsers(t *testing.T, fx Fixture) {

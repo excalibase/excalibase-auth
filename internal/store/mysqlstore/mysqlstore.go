@@ -318,12 +318,20 @@ func (s *Store) ApplyRoleChange(ctx context.Context, change store.RoleChange) (d
 	return after, nil
 }
 
-const insertRefreshToken = `INSERT INTO refresh_tokens (token_hash, family_id, user_id, expiry_date, created_at, revoked)
-	VALUES (?, ?, ?, ?, NOW(6), FALSE)`
+const insertRefreshToken = `INSERT INTO refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, created_at, revoked)
+	VALUES (?, ?, ?, ?, ?, NOW(6), FALSE)`
 
 func (s *Store) InsertRefreshToken(ctx context.Context, hash string, userID int64, session store.RefreshSession) error {
-	_, err := s.db.ExecContext(ctx, insertRefreshToken, hash, session.FamilyID.String(), userID, session.Expiry)
+	_, err := s.db.ExecContext(ctx, insertRefreshToken, hash, session.FamilyID.String(), userID, session.Expiry, authTime(session))
 	return err
+}
+
+// authTime is the session's sign-in time, NULL when it predates the column.
+func authTime(session store.RefreshSession) any {
+	if session.AuthTime.IsZero() {
+		return nil
+	}
+	return session.AuthTime.UTC()
 }
 
 // RotateRefreshToken locks the live row before revoking it: a concurrent
@@ -335,16 +343,18 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 	)
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		var (
-			userID int64
-			family string
+			userID   int64
+			family   string
+			signedIn sql.NullTime
 		)
 		if err := tx.QueryRowContext(ctx,
-			`SELECT user_id, family_id, expiry_date FROM refresh_tokens
+			`SELECT user_id, family_id, expiry_date, last_auth_at FROM refresh_tokens
 			 WHERE token_hash = ? AND revoked = FALSE AND expiry_date > NOW(6) FOR UPDATE`,
 			presented,
-		).Scan(&userID, &family, &session.Expiry); err != nil {
+		).Scan(&userID, &family, &session.Expiry, &signedIn); err != nil {
 			return notFound(err)
 		}
+		session.AuthTime = signedIn.Time
 		familyID, err := uuid.Parse(family)
 		if err != nil {
 			return err
@@ -364,7 +374,7 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 		if err := accept(account); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, insertRefreshToken, successor, session.FamilyID.String(), userID, session.Expiry)
+		_, err = tx.ExecContext(ctx, insertRefreshToken, successor, session.FamilyID.String(), userID, session.Expiry, authTime(session))
 		return err
 	})
 	if err != nil {

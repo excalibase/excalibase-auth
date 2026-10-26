@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/excalibase/auth/internal/store"
 	"github.com/jackc/pgx/v5"
@@ -33,9 +34,9 @@ func (s *Store) SaveEmailOTP(ctx context.Context, otp store.EmailOTP, limits sto
 		return false, err
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO auth.email_otps (email, kind, link_hash, code_hmac, code_challenge, create_user, mailed, ip, expires_at)
-		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, NULLIF($8, ''), $9)`,
-		otp.Email, otp.Kind, otp.LinkHash, otp.CodeHMAC, otp.CodeChallenge, otp.CreateUser, mailed, otp.IP, otp.ExpiresAt); err != nil {
+		`INSERT INTO auth.email_otps (email, kind, link_hash, code_hmac, code_challenge, create_user, mailed, ip, expires_at, link_user_id)
+		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, NULLIF($8, ''), $9, NULLIF($10, 0))`,
+		otp.Email, otp.Kind, otp.LinkHash, otp.CodeHMAC, otp.CodeChallenge, otp.CreateUser, mailed, otp.IP, otp.ExpiresAt, otp.LinkUserID); err != nil {
 		return false, err
 	}
 	return mailed, tx.Commit(ctx)
@@ -60,7 +61,8 @@ func withinOTPLimits(ctx context.Context, tx pgx.Tx, otp store.EmailOTP, limits 
 	return otp.Mailed && mailedToday < limits.PerProjectDay, nil
 }
 
-const liveOTPColumns = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
+const liveOTPColumns = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at,
+	COALESCE(link_user_id, 0)
 	FROM auth.email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW() AND `
 
 const (
@@ -87,7 +89,7 @@ func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, limi
 		row = tx.QueryRow(ctx, liveCodeQuery, lookup.Email, store.OTPEmailCode, limits.PerCode, lookup.CodeChallenge)
 	}
 	if err := row.Scan(&id, &otp.Email, &otp.Kind, &otp.LinkHash, &otp.CodeHMAC, &otp.CodeChallenge,
-		&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt); err != nil {
+		&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt, &otp.LinkUserID); err != nil {
 		return store.EmailOTP{}, notFound(err)
 	}
 	accepted := check(otp)
@@ -144,6 +146,12 @@ func (s *Store) SignInWithEmail(ctx context.Context, email, fullName string, all
 }
 
 func (s *Store) AccountByAddress(ctx context.Context, email string) (store.Account, error) {
+	linked, err := scanAccount(s.pool.QueryRow(ctx, "SELECT "+accountColumns+` FROM auth.users
+		WHERE id = (SELECT user_id FROM auth.identities WHERE provider = $1 AND subject = $2)`,
+		store.EmailProvider, strings.ToLower(email)))
+	if !errors.Is(err, store.ErrNotFound) {
+		return linked, err
+	}
 	rows, err := s.pool.Query(ctx, "SELECT "+accountColumns+`, email = $1 FROM auth.users
 		WHERE lower(email) = lower($1) ORDER BY email = $1 DESC, id LIMIT 2`, email)
 	if err != nil {
