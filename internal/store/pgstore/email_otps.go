@@ -60,6 +60,15 @@ func withinOTPLimits(ctx context.Context, tx pgx.Tx, otp store.EmailOTP, limits 
 	return otp.Mailed && mailedToday < limits.PerProjectDay, nil
 }
 
+const liveOTPColumns = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
+	FROM auth.email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW() AND `
+
+const (
+	liveLinkQuery = liveOTPColumns + "link_hash = $1 AND kind = $2 FOR UPDATE"
+	liveCodeQuery = liveOTPColumns + `lower(email) = lower($1) AND kind = $2 AND attempts < $3
+		AND code_challenge = $4 ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`
+)
+
 func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, limits store.OTPAttempts, check func(store.EmailOTP) bool) (store.EmailOTP, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -71,15 +80,11 @@ func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, limi
 		id  int64
 		otp store.EmailOTP
 	)
-	const columns = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
-		FROM auth.email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW() AND `
 	var row pgx.Row
 	if lookup.LinkHash != "" {
-		row = tx.QueryRow(ctx, columns+"link_hash = $1 AND kind = $2 FOR UPDATE", lookup.LinkHash, store.OTPMagicLink)
+		row = tx.QueryRow(ctx, liveLinkQuery, lookup.LinkHash, store.OTPMagicLink)
 	} else {
-		row = tx.QueryRow(ctx, columns+`lower(email) = lower($1) AND kind = $2 AND attempts < $3
-			AND code_challenge = $4 ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`,
-			lookup.Email, store.OTPEmailCode, limits.PerCode, lookup.CodeChallenge)
+		row = tx.QueryRow(ctx, liveCodeQuery, lookup.Email, store.OTPEmailCode, limits.PerCode, lookup.CodeChallenge)
 	}
 	if err := row.Scan(&id, &otp.Email, &otp.Kind, &otp.LinkHash, &otp.CodeHMAC, &otp.CodeChallenge,
 		&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt); err != nil {
