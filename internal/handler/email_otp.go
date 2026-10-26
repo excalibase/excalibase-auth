@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/mail"
 	"strconv"
@@ -135,7 +136,7 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	otp.Mailed = h.mayMail(r.Context(), db, req.Email, createUser && info.NewUsersAllowed())
-	otp.IP = h.clientIP(r)
+	otp.IP = otpSenderKey(h.clientIP(r))
 	mailed, err := db.SaveEmailOTP(r.Context(), otp, h.otpLimits)
 	switch {
 	case errors.Is(err, store.ErrRateLimited):
@@ -346,6 +347,21 @@ func (h *AuthHandler) audit(ctx context.Context, db store.Store, projectID strin
 	event.Event = name
 	if err := db.RecordAudit(ctx, event); err != nil {
 		log.Printf("auth.audit.write_failed project=%s event=%s", safeLog(projectID), name)
+	}
+}
+
+// otpSenderKey is the client a send budget is kept for: an IPv4 address, or
+// an IPv6 /64, which one subscriber usually holds whole.
+func otpSenderKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	switch {
+	case parsed == nil:
+		return ip
+	case parsed.To4() != nil:
+		return parsed.To4().String()
+	default:
+		prefix := net.CIDRMask(64, 128)
+		return (&net.IPNet{IP: parsed.Mask(prefix), Mask: prefix}).String()
 	}
 }
 

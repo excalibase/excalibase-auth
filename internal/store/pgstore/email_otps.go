@@ -29,7 +29,7 @@ func (s *Store) SaveEmailOTP(ctx context.Context, otp store.EmailOTP, limits sto
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE auth.email_otps SET consumed_at = NOW()
-		 WHERE lower(email) = lower($1) AND code_challenge = $2 AND consumed_at IS NULL`, otp.Email, otp.CodeChallenge); err != nil {
+		 WHERE $3 AND lower(email) = lower($1) AND code_challenge = $2 AND consumed_at IS NULL`, otp.Email, otp.CodeChallenge, mailed); err != nil {
 		return false, err
 	}
 	if _, err := tx.Exec(ctx,
@@ -72,7 +72,7 @@ func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, limi
 		otp store.EmailOTP
 	)
 	const columns = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
-		FROM auth.email_otps WHERE consumed_at IS NULL AND expires_at > NOW() AND `
+		FROM auth.email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW() AND `
 	var row pgx.Row
 	if lookup.LinkHash != "" {
 		row = tx.QueryRow(ctx, columns+"link_hash = $1 AND kind = $2 FOR UPDATE", lookup.LinkHash, store.OTPMagicLink)

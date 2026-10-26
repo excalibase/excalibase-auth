@@ -232,6 +232,19 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 		}
 	})
 
+	t.Run("a send held back by the project's budget leaves the earlier code live", func(t *testing.T) {
+		email := uniqueEmail("otp-held")
+		first := codeOTP(t, email)
+		save(t, db, first)
+		held := codeOTP(t, email)
+		held.Mailed = false
+		save(t, db, held)
+		got, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email, CodeChallenge: "challenge"}, perCode(5), accept)
+		if err != nil || got.CodeHMAC != first.CodeHMAC {
+			t.Fatalf("redeemed %+v %v, want the mailed code", got, err)
+		}
+	})
+
 	t.Run("only mailed sends spend the project's budget, and a client IP has its own", func(t *testing.T) {
 		all := fx.Count(t, "email_otps")
 		unmailed := codeOTP(t, uniqueEmail("otp-unmailed"))
