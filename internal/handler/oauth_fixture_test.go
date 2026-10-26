@@ -65,6 +65,8 @@ type oauthFixture struct {
 	passwordIsNull func(t *testing.T, email string) bool
 	// count reads a table's row count straight from the database.
 	count func(t *testing.T, table string) int
+	// disable switches an account off straight in the database.
+	disable func(t *testing.T, email string)
 }
 
 func (s *signInSettings) info(authURL string) map[string]any {
@@ -171,6 +173,11 @@ func newPostgresOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFix
 		}
 		return null
 	}
+	fx.disable = func(t *testing.T, email string) {
+		if _, err := direct.Exec(ctx, "UPDATE auth.users SET enabled = false WHERE email = $1", email); err != nil {
+			t.Fatalf("disable %s: %v", email, err)
+		}
+	}
 	fx.count = func(t *testing.T, table string) int {
 		var n int
 		if err := direct.QueryRow(ctx, "SELECT count(*) FROM auth."+table).Scan(&n); err != nil {
@@ -196,6 +203,11 @@ func newMySQLOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFixtur
 			t.Fatalf("read password of %s: %v", email, err)
 		}
 		return null
+	}
+	fx.disable = func(t *testing.T, email string) {
+		if _, err := root.Exec("UPDATE `auth`.`users` SET enabled = FALSE WHERE email = ?", email); err != nil {
+			t.Fatalf("disable %s: %v", email, err)
+		}
 	}
 	fx.count = func(t *testing.T, table string) int {
 		var n int

@@ -12,27 +12,29 @@ import (
 	"github.com/excalibase/auth/internal/store"
 )
 
-var roomyLimits = store.OTPLimits{MinInterval: 0, PerAddressHour: 1000, PerProjectDay: 1_000_000}
+var roomyLimits = store.OTPLimits{MinInterval: 0, PerAddressHour: 1000, PerProjectDay: 1_000_000, PerIPDay: 1_000_000}
 
 func linkOTP(t *testing.T, email string) store.EmailOTP {
 	return store.EmailOTP{Email: email, Kind: store.OTPMagicLink, LinkHash: hash(t), CodeChallenge: "challenge",
-		CreateUser: true, ExpiresAt: time.Now().Add(10 * time.Minute)}
+		CreateUser: true, Mailed: true, IP: "192.0.2.1", ExpiresAt: time.Now().Add(10 * time.Minute)}
 }
 
 func codeOTP(t *testing.T, email string) store.EmailOTP {
 	return store.EmailOTP{Email: email, Kind: store.OTPEmailCode, CodeHMAC: hash(t), CodeChallenge: "challenge",
-		ExpiresAt: time.Now().Add(10 * time.Minute)}
+		Mailed: true, IP: "192.0.2.1", ExpiresAt: time.Now().Add(10 * time.Minute)}
 }
 
 func save(t *testing.T, db store.Store, otp store.EmailOTP) {
 	t.Helper()
-	if err := db.SaveEmailOTP(context.Background(), otp, roomyLimits); err != nil {
-		t.Fatalf("save otp: %v", err)
+	if mailed, err := db.SaveEmailOTP(context.Background(), otp, roomyLimits); err != nil || mailed != otp.Mailed {
+		t.Fatalf("save otp: mailed=%v %v", mailed, err)
 	}
 }
 
 func accept(store.EmailOTP) bool { return true }
-func refuse(store.EmailOTP) bool { return false }
+
+func perCode(n int) store.OTPAttempts { return store.OTPAttempts{PerCode: n, PerAddressDay: 1_000_000} }
+func refuse(store.EmailOTP) bool      { return false }
 
 func runEmailOTPs(t *testing.T, fx Fixture) {
 	ctx := context.Background()
@@ -41,12 +43,12 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 	t.Run("a link is spent once and hands back what was sent", func(t *testing.T) {
 		otp := linkOTP(t, uniqueEmail("otp-link"))
 		save(t, db, otp)
-		got, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: otp.LinkHash}, 5, accept)
+		got, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: otp.LinkHash}, perCode(5), accept)
 		if err != nil || got.Email != otp.Email || got.Kind != store.OTPMagicLink || got.LinkHash != otp.LinkHash ||
 			got.CodeChallenge != "challenge" || !got.CreateUser {
 			t.Fatalf("redeemed = %+v %v", got, err)
 		}
-		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: otp.LinkHash}, 5, accept); !errors.Is(err, store.ErrNotFound) {
+		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: otp.LinkHash}, perCode(5), accept); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("second redeem: %v", err)
 		}
 	})
@@ -54,10 +56,10 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 	t.Run("a refused link is spent: it gets no second try", func(t *testing.T) {
 		otp := linkOTP(t, uniqueEmail("otp-link-refused"))
 		save(t, db, otp)
-		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: otp.LinkHash}, 5, refuse); !errors.Is(err, store.ErrNotFound) {
+		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: otp.LinkHash}, perCode(5), refuse); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("refused link: %v", err)
 		}
-		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: otp.LinkHash}, 5, accept); !errors.Is(err, store.ErrNotFound) {
+		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: otp.LinkHash}, perCode(5), accept); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("a refused link was redeemed after: %v", err)
 		}
 	})
@@ -66,20 +68,20 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 		email := uniqueEmail("Otp-Code")
 		otp := codeOTP(t, email)
 		save(t, db, otp)
-		lookup := store.OTPLookup{Email: strings.ToUpper(email)}
+		lookup := store.OTPLookup{Email: strings.ToUpper(email), CodeChallenge: "challenge"}
 		for attempt := 1; attempt < 3; attempt++ {
-			if _, err := db.RedeemEmailOTP(ctx, lookup, 3, refuse); !errors.Is(err, store.ErrNotFound) {
+			if _, err := db.RedeemEmailOTP(ctx, lookup, perCode(3), refuse); !errors.Is(err, store.ErrNotFound) {
 				t.Fatalf("attempt %d: %v", attempt, err)
 			}
 		}
 		var seen store.EmailOTP
-		if _, err := db.RedeemEmailOTP(ctx, lookup, 3, func(row store.EmailOTP) bool { seen = row; return false }); !errors.Is(err, store.ErrNotFound) {
+		if _, err := db.RedeemEmailOTP(ctx, lookup, perCode(3), func(row store.EmailOTP) bool { seen = row; return false }); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("last attempt: %v", err)
 		}
 		if seen.Attempts != 2 || seen.CodeHMAC != otp.CodeHMAC || seen.Email != email {
 			t.Fatalf("the check saw %+v", seen)
 		}
-		if _, err := db.RedeemEmailOTP(ctx, lookup, 3, accept); !errors.Is(err, store.ErrNotFound) {
+		if _, err := db.RedeemEmailOTP(ctx, lookup, perCode(3), accept); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("a code past its attempts was redeemed: %v", err)
 		}
 	})
@@ -87,15 +89,38 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 	t.Run("a right code after wrong ones is redeemed once", func(t *testing.T) {
 		email := uniqueEmail("otp-code-ok")
 		save(t, db, codeOTP(t, email))
-		lookup := store.OTPLookup{Email: email}
-		if _, err := db.RedeemEmailOTP(ctx, lookup, 5, refuse); !errors.Is(err, store.ErrNotFound) {
+		lookup := store.OTPLookup{Email: email, CodeChallenge: "challenge"}
+		if _, err := db.RedeemEmailOTP(ctx, lookup, perCode(5), refuse); !errors.Is(err, store.ErrNotFound) {
 			t.Fatal(err)
 		}
-		if got, err := db.RedeemEmailOTP(ctx, lookup, 5, accept); err != nil || got.Attempts != 1 {
+		if got, err := db.RedeemEmailOTP(ctx, lookup, perCode(5), accept); err != nil || got.Attempts != 1 {
 			t.Fatalf("redeem = %+v %v", got, err)
 		}
-		if _, err := db.RedeemEmailOTP(ctx, lookup, 5, accept); !errors.Is(err, store.ErrNotFound) {
+		if _, err := db.RedeemEmailOTP(ctx, lookup, perCode(5), accept); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("a code was redeemed twice: %v", err)
+		}
+	})
+
+	t.Run("an address's wrong guesses across its codes are capped for the day", func(t *testing.T) {
+		email := uniqueEmail("otp-daily-guesses")
+		capped := store.OTPAttempts{PerCode: 5, PerAddressDay: 7}
+		lookup := store.OTPLookup{Email: email, CodeChallenge: "challenge"}
+		for _, guesses := range []int{5, 2} {
+			save(t, db, codeOTP(t, email))
+			for range guesses {
+				if _, err := db.RedeemEmailOTP(ctx, lookup, capped, refuse); !errors.Is(err, store.ErrNotFound) {
+					t.Fatal(err)
+				}
+			}
+		}
+		save(t, db, codeOTP(t, email))
+		if _, err := db.RedeemEmailOTP(ctx, lookup, capped, accept); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("a code was redeemed past the address's daily guesses: %v", err)
+		}
+		link := linkOTP(t, email)
+		save(t, db, link)
+		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: link.LinkHash}, capped, accept); err != nil {
+			t.Fatalf("a link, which cannot be guessed, was refused too: %v", err)
 		}
 	})
 
@@ -103,10 +128,10 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 		email := uniqueEmail("otp-kinds")
 		link := linkOTP(t, email)
 		save(t, db, link)
-		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email}, 5, accept); !errors.Is(err, store.ErrNotFound) {
+		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email, CodeChallenge: "challenge"}, perCode(5), accept); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("an address reached a link: %v", err)
 		}
-		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: link.LinkHash}, 5, accept); err != nil {
+		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: link.LinkHash}, perCode(5), accept); err != nil {
 			t.Fatalf("the link itself: %v", err)
 		}
 	})
@@ -116,14 +141,32 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 		code := codeOTP(t, email)
 		code.ExpiresAt = time.Now().Add(-time.Second)
 		save(t, db, code)
-		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email}, 5, accept); !errors.Is(err, store.ErrNotFound) {
+		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email, CodeChallenge: "challenge"}, perCode(5), accept); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("expired code: %v", err)
 		}
 		link := linkOTP(t, uniqueEmail("otp-expired-link"))
 		link.ExpiresAt = time.Now().Add(-time.Second)
 		save(t, db, link)
-		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: link.LinkHash}, 5, accept); !errors.Is(err, store.ErrNotFound) {
+		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: link.LinkHash}, perCode(5), accept); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("expired link: %v", err)
+		}
+	})
+
+	t.Run("a code is reached only with the challenge it was sent with", func(t *testing.T) {
+		email := uniqueEmail("otp-challenge")
+		mine := codeOTP(t, email)
+		save(t, db, mine)
+		theirs := codeOTP(t, email)
+		theirs.CodeChallenge = "another-challenge"
+		save(t, db, theirs)
+		for range 5 {
+			if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email, CodeChallenge: "another-challenge"}, perCode(5), refuse); !errors.Is(err, store.ErrNotFound) {
+				t.Fatal(err)
+			}
+		}
+		got, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email, CodeChallenge: "challenge"}, perCode(5), accept)
+		if err != nil || got.CodeHMAC != mine.CodeHMAC {
+			t.Fatalf("guesses at another browser's code spent mine: %+v %v", got, err)
 		}
 	})
 
@@ -134,10 +177,10 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 		save(t, db, link)
 		second := codeOTP(t, email)
 		save(t, db, second)
-		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: link.LinkHash}, 5, accept); !errors.Is(err, store.ErrNotFound) {
+		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: link.LinkHash}, perCode(5), accept); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("the earlier link survived a new send: %v", err)
 		}
-		got, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email}, 5, accept)
+		got, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email, CodeChallenge: "challenge"}, perCode(5), accept)
 		if err != nil || got.CodeHMAC != second.CodeHMAC {
 			t.Fatalf("redeemed %+v %v, want the newest code", got, err)
 		}
@@ -145,38 +188,38 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 
 	t.Run("an address waits between sends and has an hourly budget", func(t *testing.T) {
 		email := uniqueEmail("otp-paced")
-		paced := store.OTPLimits{MinInterval: time.Minute, PerAddressHour: 5, PerProjectDay: 1_000_000}
-		if err := db.SaveEmailOTP(ctx, codeOTP(t, email), paced); err != nil {
+		paced := store.OTPLimits{MinInterval: time.Minute, PerAddressHour: 5, PerProjectDay: 1_000_000, PerIPDay: 1_000_000}
+		if _, err := db.SaveEmailOTP(ctx, codeOTP(t, email), paced); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.SaveEmailOTP(ctx, codeOTP(t, strings.ToUpper(email)), paced); !errors.Is(err, store.ErrRateLimited) {
+		if _, err := db.SaveEmailOTP(ctx, codeOTP(t, strings.ToUpper(email)), paced); !errors.Is(err, store.ErrRateLimited) {
 			t.Fatalf("a send inside the interval: %v", err)
 		}
-		hourly := store.OTPLimits{PerAddressHour: 2, PerProjectDay: 1_000_000}
-		if err := db.SaveEmailOTP(ctx, codeOTP(t, email), hourly); err != nil {
+		hourly := store.OTPLimits{PerAddressHour: 2, PerProjectDay: 1_000_000, PerIPDay: 1_000_000}
+		if _, err := db.SaveEmailOTP(ctx, codeOTP(t, email), hourly); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.SaveEmailOTP(ctx, codeOTP(t, email), hourly); !errors.Is(err, store.ErrRateLimited) {
+		if _, err := db.SaveEmailOTP(ctx, codeOTP(t, email), hourly); !errors.Is(err, store.ErrRateLimited) {
 			t.Fatalf("a send past the hourly budget: %v", err)
 		}
-		if err := db.SaveEmailOTP(ctx, codeOTP(t, uniqueEmail("otp-other")), hourly); err != nil {
+		if _, err := db.SaveEmailOTP(ctx, codeOTP(t, uniqueEmail("otp-other")), hourly); err != nil {
 			t.Fatalf("another address shares the budget: %v", err)
 		}
 	})
 
 	t.Run("the project's daily budget holds under concurrent sends", func(t *testing.T) {
 		budget := fx.Count(t, "email_otps") + 3
-		daily := store.OTPLimits{PerAddressHour: 1000, PerProjectDay: budget}
+		daily := store.OTPLimits{PerAddressHour: 1000, PerProjectDay: budget, PerIPDay: 1_000_000}
 		var wg sync.WaitGroup
 		var saved, limited atomic.Int64
 		for range 8 {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				switch err := db.SaveEmailOTP(ctx, codeOTP(t, uniqueEmail("otp-daily")), daily); {
-				case err == nil:
+				switch mailed, err := db.SaveEmailOTP(ctx, codeOTP(t, uniqueEmail("otp-daily")), daily); {
+				case err == nil && mailed:
 					saved.Add(1)
-				case errors.Is(err, store.ErrRateLimited):
+				case err == nil:
 					limited.Add(1)
 				default:
 					t.Errorf("send: %v", err)
@@ -185,7 +228,34 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 		}
 		wg.Wait()
 		if saved.Load() != 3 || limited.Load() != 5 {
-			t.Fatalf("saved %d and limited %d of 8, want 3 and 5", saved.Load(), limited.Load())
+			t.Fatalf("mailed %d and held back %d of 8, want 3 and 5", saved.Load(), limited.Load())
+		}
+	})
+
+	t.Run("only mailed sends spend the project's budget, and a client IP has its own", func(t *testing.T) {
+		all := fx.Count(t, "email_otps")
+		unmailed := codeOTP(t, uniqueEmail("otp-unmailed"))
+		unmailed.Mailed = false
+		exhausted := store.OTPLimits{PerAddressHour: 1000, PerProjectDay: all, PerIPDay: 1_000_000}
+		if mailed, err := db.SaveEmailOTP(ctx, unmailed, exhausted); err != nil || mailed {
+			t.Fatalf("unmailed send: %v %v", mailed, err)
+		}
+		if mailed, err := db.SaveEmailOTP(ctx, codeOTP(t, uniqueEmail("otp-over")), store.OTPLimits{PerAddressHour: 1000, PerProjectDay: all + 1, PerIPDay: 1_000_000}); err != nil || !mailed {
+			t.Fatalf("an unmailed row spent the project's budget: %v %v", mailed, err)
+		}
+		perIP := store.OTPLimits{PerAddressHour: 1000, PerProjectDay: 1_000_000, PerIPDay: 2}
+		for i := range 3 {
+			otp := codeOTP(t, uniqueEmail("otp-ip"))
+			otp.IP = "198.51.100.7"
+			_, err := db.SaveEmailOTP(ctx, otp, perIP)
+			if (i < 2) != (err == nil) || (i == 2 && !errors.Is(err, store.ErrRateLimited)) {
+				t.Fatalf("send %d from one IP: %v", i+1, err)
+			}
+		}
+		other := codeOTP(t, uniqueEmail("otp-ip-other"))
+		other.IP = "198.51.100.8"
+		if _, err := db.SaveEmailOTP(ctx, other, perIP); err != nil {
+			t.Fatalf("another IP shares the budget: %v", err)
 		}
 	})
 
@@ -198,7 +268,7 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email}, 5, accept); err == nil {
+				if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{Email: email, CodeChallenge: "challenge"}, perCode(5), accept); err == nil {
 					won.Add(1)
 				}
 			}()
@@ -265,6 +335,20 @@ func runEmailSignIn(t *testing.T, fx Fixture) {
 		}
 		if _, err := db.RefreshTokenState(ctx, live); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("the squatter's session survived: %v", err)
+		}
+	})
+
+	t.Run("a disabled account stays disabled, by mail or by provider", func(t *testing.T) {
+		_, email := newUser(t, db, "mail-disabled")
+		fx.Disable(t, email)
+		if _, _, err := db.SignInWithEmail(ctx, email, "Name", true); !errors.Is(err, store.ErrAccountDisabled) {
+			t.Fatalf("mail sign-in: %v, want ErrAccountDisabled", err)
+		}
+		if _, _, err := db.SignInWithIdentity(ctx, claimFor("github", email), true); !errors.Is(err, store.ErrAccountDisabled) {
+			t.Fatalf("provider sign-in: %v, want ErrAccountDisabled", err)
+		}
+		if account, err := db.AccountByAddress(ctx, email); err != nil || account.Enabled {
+			t.Fatalf("the disabled account was replaced: %+v %v", account, err)
 		}
 	})
 

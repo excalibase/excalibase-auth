@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS auth.email_otps (
     code_hmac      CHAR(64),
     code_challenge VARCHAR(128) NOT NULL,
     create_user    BOOLEAN NOT NULL DEFAULT false,
+    mailed         BOOLEAN NOT NULL DEFAULT false,
+    ip             VARCHAR(64),
     attempts       INT NOT NULL DEFAULT 0,
     expires_at     TIMESTAMPTZ NOT NULL,
     consumed_at    TIMESTAMPTZ,
@@ -17,6 +19,7 @@ CREATE TABLE IF NOT EXISTS auth.email_otps (
 );
 CREATE INDEX IF NOT EXISTS idx_email_otps_email ON auth.email_otps (lower(email), created_at);
 CREATE INDEX IF NOT EXISTS idx_email_otps_created_at ON auth.email_otps (created_at);
+CREATE INDEX IF NOT EXISTS idx_email_otps_ip ON auth.email_otps (ip, created_at);
 
 -- Every send locks this one row, so replicas count the budgets one at a time.
 CREATE TABLE IF NOT EXISTS auth.email_otp_lock (

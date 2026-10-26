@@ -235,6 +235,8 @@ func (h *AuthHandler) signInIdentity(ctx context.Context, db store.Store, projec
 	switch {
 	case errors.Is(err, store.ErrSignupsDisabled):
 		return store.Account{}, 0, codeSignupDisabled
+	case errors.Is(err, store.ErrAccountDisabled):
+		return store.Account{}, 0, codeAccountDisabled
 	case err != nil:
 		log.Printf("auth.oauth.account_failed project=%s provider=%s", safeLog(projectID), provider)
 		return store.Account{}, 0, codeServerError

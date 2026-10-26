@@ -7,7 +7,7 @@ import (
 
 func TestPickAddressMatch(t *testing.T) {
 	none := errors.New("no rows")
-	if _, _, err := PickAddressMatch(nil, none); !errors.Is(err, none) {
+	if _, err := PickAddressMatch(nil, none); !errors.Is(err, none) {
 		t.Fatalf("no match: %v", err)
 	}
 	for name, tc := range map[string]struct {
@@ -19,12 +19,12 @@ func TestPickAddressMatch(t *testing.T) {
 		"one in another case":  {[]AddressMatch{{ID: 3, Verified: false}}, 3, false},
 		"exact and unverified": {[]AddressMatch{{ID: 4, Exact: true}, {ID: 5, Verified: true}}, 4, false},
 	} {
-		id, verified, err := PickAddressMatch(tc.matches, none)
-		if err != nil || id != tc.id || verified != tc.verified {
-			t.Errorf("%s: id=%d verified=%v err=%v", name, id, verified, err)
+		match, err := PickAddressMatch(tc.matches, none)
+		if err != nil || match.ID != tc.id || match.Verified != tc.verified {
+			t.Errorf("%s: %+v err=%v", name, match, err)
 		}
 	}
-	if _, _, err := PickAddressMatch([]AddressMatch{{ID: 6}, {ID: 7}}, none); !errors.Is(err, ErrAmbiguousEmail) {
+	if _, err := PickAddressMatch([]AddressMatch{{ID: 6}, {ID: 7}}, none); !errors.Is(err, ErrAmbiguousEmail) {
 		t.Fatalf("two in other cases: %v", err)
 	}
 }

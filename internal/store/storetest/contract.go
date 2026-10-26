@@ -26,6 +26,8 @@ type Fixture struct {
 	// Grandfather marks an account verified with no proof, as Postgres
 	// migration 000003 did for every account it found.
 	Grandfather func(t *testing.T, email string)
+	// Disable switches an account off, as an admin does.
+	Disable func(t *testing.T, email string)
 }
 
 var sequence atomic.Int64

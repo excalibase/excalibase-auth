@@ -62,6 +62,7 @@ func runOAuthFlows(t *testing.T, fx *oauthFixture) {
 	t.Run("GitHubSignsUpThenSignsInToTheSameAccount", func(t *testing.T) { oauthSignUpThenIn(t, fx, "github") })
 	t.Run("GoogleSignsUpThenSignsInToTheSameAccount", func(t *testing.T) { oauthSignUpThenIn(t, fx, "google") })
 	t.Run("AnUnverifiedAccountIsTakenOverByTheInboxOwner", func(t *testing.T) { oauthTakeover(t, fx) })
+	t.Run("ADisabledAccountIsNeitherSignedInToNorReplaced", func(t *testing.T) { oauthDisabled(t, fx) })
 	t.Run("AVerifiedAccountIsLinkedAndKeepsItsPassword", func(t *testing.T) { oauthLinksVerified(t, fx) })
 	t.Run("AnAddressTheProviderDidNotVerifyIsRefused", func(t *testing.T) { oauthUnverifiedAtProvider(t, fx) })
 	t.Run("ClosedSignUpsRefuseNewAccountsOnly", func(t *testing.T) { oauthSignUpsClosed(t, fx) })
@@ -116,6 +117,20 @@ func oauthTakeover(t *testing.T, fx *oauthFixture) {
 	}
 	if !fx.passwordIsNull(t, victim.Email) {
 		t.Fatal("the squatter's password was kept")
+	}
+}
+
+func oauthDisabled(t *testing.T, fx *oauthFixture) {
+	user := person("switched-off")
+	tokenResponse(t, postJSON(fx.srv, oauthProject+"/register", map[string]string{
+		"email": user.Email, "password": squatterPassword, "fullName": "Off"}), "register")
+	fx.disable(t, user.Email)
+	landed, _ := fx.browserSignIn(t, "github", user)
+	if landed.Query().Get("error") != "account_disabled" || landed.Query().Get("code") != "" {
+		t.Fatalf("a disabled account landed at %s", landed)
+	}
+	if fx.passwordIsNull(t, user.Email) {
+		t.Fatal("the disabled account was replaced")
 	}
 }
 

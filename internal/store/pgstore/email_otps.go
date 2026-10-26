@@ -9,54 +9,58 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (s *Store) SaveEmailOTP(ctx context.Context, otp store.EmailOTP, limits store.OTPLimits) error {
+func (s *Store) SaveEmailOTP(ctx context.Context, otp store.EmailOTP, limits store.OTPLimits) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("%w: %w", store.ErrUnavailable, err)
+		return false, fmt.Errorf("%w: %w", store.ErrUnavailable, err)
 	}
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx,
 		"INSERT INTO auth.email_otp_lock (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id"); err != nil {
-		return err
+		return false, err
 	}
-	if err := withinOTPLimits(ctx, tx, otp.Email, limits); err != nil {
-		return err
+	mailed, err := withinOTPLimits(ctx, tx, otp, limits)
+	if err != nil {
+		return false, err
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM auth.email_otps WHERE created_at < NOW() - INTERVAL '1 day'"); err != nil {
-		return err
+		return false, err
 	}
 	if _, err := tx.Exec(ctx,
-		"UPDATE auth.email_otps SET consumed_at = NOW() WHERE lower(email) = lower($1) AND consumed_at IS NULL", otp.Email); err != nil {
-		return err
+		`UPDATE auth.email_otps SET consumed_at = NOW()
+		 WHERE lower(email) = lower($1) AND code_challenge = $2 AND consumed_at IS NULL`, otp.Email, otp.CodeChallenge); err != nil {
+		return false, err
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO auth.email_otps (email, kind, link_hash, code_hmac, code_challenge, create_user, expires_at)
-		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7)`,
-		otp.Email, otp.Kind, otp.LinkHash, otp.CodeHMAC, otp.CodeChallenge, otp.CreateUser, otp.ExpiresAt); err != nil {
-		return err
+		`INSERT INTO auth.email_otps (email, kind, link_hash, code_hmac, code_challenge, create_user, mailed, ip, expires_at)
+		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, NULLIF($8, ''), $9)`,
+		otp.Email, otp.Kind, otp.LinkHash, otp.CodeHMAC, otp.CodeChallenge, otp.CreateUser, mailed, otp.IP, otp.ExpiresAt); err != nil {
+		return false, err
 	}
-	return tx.Commit(ctx)
+	return mailed, tx.Commit(ctx)
 }
 
-// withinOTPLimits counts the sends the budgets allow, under the lock row.
-func withinOTPLimits(ctx context.Context, tx pgx.Tx, email string, limits store.OTPLimits) error {
-	var recent, lastHour, lastDay int
+// withinOTPLimits counts the sends the budgets allow, under the lock row, and
+// says whether this one may be mailed.
+func withinOTPLimits(ctx context.Context, tx pgx.Tx, otp store.EmailOTP, limits store.OTPLimits) (bool, error) {
+	var recent, lastHour, fromIP, mailedToday int
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FILTER (WHERE lower(email) = lower($1) AND created_at > NOW() - make_interval(secs => $2)),
 		        count(*) FILTER (WHERE lower(email) = lower($1) AND created_at > NOW() - INTERVAL '1 hour'),
-		        count(*)
+		        count(*) FILTER (WHERE ip = $3),
+		        count(*) FILTER (WHERE mailed)
 		 FROM auth.email_otps WHERE created_at > NOW() - INTERVAL '1 day'`,
-		email, limits.MinInterval.Seconds()).Scan(&recent, &lastHour, &lastDay); err != nil {
-		return err
+		otp.Email, limits.MinInterval.Seconds(), otp.IP).Scan(&recent, &lastHour, &fromIP, &mailedToday); err != nil {
+		return false, err
 	}
-	if recent > 0 || lastHour >= limits.PerAddressHour || lastDay >= limits.PerProjectDay {
-		return store.ErrRateLimited
+	if recent > 0 || lastHour >= limits.PerAddressHour || fromIP >= limits.PerIPDay {
+		return false, store.ErrRateLimited
 	}
-	return nil
+	return otp.Mailed && mailedToday < limits.PerProjectDay, nil
 }
 
-func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, maxAttempts int, check func(store.EmailOTP) bool) (store.EmailOTP, error) {
+func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, limits store.OTPAttempts, check func(store.EmailOTP) bool) (store.EmailOTP, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return store.EmailOTP{}, fmt.Errorf("%w: %w", store.ErrUnavailable, err)
@@ -74,14 +78,27 @@ func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, maxA
 		row = tx.QueryRow(ctx, columns+"link_hash = $1 AND kind = $2 FOR UPDATE", lookup.LinkHash, store.OTPMagicLink)
 	} else {
 		row = tx.QueryRow(ctx, columns+`lower(email) = lower($1) AND kind = $2 AND attempts < $3
-			ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`, lookup.Email, store.OTPEmailCode, maxAttempts)
+			AND code_challenge = $4 ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`,
+			lookup.Email, store.OTPEmailCode, limits.PerCode, lookup.CodeChallenge)
 	}
 	if err := row.Scan(&id, &otp.Email, &otp.Kind, &otp.LinkHash, &otp.CodeHMAC, &otp.CodeChallenge,
 		&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt); err != nil {
 		return store.EmailOTP{}, notFound(err)
 	}
+	if otp.Kind == store.OTPEmailCode {
+		var guessed int
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(sum(attempts), 0) FROM auth.email_otps
+			 WHERE lower(email) = lower($1) AND kind = $2 AND created_at > NOW() - INTERVAL '1 day'`,
+			otp.Email, store.OTPEmailCode).Scan(&guessed); err != nil {
+			return store.EmailOTP{}, err
+		}
+		if guessed >= limits.PerAddressDay {
+			return store.EmailOTP{}, store.ErrNotFound
+		}
+	}
 	accepted := check(otp)
-	spent := accepted || otp.Kind == store.OTPMagicLink || otp.Attempts+1 >= maxAttempts
+	spent := accepted || otp.Kind == store.OTPMagicLink || otp.Attempts+1 >= limits.PerCode
 	attempts := otp.Attempts
 	if !accepted {
 		attempts++
@@ -134,20 +151,33 @@ func (s *Store) SignInWithEmail(ctx context.Context, email, fullName string, all
 }
 
 func (s *Store) AccountByAddress(ctx context.Context, email string) (store.Account, error) {
-	rows, err := s.pool.Query(ctx,
-		"SELECT id, email = $1, false FROM auth.users WHERE lower(email) = lower($1) ORDER BY email = $1 DESC, id LIMIT 2", email)
+	rows, err := s.pool.Query(ctx, "SELECT "+accountColumns+`, email = $1 FROM auth.users
+		WHERE lower(email) = lower($1) ORDER BY email = $1 DESC, id LIMIT 2`, email)
 	if err != nil {
 		return store.Account{}, err
 	}
-	matches, err := pgx.CollectRows(rows, pgx.RowToStructByPos[store.AddressMatch])
-	if err != nil {
+	defer rows.Close()
+	var (
+		accounts []store.Account
+		matches  []store.AddressMatch
+	)
+	for rows.Next() {
+		var account store.Account
+		var exact bool
+		if err := rows.Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
+			&account.AllowedRoles, &account.Enabled, &account.EmailVerified, &exact); err != nil {
+			return store.Account{}, err
+		}
+		accounts = append(accounts, account)
+		matches = append(matches, store.AddressMatch{ID: account.ID, Exact: exact})
+	}
+	if err := rows.Err(); err != nil {
 		return store.Account{}, err
 	}
-	id, _, err := store.PickAddressMatch(matches, store.ErrNotFound)
-	if err != nil {
+	if _, err := store.PickAddressMatch(matches, store.ErrNotFound); err != nil {
 		return store.Account{}, err
 	}
-	return s.AccountByID(ctx, id)
+	return accounts[0], nil
 }
 
 func (s *Store) RecordAudit(ctx context.Context, event store.AuditEvent) error {

@@ -47,6 +47,11 @@ func TestIntegration_PostgresStoreKeepsTheStoreContract(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		Disable: func(t *testing.T, email string) {
+			if _, err := pool.Exec(ctx, "UPDATE auth.users SET enabled = false WHERE email = $1", email); err != nil {
+				t.Fatal(err)
+			}
+		},
 		Count: func(t *testing.T, table string) int {
 			var n int
 			if err := pool.QueryRow(ctx, "SELECT count(*) FROM auth."+table).Scan(&n); err != nil {

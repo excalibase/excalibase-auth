@@ -25,6 +25,7 @@ func withCapturedMail(sender *stubSender) func(*AuthHandler) {
 		h.SetEmail(sender, "")
 		h.dispatchMail = func(send func()) { send() }
 		h.otpLimits.MinInterval = testOTPInterval
+		h.otpLimits.PerIPDay = 1000
 	}
 }
 
@@ -69,6 +70,25 @@ func TestIntegration_EmailSignUpsSpendTheProjectSignUpBudget(t *testing.T) {
 	}
 }
 
+func TestIntegration_EmailSendsPastTheBudgetsAreHeldBack(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	fx := newPostgresOTPFixture(t, func(h *AuthHandler) { h.otpLimits.PerProjectDay, h.otpLimits.PerIPDay = 1, 3 })
+	fx.sendCode(t, mailbox("budget-first"))
+	fx.sender.reset()
+	fx.sendCode(t, mailbox("budget-second"))
+	if len(fx.sender.all()) != 0 {
+		t.Fatal("a send past the project's daily budget was mailed")
+	}
+	fx.sendCode(t, mailbox("budget-third"))
+	resp, body := fx.requestOTP(map[string]any{"email": mailbox("budget-fourth"), "type": "email",
+		"code_challenge": oauth.S256(newVerifier(t)), "code_challenge_method": "S256"})
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("a send past the client's daily budget: %d %s", resp.StatusCode, body)
+	}
+}
+
 var mailboxSeq = map[string]int{}
 
 // mailbox is a stable address per name within one test binary run.
@@ -87,6 +107,8 @@ func runEmailSignInFlows(t *testing.T, fx *otpFixture) {
 	t.Run("AnAddressWaitsBetweenSends", func(t *testing.T) { otpPaced(t, fx) })
 	t.Run("ClosedSignUpsCreateNoAccount", func(t *testing.T) { otpSignUpsClosed(t, fx) })
 	t.Run("AnUnverifiedAccountIsTakenOverByTheInboxOwner", func(t *testing.T) { otpTakeover(t, fx) })
+	t.Run("ADisabledAccountIsNeitherSignedInToNorReplaced", func(t *testing.T) { otpDisabled(t, fx) })
+	t.Run("GuessesFromAnotherBrowserDoNotSpendACode", func(t *testing.T) { otpGuessesNeedTheChallenge(t, fx) })
 	t.Run("RequestsAreCheckedBeforeAnythingIsSent", func(t *testing.T) { otpRefusals(t, fx) })
 	t.Run("OffOrUnreadableSettingsRefuseBothRoutes", func(t *testing.T) { otpFailsClosed(t, fx) })
 }
@@ -329,6 +351,40 @@ func otpTakeover(t *testing.T, fx *otpFixture) {
 	}
 }
 
+func otpDisabled(t *testing.T, fx *otpFixture) {
+	address := mailbox("disabled")
+	reg := postJSON(fx.srv, oauthProject+"/register", map[string]string{"email": address, "password": oauthPassword, "fullName": "Off"})
+	reg.Body.Close()
+	if reg.StatusCode != http.StatusCreated {
+		t.Fatalf("register: %d", reg.StatusCode)
+	}
+	fx.disable(t, address)
+	fx.sender.reset()
+	resp, _ := fx.requestOTP(map[string]any{"email": address, "type": "email", "create_user": true,
+		"code_challenge": oauth.S256(newVerifier(t)), "code_challenge_method": "S256"})
+	if resp.StatusCode != http.StatusOK || len(fx.sender.all()) != 0 {
+		t.Fatalf("a disabled account: %d and %d mails", resp.StatusCode, len(fx.sender.all()))
+	}
+	if fx.passwordIsNull(t, address) {
+		t.Fatal("the disabled account was replaced")
+	}
+}
+
+func otpGuessesNeedTheChallenge(t *testing.T, fx *otpFixture) {
+	address := mailbox("victim")
+	verifier := fx.sendCode(t, address)
+	code := fx.lastCode(t)
+	wrong := fmt.Sprintf("%06d", (atoi(code)+1)%1_000_000)
+	for range 6 {
+		if resp, _ := fx.verifyCode(address, wrong, newVerifier(t)); resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("a guess from another browser: %d", resp.StatusCode)
+		}
+	}
+	if resp, body := fx.verifyCode(address, code, verifier); resp.StatusCode != http.StatusOK {
+		t.Fatalf("guesses from another browser spent the code: %d %v", resp.StatusCode, body)
+	}
+}
+
 func otpRefusals(t *testing.T, fx *otpFixture) {
 	challenge := oauth.S256(newVerifier(t))
 	cases := map[string]struct {
@@ -342,6 +398,7 @@ func otpRefusals(t *testing.T, fx *otpFixture) {
 		"an unknown type":     {map[string]any{"email": mailbox("r4"), "type": "sms", "code_challenge": challenge, "code_challenge_method": "S256"}, http.StatusBadRequest},
 		"no address":          {map[string]any{"type": "email", "code_challenge": challenge, "code_challenge_method": "S256"}, http.StatusBadRequest},
 		"a malformed address": {map[string]any{"email": "not an address", "type": "email", "code_challenge": challenge, "code_challenge_method": "S256"}, http.StatusBadRequest},
+		"an oversized body":   {map[string]any{"email": mailbox("r5"), "type": "email", "code_challenge": challenge, "code_challenge_method": "S256", "pad": strings.Repeat("x", 64<<10)}, http.StatusBadRequest},
 		"an address too long": {map[string]any{"email": strings.Repeat("a", 101) + "@x.test", "type": "email", "code_challenge": challenge, "code_challenge_method": "S256"}, http.StatusBadRequest},
 	}
 	fx.sender.reset()
@@ -358,6 +415,7 @@ func otpRefusals(t *testing.T, fx *otpFixture) {
 		"no verifier":        {"type": "email", "email": mailbox("v2"), "token": "123456"},
 		"no token hash":      {"type": "magiclink", "code_verifier": newVerifier(t)},
 		"a code, no address": {"type": "email", "token": "123456", "code_verifier": newVerifier(t)},
+		"an oversized body":  {"type": "email", "email": mailbox("v3"), "token": "123456", "code_verifier": newVerifier(t), "pad": strings.Repeat("x", 64<<10)},
 	} {
 		if resp, decoded := fx.verify(body); resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("verify with %s: %d %v", name, resp.StatusCode, decoded)

@@ -25,17 +25,24 @@ import (
 const (
 	// otpTTL is how long an emailed link or code stays usable.
 	otpTTL = 10 * time.Minute
-	// otpMaxAttempts is how many guesses one code gets.
-	otpMaxAttempts = 5
-	otpMailTimeout = 10 * time.Second
+	// otpMaxAttempts is how many guesses one code gets; otpDailyGuesses how
+	// many an address gets over a day, so new codes do not reset the count.
+	otpMaxAttempts  = 5
+	otpDailyGuesses = 15
+	otpMailTimeout  = 10 * time.Second
+	// maxOTPBody bounds both request bodies, which carry a few short fields.
+	maxOTPBody = 4 << 10
 	// otpSentMessage is the one answer /otp gives every address.
 	otpSentMessage = "If the address can sign in, a sign-in email has been sent"
 	otpKeyPurpose  = "email-otp v1"
 )
 
 // defaultOTPLimits pace the mail: an address once a minute and five times an
-// hour, and a project's whole day, which guards the shared sending reputation.
-var defaultOTPLimits = store.OTPLimits{MinInterval: time.Minute, PerAddressHour: 5, PerProjectDay: 500}
+// hour, a client fifty times a day, and a project's mailed sends a day, which
+// guards the shared sending reputation.
+var defaultOTPLimits = store.OTPLimits{MinInterval: time.Minute, PerAddressHour: 5, PerProjectDay: 500, PerIPDay: 50}
+
+var codeGuessLimits = store.OTPAttempts{PerCode: otpMaxAttempts, PerAddressDay: otpDailyGuesses}
 
 var (
 	errInvalidEmail = errors.New(codeInvalidEmail)
@@ -127,7 +134,10 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	switch err := db.SaveEmailOTP(r.Context(), otp, h.otpLimits); {
+	otp.Mailed = h.mayMail(r.Context(), db, req.Email, createUser && info.NewUsersAllowed())
+	otp.IP = h.clientIP(r)
+	mailed, err := db.SaveEmailOTP(r.Context(), otp, h.otpLimits)
+	switch {
 	case errors.Is(err, store.ErrRateLimited):
 		w.Header().Set("Retry-After", strconv.Itoa(int(h.otpLimits.MinInterval.Seconds())+1))
 		httpError(w, codeRateLimited, http.StatusTooManyRequests)
@@ -137,7 +147,7 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "failed to send", http.StatusInternalServerError)
 		return
 	}
-	if h.mayMail(r.Context(), db, req.Email, createUser && info.NewUsersAllowed()) {
+	if mailed {
 		h.dispatchMail(func() { h.sendOTPMail(projectID, msg) })
 	}
 	writeJSON(w, map[string]string{"message": otpSentMessage})
@@ -145,7 +155,7 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 
 func decodeOTPRequest(w http.ResponseWriter, r *http.Request) (otpRequest, bool) {
 	var req otpRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxOTPBody)).Decode(&req); err != nil {
 		httpError(w, "invalid request", http.StatusBadRequest)
 		return req, false
 	}
@@ -221,7 +231,7 @@ func (h *AuthHandler) sendOTPMail(projectID string, msg email.Message) {
 // browser that asked for it, and starts a session.
 func (h *AuthHandler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	var req verifyOTPRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !validVerifyRequest(&req) {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxOTPBody)).Decode(&req); err != nil || !validVerifyRequest(&req) {
 		httpError(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -273,13 +283,14 @@ func validVerifyRequest(req *verifyOTPRequest) bool {
 func (h *AuthHandler) redeemOTP(ctx context.Context, db store.Store, projectID string, req verifyOTPRequest) (store.EmailOTP, error) {
 	if req.Type == store.OTPMagicLink {
 		digest := token.Hash(req.TokenHash)
-		return db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: digest}, otpMaxAttempts, func(otp store.EmailOTP) bool {
+		return db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: digest}, codeGuessLimits, func(otp store.EmailOTP) bool {
 			linkOK := token.Equal(otp.LinkHash, digest)
 			verifierOK := oauth.VerifierMatches(req.CodeVerifier, otp.CodeChallenge)
 			return linkOK && verifierOK
 		})
 	}
-	return db.RedeemEmailOTP(ctx, store.OTPLookup{Email: req.Email}, otpMaxAttempts, func(otp store.EmailOTP) bool {
+	lookup := store.OTPLookup{Email: req.Email, CodeChallenge: oauth.S256(req.CodeVerifier)}
+	return db.RedeemEmailOTP(ctx, lookup, codeGuessLimits, func(otp store.EmailOTP) bool {
 		codeOK := emailotp.CodeMatches(h.otpKey, projectID, req.Email, req.Token, otp.CodeHMAC)
 		verifierOK := oauth.VerifierMatches(req.CodeVerifier, otp.CodeChallenge)
 		return codeOK && verifierOK
@@ -302,6 +313,8 @@ func (h *AuthHandler) signInByEmail(ctx context.Context, db store.Store, project
 	switch {
 	case errors.Is(err, store.ErrSignupsDisabled):
 		return store.Account{}, 0, http.StatusForbidden, errSignupDisabled
+	case errors.Is(err, store.ErrAccountDisabled):
+		return store.Account{}, 0, http.StatusForbidden, errAccountDisabled
 	case errors.Is(err, store.ErrAmbiguousEmail):
 		return store.Account{}, 0, http.StatusConflict, errors.New(signInFailedMsg)
 	case errors.Is(err, store.ErrUnavailable):
