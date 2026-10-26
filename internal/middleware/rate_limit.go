@@ -23,6 +23,7 @@ const (
 	routeRegister = "register"
 	routeLogin    = "login"
 	routeToken    = "token"
+	routeOTP      = "otp"
 
 	grantPassword = "password"
 
@@ -45,6 +46,7 @@ type RateLimitConfig struct {
 	LoginFailures      int
 	FailureWindow      time.Duration
 	TrustedProxyCIDRs  []*net.IPNet
+	OTPPerIP           int
 }
 
 // RateLimitConfigFrom adapts the env-derived config into middleware terms.
@@ -58,6 +60,7 @@ func RateLimitConfigFrom(cfg config.RateLimit) RateLimitConfig {
 		LoginFailures:      cfg.LoginFailures,
 		FailureWindow:      time.Duration(cfg.LoginFailureWindowSeconds) * time.Second,
 		TrustedProxyCIDRs:  cfg.TrustedProxyCIDRs,
+		OTPPerIP:           cfg.OTPPerIP,
 	}
 }
 
@@ -72,6 +75,7 @@ type RateLimits struct {
 	tokenIP         *ratelimit.Limiter
 	registerProject *ratelimit.Limiter
 	loginFailures   *ratelimit.Limiter
+	otpIP           *ratelimit.Limiter
 	trusted         []*net.IPNet
 }
 
@@ -84,6 +88,7 @@ func NewRateLimits(cfg RateLimitConfig, opts ...ratelimit.Option) *RateLimits {
 		tokenIP:         ratelimit.New(cfg.TokenPerIP, cfg.Window, opts...),
 		registerProject: ratelimit.New(cfg.RegisterPerProject, cfg.Window, opts...),
 		loginFailures:   ratelimit.New(cfg.LoginFailures, cfg.FailureWindow, opts...),
+		otpIP:           ratelimit.New(cfg.OTPPerIP, cfg.Window, opts...),
 		trusted:         cfg.TrustedProxyCIDRs,
 	}
 }
@@ -113,6 +118,18 @@ func (rl *RateLimits) AllowSignup(projectID string) bool {
 		return false
 	}
 	return true
+}
+
+// OTP throttles POST /otp, which sends mail, per client IP. The per-address
+// and per-project budgets live in the project's database.
+func (rl *RateLimits) OTP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if decision := rl.otpIP.Allow(rl.clientIP(r)); decision.Blocked() {
+			reject(w, routeOTP, decision)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Login throttles POST /login per client IP and locks an identity after

@@ -41,10 +41,11 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 - `internal/ratelimit` — keyed token-bucket limiter (in-memory, per replica) plus client-IP resolution behind trusted proxies and hashed identity keys.
 - `internal/middleware` — CORS, security headers, tenant context, JWT guard, and the per-route rate-limit middleware (`RateLimits`) wired into the handler via `WithRateLimits`.
 - `internal/oauth` — Google/GitHub sign-in: PKCE, Google id_token checks, redirect allow-list. `internal/testutil/idpfake` fakes both providers.
+- `internal/emailotp` — eight-digit sign-in codes and the HMAC they are stored as (`handler/email_otp.go` serves `/otp` and `/verify`).
 - `internal/domain` — Domain types and DTOs.
 - `internal/config` — Env-based config.
 
-**Database schema** (per tenant, `auth` schema): `users` (password NULL for provider-made accounts), `refresh_tokens`, `identities`, `flow_states`, `auth_codes`, and the link/key tables. Managed by golang-migrate migrations in `internal/migrate/migrations/`.
+**Database schema** (per tenant, `auth` schema): `users` (password NULL for provider-made accounts), `refresh_tokens`, `identities`, `flow_states`, `auth_codes`, `email_otps` (+ `email_otp_lock`), `audit_log`, and the link/key tables. Managed by golang-migrate migrations in `internal/migrate/migrations/`.
 
 ## Environment Variables
 
@@ -61,6 +62,7 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 | `RATE_LIMIT_REGISTER_PER_IP` / `_LOGIN_PER_IP` / `_TOKEN_PER_IP` | `5` / `10` / `30` | No |
 | `RATE_LIMIT_REGISTER_PER_PROJECT` | `60` | No |
 | `RATE_LIMIT_LOGIN_FAILURES` / `_LOGIN_FAILURE_WINDOW_SECONDS` | `5` / `900` | No |
+| `RATE_LIMIT_OTP_PER_IP` | `5` (per `RATE_LIMIT_WINDOW_SECONDS`; the per-address and per-project budgets live in the tenant DB) | No |
 | `TRUSTED_PROXY_CIDRS` | — (XFF never trusted) | No |
 | `CORS_ORIGINS` | `https://app.excalibase.io` (platform/Studio; project routes add the project's allowlist) | No |
 | `PROJECT_CORS_TTL_SECONDS` | `30` | No |

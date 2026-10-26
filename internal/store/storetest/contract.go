@@ -26,6 +26,8 @@ type Fixture struct {
 	// Grandfather marks an account verified with no proof, as Postgres
 	// migration 000003 did for every account it found.
 	Grandfather func(t *testing.T, email string)
+	// Disable switches an account off, as an admin does.
+	Disable func(t *testing.T, email string)
 }
 
 var sequence atomic.Int64
@@ -68,6 +70,8 @@ func Run(t *testing.T, fx Fixture) {
 	t.Run("api keys", func(t *testing.T) { runAPIKeys(t, fx) })
 	t.Run("identities", func(t *testing.T) { runIdentities(t, fx) })
 	t.Run("sign-in flows", func(t *testing.T) { runSignInFlows(t, fx) })
+	t.Run("email codes", func(t *testing.T) { runEmailOTPs(t, fx) })
+	t.Run("email sign-in", func(t *testing.T) { runEmailSignIn(t, fx) })
 }
 
 func runUsers(t *testing.T, fx Fixture) {

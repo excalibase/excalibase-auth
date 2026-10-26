@@ -46,6 +46,9 @@ type ProjectInfo struct {
 	RedirectURLs   []string        `json:"redirectUrls,omitempty"`
 	AllowNewUsers  *bool           `json:"allowNewUsers,omitempty"`
 	OAuthProviders []OAuthProvider `json:"oauthProviders,omitempty"`
+	// EmailOTPEnabled turns on sign-in by emailed link or code; sent only
+	// while the control plane's authotp flag is on.
+	EmailOTPEnabled bool `json:"emailOtpEnabled,omitempty"`
 }
 
 type infoEntry struct {

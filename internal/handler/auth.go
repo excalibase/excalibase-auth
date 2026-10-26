@@ -81,10 +81,16 @@ type AuthHandler struct {
 	oauthProviders map[string]oauth.Provider
 	oauthHTTP      *http.Client
 	signInMaxAge   time.Duration
+
+	// Sign-in by emailed link or code (EXC-662); otpKey is nil, and the
+	// routes unavailable, if it could not be derived.
+	otpKey       []byte
+	otpLimits    store.OTPLimits
+	dispatchMail func(send func())
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
-	return &AuthHandler{
+	h := &AuthHandler{
 		poolMgr:    poolMgr,
 		jwtService: jwtService,
 		refreshExp: refreshExp,
@@ -97,7 +103,17 @@ func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshE
 		oauthProviders: defaultOAuthProviders(),
 		oauthHTTP:      &http.Client{Timeout: providerTimeout},
 		signInMaxAge:   defaultSignInMaxAge,
+		otpLimits:      defaultOTPLimits,
+		dispatchMail:   func(send func()) { go send() },
 	}
+	if jwtService != nil {
+		key, err := jwtService.DerivedKey(otpKeyPurpose)
+		if err != nil {
+			log.Printf("auth.otp.key_unavailable: email sign-in is off: %v", err)
+		}
+		h.otpKey = key
+	}
+	return h
 }
 
 // WithHasher replaces the bounded password hasher.
@@ -168,6 +184,9 @@ func (h *AuthHandler) Routes(r chi.Router) {
 		// Provider sign-in (EXC-662); a project without providers answers 404.
 		r.With(h.limit(rateLimitToken)).Get("/authorize", h.Authorize)
 		r.With(h.limit(rateLimitToken)).Get("/callback/{provider}", h.Callback)
+		// Emailed link or code (EXC-662); a project without it answers 404.
+		r.With(h.limit(rateLimitOTP)).Post("/otp", h.SendOTP)
+		r.With(h.limit(rateLimitToken)).Post("/verify", h.VerifyOTP)
 
 		// API key management — protected by JWT. Mounting RequireJWT here at
 		// the route registration site (instead of inside apikey.go) makes the
@@ -195,6 +214,7 @@ var (
 	rateLimitRegister rateLimitRoute = (*middleware.RateLimits).Register
 	rateLimitLogin    rateLimitRoute = (*middleware.RateLimits).Login
 	rateLimitToken    rateLimitRoute = (*middleware.RateLimits).Token
+	rateLimitOTP      rateLimitRoute = (*middleware.RateLimits).OTP
 )
 
 // limit returns the chosen limiter middleware, or a pass-through when

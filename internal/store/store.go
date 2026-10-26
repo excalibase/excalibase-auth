@@ -31,6 +31,13 @@ var ErrSignupsDisabled = errors.New("new sign-ups are disabled")
 // address match a provider sign-in and none matches it exactly.
 var ErrAmbiguousEmail = errors.New("more than one account matches the address")
 
+// ErrAccountDisabled means the account an address reaches is switched off;
+// no sign-in may reach it, nor replace it.
+var ErrAccountDisabled = errors.New("account is disabled")
+
+// ErrRateLimited means a send would pass the address's or the project's budget.
+var ErrRateLimited = errors.New("too many codes sent")
+
 // TokenKind names one of the single-use link tables.
 type TokenKind int
 
@@ -112,18 +119,19 @@ type AddressMatch struct {
 	ID       int64
 	Exact    bool
 	Verified bool
+	Enabled  bool
 }
 
 // PickAddressMatch takes the exact match, else the only one; matches come
 // exact first. none is the engine's no-rows error.
-func PickAddressMatch(matches []AddressMatch, none error) (int64, bool, error) {
+func PickAddressMatch(matches []AddressMatch, none error) (AddressMatch, error) {
 	switch {
 	case len(matches) == 0:
-		return 0, false, none
+		return AddressMatch{}, none
 	case matches[0].Exact || len(matches) == 1:
-		return matches[0].ID, matches[0].Verified, nil
+		return matches[0], nil
 	default:
-		return 0, false, ErrAmbiguousEmail
+		return AddressMatch{}, ErrAmbiguousEmail
 	}
 }
 
@@ -160,6 +168,61 @@ type AuthCode struct {
 	UserID        int64
 	CodeChallenge string
 	ExpiresAt     time.Time
+}
+
+// Kinds of emailed sign-in secret.
+const (
+	OTPMagicLink = "magiclink"
+	OTPEmailCode = "email"
+)
+
+// EmailOTP is one emailed sign-in: a link, stored as its SHA-256, or a code,
+// stored as an HMAC. Either is spent once, with the PKCE verifier whose
+// challenge it carries.
+type EmailOTP struct {
+	Email         string
+	Kind          string
+	LinkHash      string
+	CodeHMAC      string
+	CodeChallenge string
+	CreateUser    bool
+	// Mailed says whether the send goes out; an address that reaches no
+	// account is still recorded so the budgets cannot tell the two apart.
+	Mailed    bool
+	IP        string
+	Attempts  int
+	ExpiresAt time.Time
+}
+
+// OTPLimits are the send budgets, counted from the rows themselves so every
+// replica shares them.
+type OTPLimits struct {
+	MinInterval    time.Duration
+	PerAddressHour int
+	PerProjectDay  int // mailed sends only
+	PerIPDay       int
+}
+
+// OTPAttempts bound the guesses at one code; the send budgets bound how many
+// codes there are to guess at.
+type OTPAttempts struct {
+	PerCode int
+}
+
+// OTPLookup finds a link by its hash, or else the address's live code sent
+// with the challenge, so guesses from another browser cannot spend it.
+type OTPLookup struct {
+	LinkHash      string
+	Email         string
+	CodeChallenge string
+}
+
+// AuditEvent is one row of the project's sign-in trail.
+type AuditEvent struct {
+	UserID int64 // zero when no account is known
+	Event  string
+	Method string
+	IP     string
 }
 
 // Store is one project's end-user database.
@@ -211,6 +274,23 @@ type Store interface {
 	SaveAuthCode(ctx context.Context, code AuthCode) error
 	// RedeemAuthCode spends a live code once; ErrNotFound otherwise.
 	RedeemAuthCode(ctx context.Context, codeHash string) (AuthCode, error)
+
+	// SaveEmailOTP records a send within the limits, ends the address's earlier
+	// live links and codes sent with the same challenge, and drops rows older
+	// than a day. ErrRateLimited past an address or IP budget; past the
+	// project's daily budget the row is kept and reported as not mailed.
+	SaveEmailOTP(ctx context.Context, otp EmailOTP, limits OTPLimits) (bool, error)
+	// RedeemEmailOTP spends the live row the lookup finds when check accepts
+	// it. A refusal counts an attempt and spends a link, or a code at its last
+	// attempt; a code is not offered once its address used up the day's
+	// guesses. ErrNotFound for no row and for a refusal alike.
+	RedeemEmailOTP(ctx context.Context, lookup OTPLookup, attempts OTPAttempts, check func(EmailOTP) bool) (EmailOTP, error)
+	// SignInWithEmail finds or creates the account of an address its owner
+	// just proved, by the rule a provider sign-in follows.
+	SignInWithEmail(ctx context.Context, email, fullName string, allowCreate bool) (Account, IdentityOutcome, error)
+	// AccountByAddress is the account an address reaches, whatever its case.
+	AccountByAddress(ctx context.Context, email string) (Account, error)
+	RecordAudit(ctx context.Context, event AuditEvent) error
 
 	CreateAPIKey(ctx context.Context, hash, prefix, keyType, name string) (int64, time.Time, error)
 	ListAPIKeys(ctx context.Context) ([]APIKeyListing, error)

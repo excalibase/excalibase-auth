@@ -68,10 +68,11 @@ func resolveIdentity(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim, 
 }
 
 // accountForAddress finds the account a provider address reaches: the exact
-// address, else the only one matching it whatever its case.
+// address, else the only one matching it whatever its case. A disabled one is
+// refused, so it is neither signed in to nor taken over.
 func accountForAddress(ctx context.Context, tx pgx.Tx, email string) (int64, bool, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT id, email = $1, email_verified AND email_verified_at IS NOT NULL FROM auth.users
+		`SELECT id, email = $1, email_verified AND email_verified_at IS NOT NULL, enabled FROM auth.users
 		 WHERE lower(email) = lower($1) ORDER BY email = $1 DESC, id LIMIT 2 FOR UPDATE`, email)
 	if err != nil {
 		return 0, false, err
@@ -80,7 +81,11 @@ func accountForAddress(ctx context.Context, tx pgx.Tx, email string) (int64, boo
 	if err != nil {
 		return 0, false, err
 	}
-	return store.PickAddressMatch(matches, pgx.ErrNoRows)
+	match, err := store.PickAddressMatch(matches, pgx.ErrNoRows)
+	if err == nil && !match.Enabled {
+		err = store.ErrAccountDisabled
+	}
+	return match.ID, match.Verified, err
 }
 
 func createProviderUser(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim) (int64, error) {

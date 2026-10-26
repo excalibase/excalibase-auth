@@ -44,6 +44,7 @@ type signInSettings struct {
 	providers     []string
 	redirectURLs  []string
 	allowNewUsers bool
+	emailOTP      bool
 	infoDown      bool
 	secretMissing bool
 }
@@ -62,6 +63,10 @@ type oauthFixture struct {
 	settings *signInSettings
 	// passwordIsNull reads users.password straight from the database.
 	passwordIsNull func(t *testing.T, email string) bool
+	// count reads a table's row count straight from the database.
+	count func(t *testing.T, table string) int
+	// disable switches an account off straight in the database.
+	disable func(t *testing.T, email string)
 }
 
 func (s *signInSettings) info(authURL string) map[string]any {
@@ -77,6 +82,7 @@ func (s *signInSettings) info(authURL string) map[string]any {
 	return map[string]any{
 		"projectId": "test-project", "orgSlug": "test-org", "siteUrl": "https://app.test",
 		"redirectUrls": s.redirectURLs, "allowNewUsers": s.allowNewUsers, "oauthProviders": providers,
+		"emailOtpEnabled": s.emailOTP,
 	}
 }
 
@@ -107,7 +113,7 @@ func (s *signInSettings) provisioning(record any, authURL *string) http.Handler 
 
 func newOAuthFixture(t *testing.T, record any, configure func(*pool.Manager), tune ...func(*AuthHandler)) *oauthFixture {
 	t.Helper()
-	settings := &signInSettings{providers: []string{"google", "github"}, redirectURLs: []string{appCallback}, allowNewUsers: true}
+	settings := &signInSettings{providers: []string{"google", "github"}, redirectURLs: []string{appCallback}, allowNewUsers: true, emailOTP: true}
 	var authURL string
 	provisioning := httptest.NewServer(settings.provisioning(record, &authURL))
 	t.Cleanup(provisioning.Close)
@@ -167,17 +173,29 @@ func newPostgresOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFix
 		}
 		return null
 	}
+	fx.disable = func(t *testing.T, email string) {
+		if _, err := direct.Exec(ctx, "UPDATE auth.users SET enabled = false WHERE email = $1", email); err != nil {
+			t.Fatalf("disable %s: %v", email, err)
+		}
+	}
+	fx.count = func(t *testing.T, table string) int {
+		var n int
+		if err := direct.QueryRow(ctx, "SELECT count(*) FROM auth."+table).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		return n
+	}
 	return fx
 }
 
-func newMySQLOAuthFixture(t *testing.T) *oauthFixture {
+func newMySQLOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFixture {
 	t.Helper()
 	server := testmysql.Start(t)
 	record := server.ProvisionAuth(t, "auth-admin-pw")
 	fx := newOAuthFixture(t, record, func(mgr *pool.Manager) {
 		mgr.SetMigrator(migrate.Run)
 		mgr.SetMySQLMigrator(migrate.RunMySQL)
-	})
+	}, tune...)
 	root := server.Root(t)
 	fx.passwordIsNull = func(t *testing.T, email string) bool {
 		var null bool
@@ -185,6 +203,18 @@ func newMySQLOAuthFixture(t *testing.T) *oauthFixture {
 			t.Fatalf("read password of %s: %v", email, err)
 		}
 		return null
+	}
+	fx.disable = func(t *testing.T, email string) {
+		if _, err := root.Exec("UPDATE `auth`.`users` SET enabled = FALSE WHERE email = ?", email); err != nil {
+			t.Fatalf("disable %s: %v", email, err)
+		}
+	}
+	fx.count = func(t *testing.T, table string) int {
+		var n int
+		if err := root.QueryRow("SELECT count(*) FROM `auth`.`" + table + "`").Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		return n
 	}
 	return fx
 }
