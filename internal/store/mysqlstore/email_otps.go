@@ -82,18 +82,6 @@ func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, limi
 			&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt); err != nil {
 			return notFound(err)
 		}
-		if otp.Kind == store.OTPEmailCode {
-			var guessed int
-			if err := tx.QueryRowContext(ctx,
-				`SELECT COALESCE(SUM(attempts), 0) FROM email_otps
-				 WHERE LOWER(email) = LOWER(?) AND kind = ? AND created_at > NOW(6) - INTERVAL 1 DAY`,
-				otp.Email, store.OTPEmailCode).Scan(&guessed); err != nil {
-				return err
-			}
-			if guessed >= limits.PerAddressDay {
-				return store.ErrNotFound
-			}
-		}
 		accepted = check(otp)
 		spent := accepted || otp.Kind == store.OTPMagicLink || otp.Attempts+1 >= limits.PerCode
 		attempts := otp.Attempts

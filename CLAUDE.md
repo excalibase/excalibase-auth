@@ -41,7 +41,7 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 - `internal/ratelimit` — keyed token-bucket limiter (in-memory, per replica) plus client-IP resolution behind trusted proxies and hashed identity keys.
 - `internal/middleware` — CORS, security headers, tenant context, JWT guard, and the per-route rate-limit middleware (`RateLimits`) wired into the handler via `WithRateLimits`.
 - `internal/oauth` — Google/GitHub sign-in: PKCE, Google id_token checks, redirect allow-list. `internal/testutil/idpfake` fakes both providers.
-- `internal/emailotp` — six-digit sign-in codes and the HMAC they are stored as (`handler/email_otp.go` serves `/otp` and `/verify`).
+- `internal/emailotp` — eight-digit sign-in codes and the HMAC they are stored as (`handler/email_otp.go` serves `/otp` and `/verify`).
 - `internal/domain` — Domain types and DTOs.
 - `internal/config` — Env-based config.
 

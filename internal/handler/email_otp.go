@@ -26,11 +26,10 @@ import (
 const (
 	// otpTTL is how long an emailed link or code stays usable.
 	otpTTL = 10 * time.Minute
-	// otpMaxAttempts is how many guesses one code gets; otpDailyGuesses how
-	// many an address gets over a day, so new codes do not reset the count.
-	otpMaxAttempts  = 5
-	otpDailyGuesses = 15
-	otpMailTimeout  = 10 * time.Second
+	// otpMaxAttempts is how many guesses one code gets. With eight digits and
+	// the send budgets no address-wide cap is needed, so none can lock a user out.
+	otpMaxAttempts = 5
+	otpMailTimeout = 10 * time.Second
 	// maxOTPBody bounds both request bodies, which carry a few short fields.
 	maxOTPBody = 4 << 10
 	// otpSentMessage is the one answer /otp gives every address.
@@ -43,7 +42,7 @@ const (
 // guards the shared sending reputation.
 var defaultOTPLimits = store.OTPLimits{MinInterval: time.Minute, PerAddressHour: 5, PerProjectDay: 500, PerIPDay: 50}
 
-var codeGuessLimits = store.OTPAttempts{PerCode: otpMaxAttempts, PerAddressDay: otpDailyGuesses}
+var codeGuessLimits = store.OTPAttempts{PerCode: otpMaxAttempts}
 
 var (
 	errInvalidEmail = errors.New(codeInvalidEmail)

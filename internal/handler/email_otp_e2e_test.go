@@ -177,7 +177,7 @@ func otpCodeSignUpThenIn(t *testing.T, fx *otpFixture) {
 	auditRows := fx.count(t, "audit_log")
 	msg := fx.sender.last(t)
 	code := fx.lastCode(t)
-	if msg.To != address || len(code) != 6 || msg.Data["expiresMin"] != "10" {
+	if msg.To != address || len(code) != 8 || msg.Data["expiresMin"] != "10" {
 		t.Fatalf("mail = %+v", msg.Data)
 	}
 	resp, first := fx.verifyCode(strings.ToUpper(address), code, verifier)
@@ -249,7 +249,7 @@ func otpAttempts(t *testing.T, fx *otpFixture) {
 	address := mailbox("attempts")
 	verifier := fx.sendCode(t, address)
 	code := fx.lastCode(t)
-	wrong := fmt.Sprintf("%06d", (atoi(code)+1)%1_000_000)
+	wrong := fmt.Sprintf("%08d", (atoi(code)+1)%100_000_000)
 	for i := range 5 {
 		if resp, body := fx.verifyCode(address, wrong, verifier); resp.StatusCode != http.StatusBadRequest || body["error"] != "invalid_or_expired_token" {
 			t.Fatalf("wrong code %d: %d %v", i+1, resp.StatusCode, body)
@@ -374,7 +374,7 @@ func otpGuessesNeedTheChallenge(t *testing.T, fx *otpFixture) {
 	address := mailbox("victim")
 	verifier := fx.sendCode(t, address)
 	code := fx.lastCode(t)
-	wrong := fmt.Sprintf("%06d", (atoi(code)+1)%1_000_000)
+	wrong := fmt.Sprintf("%08d", (atoi(code)+1)%100_000_000)
 	for range 6 {
 		if resp, _ := fx.verifyCode(address, wrong, newVerifier(t)); resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("a guess from another browser: %d", resp.StatusCode)

@@ -33,7 +33,7 @@ func save(t *testing.T, db store.Store, otp store.EmailOTP) {
 
 func accept(store.EmailOTP) bool { return true }
 
-func perCode(n int) store.OTPAttempts { return store.OTPAttempts{PerCode: n, PerAddressDay: 1_000_000} }
+func perCode(n int) store.OTPAttempts { return store.OTPAttempts{PerCode: n} }
 func refuse(store.EmailOTP) bool      { return false }
 
 func runEmailOTPs(t *testing.T, fx Fixture) {
@@ -101,26 +101,21 @@ func runEmailOTPs(t *testing.T, fx Fixture) {
 		}
 	})
 
-	t.Run("an address's wrong guesses across its codes are capped for the day", func(t *testing.T) {
-		email := uniqueEmail("otp-daily-guesses")
-		capped := store.OTPAttempts{PerCode: 5, PerAddressDay: 7}
+	t.Run("spent codes do not hold back the address's next one", func(t *testing.T) {
+		email := uniqueEmail("otp-no-lockout")
 		lookup := store.OTPLookup{Email: email, CodeChallenge: "challenge"}
-		for _, guesses := range []int{5, 2} {
+		for range 3 {
 			save(t, db, codeOTP(t, email))
-			for range guesses {
-				if _, err := db.RedeemEmailOTP(ctx, lookup, capped, refuse); !errors.Is(err, store.ErrNotFound) {
+			for range 5 {
+				if _, err := db.RedeemEmailOTP(ctx, lookup, perCode(5), refuse); !errors.Is(err, store.ErrNotFound) {
 					t.Fatal(err)
 				}
 			}
 		}
-		save(t, db, codeOTP(t, email))
-		if _, err := db.RedeemEmailOTP(ctx, lookup, capped, accept); !errors.Is(err, store.ErrNotFound) {
-			t.Fatalf("a code was redeemed past the address's daily guesses: %v", err)
-		}
-		link := linkOTP(t, email)
-		save(t, db, link)
-		if _, err := db.RedeemEmailOTP(ctx, store.OTPLookup{LinkHash: link.LinkHash}, capped, accept); err != nil {
-			t.Fatalf("a link, which cannot be guessed, was refused too: %v", err)
+		fresh := codeOTP(t, email)
+		save(t, db, fresh)
+		if got, err := db.RedeemEmailOTP(ctx, lookup, perCode(5), accept); err != nil || got.CodeHMAC != fresh.CodeHMAC {
+			t.Fatalf("fifteen wrong guesses locked the address out: %+v %v", got, err)
 		}
 	})
 

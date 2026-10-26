@@ -203,11 +203,10 @@ type OTPLimits struct {
 	PerIPDay       int
 }
 
-// OTPAttempts bound the guesses at codes: per code, and per address over a
-// day whatever the number of codes sent.
+// OTPAttempts bound the guesses at one code; the send budgets bound how many
+// codes there are to guess at.
 type OTPAttempts struct {
-	PerCode       int
-	PerAddressDay int
+	PerCode int
 }
 
 // OTPLookup finds a link by its hash, or else the address's live code sent

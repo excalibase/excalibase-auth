@@ -5,14 +5,14 @@ import (
 	"testing"
 )
 
-func TestNewCodeIsSixDigitsAndVaries(t *testing.T) {
+func TestNewCodeIsEightDigitsAndVaries(t *testing.T) {
 	seen := map[string]bool{}
 	for range 50 {
 		code, err := NewCode()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(code) != CodeLength || strings.Trim(code, "0123456789") != "" {
+		if CodeLength != 8 || len(code) != CodeLength || strings.Trim(code, "0123456789") != "" {
 			t.Fatalf("code %q is not %d digits", code, CodeLength)
 		}
 		seen[code] = true

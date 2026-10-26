@@ -1,4 +1,4 @@
-// Package emailotp makes the six-digit sign-in codes and the HMAC each is
+// Package emailotp makes the eight-digit sign-in codes and the HMAC each is
 // stored as. Developers can read the auth schema, so a code is kept only under
 // a key the database never sees.
 package emailotp
@@ -14,9 +14,9 @@ import (
 )
 
 // CodeLength is the number of digits in a code.
-const CodeLength = 6
+const CodeLength = 8
 
-var codeSpace = big.NewInt(1_000_000)
+var codeSpace = big.NewInt(100_000_000)
 
 // NewCode draws a uniformly random code.
 func NewCode() (string, error) {
