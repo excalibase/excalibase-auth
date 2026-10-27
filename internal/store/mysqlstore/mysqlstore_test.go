@@ -58,6 +58,11 @@ func TestIntegration_MySQLStoreKeepsTheStoreContract(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		SetEmail: func(t *testing.T, id int64, email string) {
+			if _, err := root.Exec("UPDATE `auth`.`users` SET email = ? WHERE id = ?", email, id); err != nil {
+				t.Fatal(err)
+			}
+		},
 		Count: func(t *testing.T, table string) int {
 			var n int
 			if err := root.QueryRow("SELECT COUNT(*) FROM `auth`.`" + table + "`").Scan(&n); err != nil {

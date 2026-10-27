@@ -28,3 +28,23 @@ func TestPickAddressMatch(t *testing.T) {
 		t.Fatalf("two in other cases: %v", err)
 	}
 }
+
+func TestAddressKeyLowersOnlyASCIILetters(t *testing.T) {
+	for in, want := range map[string]string{
+		"Mixed.Case@Example.COM": "mixed.case@example.com",
+		"Kbc@x.test":             "Kbc@x.test",
+		"ÄBC@x.test":             "Äbc@x.test",
+	} {
+		if got := AddressKey(in); got != want {
+			t.Errorf("AddressKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestHasUsablePasswordRefusesNoHashAndMarkers(t *testing.T) {
+	for hash, want := range map[string]bool{"$argon2id$v=19$x": true, "": false, "!reset-required": false} {
+		if got := HasUsablePassword(hash); got != want {
+			t.Errorf("%q: %v, want %v", hash, got, want)
+		}
+	}
+}

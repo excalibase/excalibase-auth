@@ -188,6 +188,12 @@ func (h *AuthHandler) Routes(r chi.Router) {
 		r.With(h.limit(rateLimitOTP)).Post("/otp", h.SendOTP)
 		r.With(h.limit(rateLimitToken)).Post("/verify", h.VerifyOTP)
 
+		// A signed-in end user's identities (EXC-662); off with every method off.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RequireJWT(h.jwtService))
+			r.Route("/user/identities", h.IdentityRoutes)
+		})
+
 		// API key management — protected by JWT. Mounting RequireJWT here at
 		// the route registration site (instead of inside apikey.go) makes the
 		// auth requirement impossible to forget.
@@ -509,7 +515,7 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 
 	var roles accountRoles
 	// A refusal returns before the store commits, so the token survives it.
-	account, _, err := db.RotateRefreshToken(ctx, hash, successorHash, func(account store.Account) error {
+	account, session, err := db.RotateRefreshToken(ctx, hash, successorHash, func(account store.Account) error {
 		roles = accountRoles{role: account.Role, allowed: account.AllowedRoles}
 		if err := roles.validate(); err != nil {
 			return refreshRefusal{status: 403, err: err}
@@ -535,7 +541,7 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 	}
 
 	user := domain.UserInfo{ID: account.ID, Email: account.Email, FullName: account.FullName}
-	resp, err := h.sessionResponse(r, projectID, user, roles, account.EmailVerified, successor)
+	resp, err := h.sessionResponse(r, projectID, user, roles, account.EmailVerified, successor, session.AuthTime)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -613,15 +619,20 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 // generateAuthResponse starts a new session for the user.
 func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool) (*domain.AuthResponse, error) {
+	return h.startSession(r, projectID, user, roles, emailVerified, h.newRefreshSession())
+}
+
+// startSession stores the session's first refresh token and signs its access token.
+func (h *AuthHandler) startSession(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool, session store.RefreshSession) (*domain.AuthResponse, error) {
 	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return nil, err
 	}
-	refreshToken, err := storeRefreshToken(r.Context(), db, user.ID, h.newRefreshSession())
+	refreshToken, err := storeRefreshToken(r.Context(), db, user.ID, session)
 	if err != nil {
 		return nil, err
 	}
-	return h.sessionResponse(r, projectID, user, roles, emailVerified, refreshToken)
+	return h.sessionResponse(r, projectID, user, roles, emailVerified, refreshToken, session.AuthTime)
 }
 
 // projectLabels are the display names a token carries next to projectId.
@@ -714,11 +725,14 @@ func apiKeyClaims(projectID string, labels projectLabels, keyID int64, keyType s
 }
 
 // sessionResponse signs an end-user access token and pairs it with the
-// session's refresh token.
-func (h *AuthHandler) sessionResponse(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool, refreshToken string) (*domain.AuthResponse, error) {
+// session's refresh token. authTime is when the user signed in, zero if unknown.
+func (h *AuthHandler) sessionResponse(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool, refreshToken string, authTime time.Time) (*domain.AuthResponse, error) {
 	claims, err := endUserClaims(projectID, h.labelsFor(r, projectID), user, roles, emailVerified)
 	if err != nil {
 		return nil, err
+	}
+	if !authTime.IsZero() {
+		claims.AuthTime = authTime.Unix()
 	}
 	accessToken, err := h.jwtService.Sign(claims)
 	if err != nil {

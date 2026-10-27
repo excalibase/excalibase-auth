@@ -28,6 +28,8 @@ type Fixture struct {
 	Grandfather func(t *testing.T, email string)
 	// Disable switches an account off, as an admin does.
 	Disable func(t *testing.T, email string)
+	// SetEmail changes an account's address straight in the database.
+	SetEmail func(t *testing.T, id int64, email string)
 }
 
 var sequence atomic.Int64
@@ -72,6 +74,7 @@ func Run(t *testing.T, fx Fixture) {
 	t.Run("sign-in flows", func(t *testing.T) { runSignInFlows(t, fx) })
 	t.Run("email codes", func(t *testing.T) { runEmailOTPs(t, fx) })
 	t.Run("email sign-in", func(t *testing.T) { runEmailSignIn(t, fx) })
+	t.Run("identity linking", func(t *testing.T) { runLinking(t, fx) })
 }
 
 func runUsers(t *testing.T, fx Fixture) {

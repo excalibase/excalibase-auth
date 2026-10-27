@@ -142,13 +142,17 @@ func decodeRoles(raw sql.NullString) ([]string, error) {
 func (s *Store) InsertUser(ctx context.Context, email, passwordHash, fullName string) (int64, bool, error) {
 	result, err := s.db.ExecContext(ctx,
 		`INSERT INTO users (email, password, full_name, role, enabled, created_at, updated_at)
-		 VALUES (?, ?, ?, 'user', TRUE, NOW(6), NOW(6))`,
-		email, passwordHash, fullName)
+		 SELECT ?, ?, ?, 'user', TRUE, NOW(6), NOW(6) FROM DUAL
+		 WHERE NOT EXISTS (SELECT 1 FROM identities WHERE provider = ? AND subject = ?)`,
+		email, passwordHash, fullName, store.EmailProvider, store.AddressKey(email))
 	var mysqlErr *mysql.MySQLError
 	if errors.As(err, &mysqlErr) && mysqlErr.Number == duplicateEntry {
 		return 0, false, nil
 	}
 	if err != nil {
+		return 0, false, err
+	}
+	if inserted, err := result.RowsAffected(); err != nil || inserted == 0 {
 		return 0, false, err
 	}
 	id, err := result.LastInsertId()
@@ -318,12 +322,20 @@ func (s *Store) ApplyRoleChange(ctx context.Context, change store.RoleChange) (d
 	return after, nil
 }
 
-const insertRefreshToken = `INSERT INTO refresh_tokens (token_hash, family_id, user_id, expiry_date, created_at, revoked)
-	VALUES (?, ?, ?, ?, NOW(6), FALSE)`
+const insertRefreshToken = `INSERT INTO refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, created_at, revoked)
+	VALUES (?, ?, ?, ?, ?, NOW(6), FALSE)`
 
 func (s *Store) InsertRefreshToken(ctx context.Context, hash string, userID int64, session store.RefreshSession) error {
-	_, err := s.db.ExecContext(ctx, insertRefreshToken, hash, session.FamilyID.String(), userID, session.Expiry)
+	_, err := s.db.ExecContext(ctx, insertRefreshToken, hash, session.FamilyID.String(), userID, session.Expiry, authTime(session))
 	return err
+}
+
+// authTime is the session's sign-in time, NULL when it predates the column.
+func authTime(session store.RefreshSession) any {
+	if session.AuthTime.IsZero() {
+		return nil
+	}
+	return session.AuthTime.UTC()
 }
 
 // RotateRefreshToken locks the live row before revoking it: a concurrent
@@ -335,16 +347,18 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 	)
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		var (
-			userID int64
-			family string
+			userID   int64
+			family   string
+			signedIn sql.NullTime
 		)
 		if err := tx.QueryRowContext(ctx,
-			`SELECT user_id, family_id, expiry_date FROM refresh_tokens
+			`SELECT user_id, family_id, expiry_date, last_auth_at FROM refresh_tokens
 			 WHERE token_hash = ? AND revoked = FALSE AND expiry_date > NOW(6) FOR UPDATE`,
 			presented,
-		).Scan(&userID, &family, &session.Expiry); err != nil {
+		).Scan(&userID, &family, &session.Expiry, &signedIn); err != nil {
 			return notFound(err)
 		}
+		session.AuthTime = signedIn.Time
 		familyID, err := uuid.Parse(family)
 		if err != nil {
 			return err
@@ -364,7 +378,7 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 		if err := accept(account); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, insertRefreshToken, successor, session.FamilyID.String(), userID, session.Expiry)
+		_, err = tx.ExecContext(ctx, insertRefreshToken, successor, session.FamilyID.String(), userID, session.Expiry, authTime(session))
 		return err
 	})
 	if err != nil {
@@ -417,10 +431,21 @@ func (s *Store) RevokeRefreshToken(ctx context.Context, hash string) error {
 	return err
 }
 
+// RevokeUserRefreshTokens also ends the links in flight; see pgstore.
 func (s *Store) RevokeUserRefreshTokens(ctx context.Context, userID int64) error {
-	_, err := s.db.ExecContext(ctx,
-		"UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ? AND revoked = FALSE", userID)
-	return err
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		for _, statement := range []string{
+			"UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ? AND revoked = FALSE",
+			"DELETE FROM flow_states WHERE link_user_id = ?",
+			"DELETE FROM auth_codes WHERE user_id = ? AND link_provider IS NOT NULL",
+			"UPDATE email_otps SET consumed_at = NOW(6) WHERE link_user_id = ? AND consumed_at IS NULL",
+		} {
+			if _, err := tx.ExecContext(ctx, statement, userID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // tokenQueries are literals per table, so no identifier is ever interpolated.

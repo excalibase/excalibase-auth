@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 type RegisterRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -72,4 +74,19 @@ type UserInfo struct {
 	ID       int64  `json:"id"`
 	Email    string `json:"email"`
 	FullName string `json:"fullName"`
+}
+
+// Identity is one way an end user's account signs in besides its own address.
+type Identity struct {
+	ID           int64      `json:"id"`
+	Provider     string     `json:"provider"`
+	Email        string     `json:"email"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	LastSignInAt *time.Time `json:"lastSignInAt"`
+}
+
+// IdentitiesResponse lists an account's identities and whether it has a password.
+type IdentitiesResponse struct {
+	Identities  []Identity `json:"identities"`
+	HasPassword bool       `json:"hasPassword"`
 }

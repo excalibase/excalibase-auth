@@ -71,6 +71,9 @@ func resolveIdentity(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim, 
 // address, else the only one matching it whatever its case. A disabled one is
 // refused, so it is neither signed in to nor taken over.
 func accountForAddress(ctx context.Context, tx pgx.Tx, email string) (int64, bool, error) {
+	if linked, ok, err := linkedAddress(ctx, tx, email, true); err != nil || ok {
+		return linked.ID, linked.Verified, err
+	}
 	rows, err := tx.Query(ctx,
 		`SELECT id, email = $1, email_verified AND email_verified_at IS NOT NULL, enabled FROM auth.users
 		 WHERE lower(email) = lower($1) ORDER BY email = $1 DESC, id LIMIT 2 FOR UPDATE`, email)
@@ -86,6 +89,48 @@ func accountForAddress(ctx context.Context, tx pgx.Tx, email string) (int64, boo
 		err = store.ErrAccountDisabled
 	}
 	return match.ID, match.Verified, err
+}
+
+const (
+	linkedAddressQuery = `SELECT u.id, u.enabled FROM auth.identities i JOIN auth.users u ON u.id = i.user_id
+		WHERE i.provider = $1 AND i.subject = $2`
+	linkedAddressLockedQuery = `SELECT u.id, u.enabled FROM auth.identities i JOIN auth.users u ON u.id = i.user_id
+		WHERE i.provider = $1 AND i.subject = $2 FOR UPDATE`
+)
+
+// linkedAddress is the account an address was linked to; it was proven then.
+func linkedAddress(ctx context.Context, tx pgx.Tx, email string, forUpdate bool) (store.AddressMatch, bool, error) {
+	match := store.AddressMatch{Exact: true, Verified: true}
+	query := linkedAddressQuery
+	if forUpdate {
+		query = linkedAddressLockedQuery
+	}
+	err := tx.QueryRow(ctx, query,
+		store.EmailProvider, store.AddressKey(email)).Scan(&match.ID, &match.Enabled)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return match, false, nil
+	case err != nil:
+		return match, false, err
+	case !match.Enabled:
+		return match, true, store.ErrAccountDisabled
+	}
+	return match, true, provenElsewhere(ctx, tx, match.ID, email)
+}
+
+// provenElsewhere refuses a linked address another proven account answers to,
+// rather than choose between them.
+func provenElsewhere(ctx context.Context, tx pgx.Tx, linkedTo int64, email string) error {
+	var other bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM auth.users WHERE lower(email) = lower($1) AND id <> $2
+		 AND email_verified AND email_verified_at IS NOT NULL)`, email, linkedTo).Scan(&other); err != nil {
+		return err
+	}
+	if other {
+		return store.ErrAmbiguousEmail
+	}
+	return nil
 }
 
 func createProviderUser(ctx context.Context, tx pgx.Tx, claim store.IdentityClaim) (int64, error) {
@@ -113,9 +158,9 @@ func (s *Store) SaveFlowState(ctx context.Context, state store.FlowState) error 
 		return err
 	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO auth.flow_states (state_hash, provider, idp_code_verifier, nonce, client_code_challenge, redirect_to, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		state.StateHash, state.Provider, state.IDPCodeVerifier, state.Nonce, state.ClientCodeChallenge, state.RedirectTo, state.ExpiresAt)
+		`INSERT INTO auth.flow_states (state_hash, provider, idp_code_verifier, nonce, client_code_challenge, redirect_to, link_user_id, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, 0), $8)`,
+		state.StateHash, state.Provider, state.IDPCodeVerifier, state.Nonce, state.ClientCodeChallenge, state.RedirectTo, state.LinkUserID, state.ExpiresAt)
 	return err
 }
 
@@ -123,8 +168,8 @@ func (s *Store) ConsumeFlowState(ctx context.Context, stateHash string) (store.F
 	state := store.FlowState{StateHash: stateHash}
 	err := s.pool.QueryRow(ctx,
 		`DELETE FROM auth.flow_states WHERE state_hash = $1 AND expires_at > NOW()
-		 RETURNING provider, idp_code_verifier, nonce, client_code_challenge, redirect_to, expires_at`,
-		stateHash).Scan(&state.Provider, &state.IDPCodeVerifier, &state.Nonce, &state.ClientCodeChallenge, &state.RedirectTo, &state.ExpiresAt)
+		 RETURNING provider, idp_code_verifier, nonce, client_code_challenge, redirect_to, COALESCE(link_user_id, 0), expires_at`,
+		stateHash).Scan(&state.Provider, &state.IDPCodeVerifier, &state.Nonce, &state.ClientCodeChallenge, &state.RedirectTo, &state.LinkUserID, &state.ExpiresAt)
 	return state, notFound(err)
 }
 
@@ -133,8 +178,9 @@ func (s *Store) SaveAuthCode(ctx context.Context, code store.AuthCode) error {
 		return err
 	}
 	_, err := s.pool.Exec(ctx,
-		"INSERT INTO auth.auth_codes (code_hash, user_id, code_challenge, expires_at) VALUES ($1, $2, $3, $4)",
-		code.CodeHash, code.UserID, code.CodeChallenge, code.ExpiresAt)
+		`INSERT INTO auth.auth_codes (code_hash, user_id, code_challenge, link_provider, link_subject, link_email, expires_at)
+		 VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), $7)`,
+		code.CodeHash, code.UserID, code.CodeChallenge, code.Link.Provider, code.Link.Subject, code.Link.Email, code.ExpiresAt)
 	return err
 }
 
@@ -143,7 +189,7 @@ func (s *Store) RedeemAuthCode(ctx context.Context, codeHash string) (store.Auth
 	err := s.pool.QueryRow(ctx,
 		`UPDATE auth.auth_codes SET consumed_at = NOW()
 		 WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()
-		 RETURNING user_id, code_challenge, expires_at`,
-		codeHash).Scan(&code.UserID, &code.CodeChallenge, &code.ExpiresAt)
+		 RETURNING user_id, code_challenge, COALESCE(link_provider, ''), COALESCE(link_subject, ''), COALESCE(link_email, ''), expires_at`,
+		codeHash).Scan(&code.UserID, &code.CodeChallenge, &code.Link.Provider, &code.Link.Subject, &code.Link.Email, &code.ExpiresAt)
 	return code, notFound(err)
 }

@@ -27,9 +27,9 @@ func (s *Store) SaveEmailOTP(ctx context.Context, otp store.EmailOTP, limits sto
 			return err
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO email_otps (email, kind, link_hash, code_hmac, code_challenge, create_user, mailed, ip, expires_at)
-			 VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?)`,
-			otp.Email, otp.Kind, otp.LinkHash, otp.CodeHMAC, otp.CodeChallenge, otp.CreateUser, mailed, otp.IP, otp.ExpiresAt.UTC())
+			`INSERT INTO email_otps (email, kind, link_hash, code_hmac, code_challenge, create_user, mailed, ip, expires_at, link_user_id)
+			 VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, 0))`,
+			otp.Email, otp.Kind, otp.LinkHash, otp.CodeHMAC, otp.CodeChallenge, otp.CreateUser, mailed, otp.IP, otp.ExpiresAt.UTC(), otp.LinkUserID)
 		return err
 	})
 	return mailed, err
@@ -38,17 +38,19 @@ func (s *Store) SaveEmailOTP(ctx context.Context, otp store.EmailOTP, limits sto
 // withinOTPLimits counts the sends the budgets allow, under the lock row, and
 // says whether this one may be mailed.
 func withinOTPLimits(ctx context.Context, tx *sql.Tx, otp store.EmailOTP, limits store.OTPLimits) (bool, error) {
-	var recent, lastHour, fromIP, mailedToday sql.NullInt64
+	var recent, lastHour, fromIP, mailedToday, links sql.NullInt64
 	if err := tx.QueryRowContext(ctx,
 		`SELECT SUM(LOWER(email) = LOWER(?) AND created_at > NOW(6) - INTERVAL ? MICROSECOND),
 		        SUM(LOWER(email) = LOWER(?) AND created_at > NOW(6) - INTERVAL 1 HOUR),
 		        SUM(ip <=> ?),
-		        SUM(mailed)
+		        SUM(mailed),
+		        SUM(link_user_id <=> ?)
 		 FROM email_otps WHERE created_at > NOW(6) - INTERVAL 1 DAY`,
-		otp.Email, limits.MinInterval.Microseconds(), otp.Email, otp.IP).Scan(&recent, &lastHour, &fromIP, &mailedToday); err != nil {
+		otp.Email, limits.MinInterval.Microseconds(), otp.Email, otp.IP, otp.LinkUserID).Scan(&recent, &lastHour, &fromIP, &mailedToday, &links); err != nil {
 		return false, err
 	}
-	if recent.Int64 > 0 || lastHour.Int64 >= int64(limits.PerAddressHour) || fromIP.Int64 >= int64(limits.PerIPDay) {
+	overLinks := otp.LinkUserID != 0 && limits.LinksPerAccountDay > 0 && links.Int64 >= int64(limits.LinksPerAccountDay)
+	if recent.Int64 > 0 || lastHour.Int64 >= int64(limits.PerAddressHour) || fromIP.Int64 >= int64(limits.PerIPDay) || overLinks {
 		return false, store.ErrRateLimited
 	}
 	return otp.Mailed && mailedToday.Int64 < int64(limits.PerProjectDay), nil
@@ -56,10 +58,12 @@ func withinOTPLimits(ctx context.Context, tx *sql.Tx, otp store.EmailOTP, limits
 
 // The live sign-in lookups: an unspent, unexpired, mailed row.
 const (
-	liveLinkQuery = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
+	liveLinkQuery = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at,
+		COALESCE(link_user_id, 0)
 		FROM email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW(6)
 		AND link_hash = ? AND kind = ? FOR UPDATE`
-	liveCodeQuery = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
+	liveCodeQuery = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at,
+		COALESCE(link_user_id, 0)
 		FROM email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW(6)
 		AND LOWER(email) = LOWER(?) AND kind = ? AND attempts < ? AND code_challenge = ?
 		ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`
@@ -79,7 +83,7 @@ func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, limi
 		}
 		var id int64
 		if err := row.Scan(&id, &otp.Email, &otp.Kind, &otp.LinkHash, &otp.CodeHMAC, &otp.CodeChallenge,
-			&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt); err != nil {
+			&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt, &otp.LinkUserID); err != nil {
 			return notFound(err)
 		}
 		accepted = check(otp)
@@ -136,6 +140,9 @@ func (s *Store) SignInWithEmail(ctx context.Context, email, fullName string, all
 }
 
 func (s *Store) AccountByAddress(ctx context.Context, email string) (store.Account, error) {
+	if linked, ok, err := s.linkedAccount(ctx, email); ok || err != nil {
+		return linked, err
+	}
 	rows, err := s.db.QueryContext(ctx, "SELECT "+accountColumns+`, email = ? FROM users
 		WHERE LOWER(email) = LOWER(?) ORDER BY email = ? DESC, id LIMIT 2`, email, email, email)
 	if err != nil {
@@ -161,6 +168,23 @@ func (s *Store) AccountByAddress(ctx context.Context, email string) (store.Accou
 		return store.Account{}, err
 	}
 	return accounts[0], nil
+}
+
+// linkedAccount is the account an address was linked to; see pgstore.
+func (s *Store) linkedAccount(ctx context.Context, email string) (store.Account, bool, error) {
+	var (
+		account store.Account
+		ok      bool
+	)
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		match, found, err := linkedAddress(ctx, tx, email, false)
+		if ok = found; !found || err != nil {
+			return err
+		}
+		account, err = scanAccount(tx.QueryRowContext(ctx, "SELECT "+accountColumns+" FROM users WHERE id = ?", match.ID))
+		return err
+	})
+	return account, ok, err
 }
 
 func (s *Store) RecordAudit(ctx context.Context, event store.AuditEvent) error {

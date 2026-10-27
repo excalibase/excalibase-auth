@@ -40,7 +40,7 @@ const (
 // defaultOTPLimits pace the mail: an address once a minute and five times an
 // hour, a client fifty times a day, and a project's mailed sends a day, which
 // guards the shared sending reputation.
-var defaultOTPLimits = store.OTPLimits{MinInterval: time.Minute, PerAddressHour: 5, PerProjectDay: 500, PerIPDay: 50}
+var defaultOTPLimits = store.OTPLimits{MinInterval: time.Minute, PerAddressHour: 5, PerProjectDay: 500, PerIPDay: 50, LinksPerAccountDay: 10}
 
 var codeGuessLimits = store.OTPAttempts{PerCode: otpMaxAttempts}
 
@@ -112,22 +112,15 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	redirectTo := ""
 	if req.Type == store.OTPMagicLink {
-		if req.RedirectTo == "" {
-			req.RedirectTo = info.SiteURL
-		}
-		allowed, ok := oauth.AllowedRedirect(req.RedirectTo, allowedRedirects(info))
-		if !ok || len(allowed) > maxRedirectLength {
-			httpError(w, errRedirectNotAllowed.Error(), http.StatusBadRequest)
+		if redirectTo, ok = magicLinkTarget(w, req, info); !ok {
 			return
 		}
-		redirectTo = allowed
 	}
-	projectID := projectKey(r)
-	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
-	if err != nil {
-		writePoolFailure(w, err)
+	db, ok := h.storeFor(w, r)
+	if !ok {
 		return
 	}
+	projectID := projectKey(r)
 	createUser := req.CreateUser == nil || *req.CreateUser
 	otp, msg, err := h.newEmailOTP(projectID, req, redirectTo, createUser)
 	if err != nil {
@@ -136,6 +129,25 @@ func (h *AuthHandler) SendOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	otp.Mailed = h.mayMail(r.Context(), db, req.Email, createUser && info.NewUsersAllowed())
 	otp.IP = otpSenderKey(h.clientIP(r))
+	h.saveAndMail(w, r, db, projectID, otp, msg)
+}
+
+// magicLinkTarget is the allowed page a link lands on, the site URL by default.
+func magicLinkTarget(w http.ResponseWriter, req otpRequest, info pool.ProjectInfo) (string, bool) {
+	target := req.RedirectTo
+	if target == "" {
+		target = info.SiteURL
+	}
+	allowed, ok := oauth.AllowedRedirect(target, allowedRedirects(info))
+	if !ok || len(allowed) > maxRedirectLength {
+		httpError(w, errRedirectNotAllowed.Error(), http.StatusBadRequest)
+		return "", false
+	}
+	return allowed, true
+}
+
+// saveAndMail records the send within the budgets and mails it after the answer.
+func (h *AuthHandler) saveAndMail(w http.ResponseWriter, r *http.Request, db store.Store, projectID string, otp store.EmailOTP, msg email.Message) {
 	mailed, err := db.SaveEmailOTP(r.Context(), otp, h.otpLimits)
 	switch {
 	case errors.Is(err, store.ErrRateLimited):
@@ -250,6 +262,10 @@ func (h *AuthHandler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		httpError(w, errTokenNotRedeemable.Error(), http.StatusBadRequest)
 		return
 	}
+	if otp.LinkUserID != 0 {
+		h.finishAddressLink(w, r, db, otp)
+		return
+	}
 	account, outcome, status, err := h.signInByEmail(r.Context(), db, projectID, otp, info.NewUsersAllowed())
 	if err != nil {
 		httpError(w, err.Error(), status)
@@ -337,15 +353,20 @@ var auditEvents = map[store.IdentityOutcome]string{
 	store.IdentityTookOver: "takeover",
 }
 
-// audit records a sign-in; a failure to write it is logged, never the sign-in's.
+// audit records a sign-in.
 func (h *AuthHandler) audit(ctx context.Context, db store.Store, projectID string, event store.AuditEvent, outcome store.IdentityOutcome) {
 	name, ok := auditEvents[outcome]
 	if !ok {
 		name = "sign_in"
 	}
 	event.Event = name
+	h.recordAudit(ctx, db, projectID, event)
+}
+
+// recordAudit writes an audit row; a failure to write it is logged, never the action's.
+func (h *AuthHandler) recordAudit(ctx context.Context, db store.Store, projectID string, event store.AuditEvent) {
 	if err := db.RecordAudit(ctx, event); err != nil {
-		log.Printf("auth.audit.write_failed project=%s event=%s", safeLog(projectID), name)
+		log.Printf("auth.audit.write_failed project=%s event=%s", safeLog(projectID), event.Event)
 	}
 }
 

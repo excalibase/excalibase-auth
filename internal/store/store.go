@@ -7,6 +7,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/excalibase/auth/internal/domain"
@@ -38,6 +39,16 @@ var ErrAccountDisabled = errors.New("account is disabled")
 // ErrRateLimited means a send would pass the address's or the project's budget.
 var ErrRateLimited = errors.New("too many codes sent")
 
+// ErrIdentityExists means the identity, or the address, already belongs to an account.
+var ErrIdentityExists = errors.New("identity already exists")
+
+// ErrAddressUnproven means the account's own address was never proven, so
+// nothing may be linked to it.
+var ErrAddressUnproven = errors.New("account address is not proven")
+
+// ErrLastSignInMethod means an unlink would leave the account no way to sign in.
+var ErrLastSignInMethod = errors.New("last sign-in method")
+
 // TokenKind names one of the single-use link tables.
 type TokenKind int
 
@@ -63,6 +74,8 @@ type Account struct {
 type RefreshSession struct {
 	FamilyID uuid.UUID
 	Expiry   time.Time
+	// AuthTime is when the owner signed in; zero for sessions older than it.
+	AuthTime time.Time
 }
 
 // RefreshState is what a presented refresh token's row says about it.
@@ -106,12 +119,42 @@ type RoleChange struct {
 	Actor   string
 }
 
+// EmailProvider names an address linked to an account; its subject is the
+// address's AddressKey.
+const EmailProvider = "email"
+
+// HasUsablePassword is whether a stored hash can match a password; a hash
+// replaced by a marker starting with "!" cannot.
+func HasUsablePassword(hash string) bool {
+	return hash != "" && !strings.HasPrefix(hash, "!")
+}
+
+// AddressKey is an address as a linked identity keeps it: only ASCII letters
+// are lowered, so Go, Postgres and MySQL agree on it.
+func AddressKey(address string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, address)
+}
+
 // IdentityClaim is a provider account whose email address the provider verified.
 type IdentityClaim struct {
 	Provider string
 	Subject  string
 	Email    string
 	FullName string
+}
+
+// Identity is one way an account signs in besides its own address.
+type Identity struct {
+	ID           int64
+	Provider     string
+	Email        string
+	CreatedAt    time.Time
+	LastSignInAt *time.Time
 }
 
 // AddressMatch is an account whose address equals a provider's, ignoring case.
@@ -158,7 +201,9 @@ type FlowState struct {
 	Nonce               string
 	ClientCodeChallenge string
 	RedirectTo          string
-	ExpiresAt           time.Time
+	// LinkUserID is the signed-in account a linking flow adds the identity to.
+	LinkUserID int64
+	ExpiresAt  time.Time
 }
 
 // AuthCode is the single-use code a sign-in hands back to the app, redeemed
@@ -167,7 +212,9 @@ type AuthCode struct {
 	CodeHash      string
 	UserID        int64
 	CodeChallenge string
-	ExpiresAt     time.Time
+	// Link is the identity the redemption links to UserID; empty for a sign-in.
+	Link      IdentityClaim
+	ExpiresAt time.Time
 }
 
 // Kinds of emailed sign-in secret.
@@ -192,6 +239,8 @@ type EmailOTP struct {
 	IP        string
 	Attempts  int
 	ExpiresAt time.Time
+	// LinkUserID is the signed-in account the address is linked to once proven.
+	LinkUserID int64
 }
 
 // OTPLimits are the send budgets, counted from the rows themselves so every
@@ -201,6 +250,8 @@ type OTPLimits struct {
 	PerAddressHour int
 	PerProjectDay  int // mailed sends only
 	PerIPDay       int
+	// LinksPerAccountDay bounds the address links one account asks for.
+	LinksPerAccountDay int
 }
 
 // OTPAttempts bound the guesses at one code; the send budgets bound how many
@@ -291,6 +342,19 @@ type Store interface {
 	// AccountByAddress is the account an address reaches, whatever its case.
 	AccountByAddress(ctx context.Context, email string) (Account, error)
 	RecordAudit(ctx context.Context, event AuditEvent) error
+
+	// LinkableAccount is nil for an enabled account whose own address is
+	// proven: ErrAccountDisabled, ErrAddressUnproven or ErrNotFound otherwise.
+	LinkableAccount(ctx context.Context, userID int64) error
+	// LinkIdentity adds an identity to a linkable account. ErrIdentityExists
+	// when any account holds the identity, or, for an address, when another
+	// proven account answers to it; the unproven ones answering to it are
+	// deleted and their ids returned.
+	LinkIdentity(ctx context.Context, userID int64, claim IdentityClaim) (deleted []int64, err error)
+	ListIdentities(ctx context.Context, userID int64) ([]Identity, error)
+	// UnlinkIdentity removes one of the account's identities unless no other
+	// identity nor a password would be left: ErrLastSignInMethod.
+	UnlinkIdentity(ctx context.Context, userID, identityID int64) (Identity, error)
 
 	CreateAPIKey(ctx context.Context, hash, prefix, keyType, name string) (int64, time.Time, error)
 	ListAPIKeys(ctx context.Context) ([]APIKeyListing, error)

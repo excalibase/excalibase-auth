@@ -50,9 +50,10 @@ func (s *Store) InsertUser(ctx context.Context, email, passwordHash, fullName st
 	var id int64
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO users (email, password, full_name, role, enabled, created_at, updated_at)
-		 VALUES ($1, $2, $3, 'user', true, NOW(), NOW())
+		 SELECT $1, $2, $3, 'user', true, NOW(), NOW()
+		 WHERE NOT EXISTS (SELECT 1 FROM auth.identities WHERE provider = $4 AND subject = $5)
 		 ON CONFLICT (email) DO NOTHING RETURNING id`,
-		email, passwordHash, fullName,
+		email, passwordHash, fullName, store.EmailProvider, store.AddressKey(email),
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
@@ -190,11 +191,19 @@ func (s *Store) ApplyRoleChange(ctx context.Context, change store.RoleChange) (d
 
 func (s *Store) InsertRefreshToken(ctx context.Context, hash string, userID int64, session store.RefreshSession) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, created_at, revoked)
-		 VALUES ($1, $2, $3, $4, NOW(), false)`,
-		hash, session.FamilyID, userID, session.Expiry,
+		`INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, created_at, revoked)
+		 VALUES ($1, $2, $3, $4, $5, NOW(), false)`,
+		hash, session.FamilyID, userID, session.Expiry, authTime(session),
 	)
 	return err
+}
+
+// authTime is the session's sign-in time, NULL when it predates the column.
+func authTime(session store.RefreshSession) *time.Time {
+	if session.AuthTime.IsZero() {
+		return nil
+	}
+	return &session.AuthTime
 }
 
 // RotateRefreshToken revokes the live token in one statement, so of two
@@ -207,16 +216,20 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 	defer tx.Rollback(ctx)
 
 	var (
-		userID  int64
-		session store.RefreshSession
+		userID   int64
+		session  store.RefreshSession
+		signedIn *time.Time
 	)
 	if err := tx.QueryRow(ctx,
 		`UPDATE auth.refresh_tokens SET revoked = true
 		 WHERE token_hash = $1 AND revoked = false AND expiry_date > NOW()
-		 RETURNING user_id, family_id, expiry_date`,
+		 RETURNING user_id, family_id, expiry_date, last_auth_at`,
 		presented,
-	).Scan(&userID, &session.FamilyID, &session.Expiry); err != nil {
+	).Scan(&userID, &session.FamilyID, &session.Expiry, &signedIn); err != nil {
 		return store.Account{}, store.RefreshSession{}, notFound(err)
+	}
+	if signedIn != nil {
+		session.AuthTime = *signedIn
 	}
 	var account store.Account
 	if err := tx.QueryRow(ctx,
@@ -228,9 +241,9 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 		return store.Account{}, store.RefreshSession{}, err
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, created_at, revoked)
-		 VALUES ($1, $2, $3, $4, NOW(), false)`,
-		successor, session.FamilyID, userID, session.Expiry,
+		`INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, created_at, revoked)
+		 VALUES ($1, $2, $3, $4, $5, NOW(), false)`,
+		successor, session.FamilyID, userID, session.Expiry, signedIn,
 	); err != nil {
 		return store.Account{}, store.RefreshSession{}, err
 	}
@@ -256,10 +269,25 @@ func (s *Store) RevokeRefreshToken(ctx context.Context, hash string) error {
 	return err
 }
 
+// RevokeUserRefreshTokens also ends the links the account has in flight, which
+// a session it no longer holds may have started.
 func (s *Store) RevokeUserRefreshTokens(ctx context.Context, userID int64) error {
-	_, err := s.pool.Exec(ctx,
-		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false", userID)
-	return err
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %w", store.ErrUnavailable, err)
+	}
+	defer tx.Rollback(ctx)
+	for _, statement := range []string{
+		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false",
+		"DELETE FROM auth.flow_states WHERE link_user_id = $1",
+		"DELETE FROM auth.auth_codes WHERE user_id = $1 AND link_provider IS NOT NULL",
+		"UPDATE auth.email_otps SET consumed_at = NOW() WHERE link_user_id = $1 AND consumed_at IS NULL",
+	} {
+		if _, err := tx.Exec(ctx, statement, userID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // tokenQueries are literals per table, so no identifier is ever interpolated.

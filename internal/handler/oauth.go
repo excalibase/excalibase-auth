@@ -106,6 +106,10 @@ func allowedRedirects(info pool.ProjectInfo) []string {
 func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	projectID := projectKey(r)
 	query := r.URL.Query()
+	if ticket := query.Get("link_ticket"); ticket != "" {
+		h.authorizeLink(w, r, ticket)
+		return
+	}
 	info, err := h.signInSettings(r.Context(), projectID)
 	if err != nil {
 		httpError(w, errSettingsUnreadable, http.StatusServiceUnavailable)
@@ -126,11 +130,16 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		httpError(w, errChallengeRequired.Error(), http.StatusBadRequest)
 		return
 	}
-	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
-	if err != nil {
-		writePoolFailure(w, err)
+	db, ok := h.storeFor(w, r)
+	if !ok {
 		return
 	}
+	h.startAtProvider(w, r, db, provider, settings, store.FlowState{ClientCodeChallenge: challenge, RedirectTo: redirectTo})
+}
+
+// startAtProvider saves the flow under a new state, binds it to this browser
+// and sends the browser to the provider.
+func (h *AuthHandler) startAtProvider(w http.ResponseWriter, r *http.Request, db store.Store, provider oauth.Provider, settings pool.OAuthProvider, app store.FlowState) {
 	flow, err := oauth.NewFlow()
 	if err != nil {
 		httpError(w, "internal error", http.StatusInternalServerError)
@@ -138,7 +147,8 @@ func (h *AuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := db.SaveFlowState(r.Context(), store.FlowState{
 		StateHash: token.Hash(flow.State), Provider: provider.Name, IDPCodeVerifier: flow.Verifier, Nonce: flow.Nonce,
-		ClientCodeChallenge: challenge, RedirectTo: redirectTo, ExpiresAt: time.Now().Add(flowTTL),
+		ClientCodeChallenge: app.ClientCodeChallenge, RedirectTo: app.RedirectTo, LinkUserID: app.LinkUserID,
+		ExpiresAt: time.Now().Add(flowTTL),
 	}); err != nil {
 		httpError(w, "failed to start sign-in", http.StatusInternalServerError)
 		return
@@ -165,7 +175,8 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flow, err := db.ConsumeFlowState(r.Context(), token.Hash(query.Get("state")))
-	if err != nil || flow.Provider != chi.URLParam(r, "provider") {
+	// A link ticket's row has no provider verifier; it is never a state.
+	if err != nil || flow.Provider != chi.URLParam(r, "provider") || flow.IDPCodeVerifier == "" {
 		httpError(w, errFlowInvalid.Error(), http.StatusBadRequest)
 		return
 	}
@@ -214,12 +225,17 @@ func (h *AuthHandler) finishSignIn(ctx context.Context, db store.Store, projectI
 	if len(identity.Email) > maxEmailLength {
 		return "", codeInvalidEmail
 	}
+	if flow.LinkUserID != 0 {
+		// Written only when the app redeems the code with its verifier.
+		link := store.IdentityClaim{Provider: flow.Provider, Subject: identity.Subject, Email: identity.Email}
+		return h.issueAuthCode(ctx, db, store.AuthCode{UserID: flow.LinkUserID, CodeChallenge: flow.ClientCodeChallenge, Link: link})
+	}
 	account, outcome, failure := h.signInIdentity(ctx, db, projectID, flow.Provider, identity, info.NewUsersAllowed())
 	if failure != "" {
 		return "", failure
 	}
 	h.audit(ctx, db, projectID, store.AuditEvent{UserID: account.ID, Method: flow.Provider, IP: clientIP}, outcome)
-	return h.issueAuthCode(ctx, db, account.ID, flow.ClientCodeChallenge)
+	return h.issueAuthCode(ctx, db, store.AuthCode{UserID: account.ID, CodeChallenge: flow.ClientCodeChallenge})
 }
 
 func (h *AuthHandler) signInIdentity(ctx context.Context, db store.Store, projectID, provider string, identity oauth.Identity, allowCreate bool) (store.Account, store.IdentityOutcome, string) {
@@ -250,12 +266,13 @@ func (h *AuthHandler) signInIdentity(ctx context.Context, db store.Store, projec
 	return account, outcome, ""
 }
 
-func (h *AuthHandler) issueAuthCode(ctx context.Context, db store.Store, userID int64, challenge string) (string, string) {
+func (h *AuthHandler) issueAuthCode(ctx context.Context, db store.Store, code store.AuthCode) (string, string) {
 	plaintext, hash, err := token.New()
 	if err != nil {
 		return "", codeServerError
 	}
-	if err := db.SaveAuthCode(ctx, store.AuthCode{CodeHash: hash, UserID: userID, CodeChallenge: challenge, ExpiresAt: time.Now().Add(authCodeTTL)}); err != nil {
+	code.CodeHash, code.ExpiresAt = hash, time.Now().Add(authCodeTTL)
+	if err := db.SaveAuthCode(ctx, code); err != nil {
 		return "", codeServerError
 	}
 	return plaintext, ""
@@ -292,24 +309,13 @@ func (h *AuthHandler) exchangePKCE(r *http.Request, projectID, code, verifier st
 	if err != nil || code == "" || !oauth.VerifierMatches(verifier, redeemed.CodeChallenge) {
 		return nil, http.StatusBadRequest, errInvalidGrant
 	}
-	account, err := db.AccountByID(r.Context(), redeemed.UserID)
-	if err != nil {
-		return nil, http.StatusBadRequest, errInvalidGrant
+	linking := redeemed.Link.Provider != ""
+	if linking {
+		if status, err := h.commitLink(r.Context(), db, projectID, redeemed.UserID, redeemed.Link, h.clientIP(r)); err != nil {
+			return nil, status, err
+		}
 	}
-	if !account.Enabled {
-		return nil, http.StatusForbidden, errAccountDisabled
-	}
-	roles := accountRoles{role: account.Role, allowed: account.AllowedRoles}
-	if err := roles.validate(); err != nil {
-		return nil, http.StatusForbidden, err
-	}
-	_ = db.TouchLastLogin(r.Context(), account.ID)
-	user := domain.UserInfo{ID: account.ID, Email: account.Email, FullName: account.FullName}
-	resp, err := h.generateAuthResponse(r, projectID, user, roles, account.EmailVerified)
-	if err != nil {
-		return nil, http.StatusInternalServerError, errTokenGeneration
-	}
-	return resp, http.StatusOK, nil
+	return h.accountSession(r, db, projectID, redeemed.UserID, !linking)
 }
 
 // redirect sends the browser on without leaking the URL onwards or caching it.

@@ -33,9 +33,9 @@ func (s *Store) SaveEmailOTP(ctx context.Context, otp store.EmailOTP, limits sto
 		return false, err
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO auth.email_otps (email, kind, link_hash, code_hmac, code_challenge, create_user, mailed, ip, expires_at)
-		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, NULLIF($8, ''), $9)`,
-		otp.Email, otp.Kind, otp.LinkHash, otp.CodeHMAC, otp.CodeChallenge, otp.CreateUser, mailed, otp.IP, otp.ExpiresAt); err != nil {
+		`INSERT INTO auth.email_otps (email, kind, link_hash, code_hmac, code_challenge, create_user, mailed, ip, expires_at, link_user_id)
+		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, NULLIF($8, ''), $9, NULLIF($10, 0))`,
+		otp.Email, otp.Kind, otp.LinkHash, otp.CodeHMAC, otp.CodeChallenge, otp.CreateUser, mailed, otp.IP, otp.ExpiresAt, otp.LinkUserID); err != nil {
 		return false, err
 	}
 	return mailed, tx.Commit(ctx)
@@ -44,23 +44,26 @@ func (s *Store) SaveEmailOTP(ctx context.Context, otp store.EmailOTP, limits sto
 // withinOTPLimits counts the sends the budgets allow, under the lock row, and
 // says whether this one may be mailed.
 func withinOTPLimits(ctx context.Context, tx pgx.Tx, otp store.EmailOTP, limits store.OTPLimits) (bool, error) {
-	var recent, lastHour, fromIP, mailedToday int
+	var recent, lastHour, fromIP, mailedToday, links int
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FILTER (WHERE lower(email) = lower($1) AND created_at > NOW() - make_interval(secs => $2)),
 		        count(*) FILTER (WHERE lower(email) = lower($1) AND created_at > NOW() - INTERVAL '1 hour'),
 		        count(*) FILTER (WHERE ip = $3),
-		        count(*) FILTER (WHERE mailed)
+		        count(*) FILTER (WHERE mailed),
+		        count(*) FILTER (WHERE link_user_id = $4)
 		 FROM auth.email_otps WHERE created_at > NOW() - INTERVAL '1 day'`,
-		otp.Email, limits.MinInterval.Seconds(), otp.IP).Scan(&recent, &lastHour, &fromIP, &mailedToday); err != nil {
+		otp.Email, limits.MinInterval.Seconds(), otp.IP, otp.LinkUserID).Scan(&recent, &lastHour, &fromIP, &mailedToday, &links); err != nil {
 		return false, err
 	}
-	if recent > 0 || lastHour >= limits.PerAddressHour || fromIP >= limits.PerIPDay {
+	overLinks := otp.LinkUserID != 0 && limits.LinksPerAccountDay > 0 && links >= limits.LinksPerAccountDay
+	if recent > 0 || lastHour >= limits.PerAddressHour || fromIP >= limits.PerIPDay || overLinks {
 		return false, store.ErrRateLimited
 	}
 	return otp.Mailed && mailedToday < limits.PerProjectDay, nil
 }
 
-const liveOTPColumns = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at
+const liveOTPColumns = `SELECT id, email, kind, COALESCE(link_hash, ''), COALESCE(code_hmac, ''), code_challenge, create_user, attempts, expires_at,
+	COALESCE(link_user_id, 0)
 	FROM auth.email_otps WHERE mailed AND consumed_at IS NULL AND expires_at > NOW() AND `
 
 const (
@@ -87,7 +90,7 @@ func (s *Store) RedeemEmailOTP(ctx context.Context, lookup store.OTPLookup, limi
 		row = tx.QueryRow(ctx, liveCodeQuery, lookup.Email, store.OTPEmailCode, limits.PerCode, lookup.CodeChallenge)
 	}
 	if err := row.Scan(&id, &otp.Email, &otp.Kind, &otp.LinkHash, &otp.CodeHMAC, &otp.CodeChallenge,
-		&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt); err != nil {
+		&otp.CreateUser, &otp.Attempts, &otp.ExpiresAt, &otp.LinkUserID); err != nil {
 		return store.EmailOTP{}, notFound(err)
 	}
 	accepted := check(otp)
@@ -144,6 +147,9 @@ func (s *Store) SignInWithEmail(ctx context.Context, email, fullName string, all
 }
 
 func (s *Store) AccountByAddress(ctx context.Context, email string) (store.Account, error) {
+	if linked, ok, err := s.linkedAccount(ctx, email); ok || err != nil {
+		return linked, err
+	}
 	rows, err := s.pool.Query(ctx, "SELECT "+accountColumns+`, email = $1 FROM auth.users
 		WHERE lower(email) = lower($1) ORDER BY email = $1 DESC, id LIMIT 2`, email)
 	if err != nil {
@@ -171,6 +177,21 @@ func (s *Store) AccountByAddress(ctx context.Context, email string) (store.Accou
 		return store.Account{}, err
 	}
 	return accounts[0], nil
+}
+
+// linkedAccount is the account an address was linked to, read as a sign-in reads it.
+func (s *Store) linkedAccount(ctx context.Context, email string) (store.Account, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return store.Account{}, false, fmt.Errorf("%w: %w", store.ErrUnavailable, err)
+	}
+	defer tx.Rollback(ctx)
+	match, ok, err := linkedAddress(ctx, tx, email, false)
+	if !ok || err != nil {
+		return store.Account{}, ok, err
+	}
+	account, err := scanAccount(tx.QueryRow(ctx, "SELECT "+accountColumns+" FROM auth.users WHERE id = $1", match.ID))
+	return account, true, err
 }
 
 func (s *Store) RecordAudit(ctx context.Context, event store.AuditEvent) error {
