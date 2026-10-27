@@ -411,8 +411,8 @@ func (s *Store) RefreshTokenState(ctx context.Context, hash string) (store.Refre
 		family string
 	)
 	if err := s.db.QueryRowContext(ctx,
-		"SELECT revoked, family_id FROM refresh_tokens WHERE token_hash = ?", hash,
-	).Scan(&state.Revoked, &family); err != nil {
+		"SELECT revoked, family_id, user_id FROM refresh_tokens WHERE token_hash = ?", hash,
+	).Scan(&state.Revoked, &family, &state.UserID); err != nil {
 		return store.RefreshState{}, notFound(err)
 	}
 	familyID, err := uuid.Parse(family)
@@ -433,19 +433,21 @@ func (s *Store) RevokeRefreshToken(ctx context.Context, hash string) error {
 
 // RevokeUserRefreshTokens also ends the links in flight; see pgstore.
 func (s *Store) RevokeUserRefreshTokens(ctx context.Context, userID int64) error {
-	return s.inTx(ctx, func(tx *sql.Tx) error {
-		for _, statement := range []string{
-			"UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ? AND revoked = FALSE",
-			"DELETE FROM flow_states WHERE link_user_id = ?",
-			"DELETE FROM auth_codes WHERE user_id = ? AND link_provider IS NOT NULL",
-			"UPDATE email_otps SET consumed_at = NOW(6) WHERE link_user_id = ? AND consumed_at IS NULL",
-		} {
-			if _, err := tx.ExecContext(ctx, statement, userID); err != nil {
-				return err
-			}
+	return s.inTx(ctx, func(tx *sql.Tx) error { return endSessionsAndLinks(ctx, tx, userID) })
+}
+
+func endSessionsAndLinks(ctx context.Context, tx *sql.Tx, userID int64) error {
+	for _, statement := range []string{
+		"UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ? AND revoked = FALSE",
+		"DELETE FROM flow_states WHERE link_user_id = ?",
+		"DELETE FROM auth_codes WHERE user_id = ? AND link_provider IS NOT NULL",
+		"UPDATE email_otps SET consumed_at = NOW(6) WHERE link_user_id = ? AND consumed_at IS NULL",
+	} {
+		if _, err := tx.ExecContext(ctx, statement, userID); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // tokenQueries are literals per table, so no identifier is ever interpolated.

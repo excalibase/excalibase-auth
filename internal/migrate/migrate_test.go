@@ -363,3 +363,35 @@ func TestMigrate_IdentityLinkingColumnsComeAndGo(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrate_AccountSelfServiceColumnsComeAndGo(t *testing.T) {
+	connStr, cleanup := setupTestDB(t)
+	defer cleanup()
+	if err := Run(context.Background(), poolFor(t, connStr)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, column := range []string{"user_metadata", "app_metadata"} {
+		if !columnExists(t, connStr, "users", column) {
+			t.Errorf("auth.users.%s missing after migration", column)
+		}
+	}
+	if !tableExists(t, connStr, "auth", "email_change_tokens") {
+		t.Error("auth.email_change_tokens missing after migration")
+	}
+	m, err := newMigrate(poolFor(t, connStr))
+	if err != nil {
+		t.Fatalf("newMigrate: %v", err)
+	}
+	defer m.Close()
+	if err := m.Migrate(11); err != nil {
+		t.Fatalf("migrate down to 11: %v", err)
+	}
+	for _, column := range []string{"user_metadata", "app_metadata"} {
+		if columnExists(t, connStr, "users", column) {
+			t.Errorf("auth.users.%s left after the down migration", column)
+		}
+	}
+	if tableExists(t, connStr, "auth", "email_change_tokens") {
+		t.Error("auth.email_change_tokens left after the down migration")
+	}
+}

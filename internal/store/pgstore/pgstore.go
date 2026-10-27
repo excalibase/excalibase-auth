@@ -253,8 +253,8 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 func (s *Store) RefreshTokenState(ctx context.Context, hash string) (store.RefreshState, error) {
 	var state store.RefreshState
 	err := s.pool.QueryRow(ctx,
-		"SELECT revoked, family_id FROM auth.refresh_tokens WHERE token_hash = $1", hash,
-	).Scan(&state.Revoked, &state.FamilyID)
+		"SELECT revoked, family_id, user_id FROM auth.refresh_tokens WHERE token_hash = $1", hash,
+	).Scan(&state.Revoked, &state.FamilyID, &state.UserID)
 	return state, notFound(err)
 }
 
@@ -277,6 +277,13 @@ func (s *Store) RevokeUserRefreshTokens(ctx context.Context, userID int64) error
 		return fmt.Errorf("%w: %w", store.ErrUnavailable, err)
 	}
 	defer tx.Rollback(ctx)
+	if err := endSessionsAndLinks(ctx, tx, userID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func endSessionsAndLinks(ctx context.Context, tx pgx.Tx, userID int64) error {
 	for _, statement := range []string{
 		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false",
 		"DELETE FROM auth.flow_states WHERE link_user_id = $1",
@@ -287,7 +294,7 @@ func (s *Store) RevokeUserRefreshTokens(ctx context.Context, userID int64) error
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // tokenQueries are literals per table, so no identifier is ever interpolated.
