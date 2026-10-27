@@ -177,7 +177,7 @@ func (s *Store) linkedAccount(ctx context.Context, email string) (store.Account,
 		ok      bool
 	)
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		match, found, err := linkedAddress(ctx, tx, email, "")
+		match, found, err := linkedAddress(ctx, tx, email, false)
 		if ok = found; !found || err != nil {
 			return err
 		}

@@ -25,7 +25,7 @@ func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.Iden
 	}
 	defer tx.Rollback(ctx)
 
-	if err := linkTarget(ctx, tx.QueryRow(ctx, linkTargetQuery+" FOR UPDATE", userID)); err != nil {
+	if err := linkTarget(ctx, tx.QueryRow(ctx, linkTargetLockedQuery, userID)); err != nil {
 		return nil, err
 	}
 	var owner int64
@@ -56,7 +56,14 @@ func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.Iden
 	return deleted, tx.Commit(ctx)
 }
 
-const linkTargetQuery = "SELECT email_verified AND email_verified_at IS NOT NULL, enabled FROM auth.users WHERE id = $1"
+const (
+	linkTargetQuery       = "SELECT email_verified AND email_verified_at IS NOT NULL, enabled FROM auth.users WHERE id = $1"
+	linkTargetLockedQuery = "SELECT email_verified AND email_verified_at IS NOT NULL, enabled FROM auth.users WHERE id = $1 FOR UPDATE"
+	listIdentitiesQuery   = `SELECT id, provider, COALESCE(email, ''), created_at, last_sign_in_at FROM auth.identities
+		WHERE user_id = $1 ORDER BY id`
+	listIdentitiesLockedQuery = `SELECT id, provider, COALESCE(email, ''), created_at, last_sign_in_at FROM auth.identities
+		WHERE user_id = $1 ORDER BY id FOR UPDATE`
+)
 
 // linkTarget reads whether the account may take a link: enabled, with a proven address.
 func linkTarget(_ context.Context, row pgx.Row) error {
@@ -107,13 +114,15 @@ func claimAddress(ctx context.Context, tx pgx.Tx, userID int64, email string) ([
 }
 
 func (s *Store) ListIdentities(ctx context.Context, userID int64) ([]store.Identity, error) {
-	return listIdentities(ctx, s.pool, userID, "")
+	return listIdentities(ctx, s.pool, userID, false)
 }
 
-func listIdentities(ctx context.Context, db querier, userID int64, lock string) ([]store.Identity, error) {
-	rows, err := db.Query(ctx,
-		`SELECT id, provider, COALESCE(email, ''), created_at, last_sign_in_at FROM auth.identities
-		 WHERE user_id = $1 ORDER BY id`+lock, userID)
+func listIdentities(ctx context.Context, db querier, userID int64, forUpdate bool) ([]store.Identity, error) {
+	query := listIdentitiesQuery
+	if forUpdate {
+		query = listIdentitiesLockedQuery
+	}
+	rows, err := db.Query(ctx, query, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +141,7 @@ func (s *Store) UnlinkIdentity(ctx context.Context, userID, identityID int64) (s
 		userID).Scan(&hasPassword); err != nil {
 		return store.Identity{}, notFound(err)
 	}
-	identities, err := listIdentities(ctx, tx, userID, " FOR UPDATE")
+	identities, err := listIdentities(ctx, tx, userID, true)
 	if err != nil {
 		return store.Identity{}, err
 	}
