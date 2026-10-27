@@ -288,8 +288,8 @@ func linkAddressConflicts(t *testing.T, db store.Store) {
 		}
 	}
 	squatter, squatted := newUser(t, db, "link-squatted")
-	if deleted, err := db.LinkIdentity(ctx, id, emailClaim(squatted)); err != nil || len(deleted) != 1 || deleted[0] != squatter {
-		t.Fatalf("link over a squatter: deleted=%v %v", deleted, err)
+	if result, err := db.LinkIdentity(ctx, id, emailClaim(squatted)); err != nil || len(result.Deleted) != 1 || result.Deleted[0] != squatter || result.Upgraded {
+		t.Fatalf("link over a squatter: %+v %v", result, err)
 	}
 	if _, err := db.AccountByID(ctx, squatter); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("the unproven account holding the address survived: %v", err)

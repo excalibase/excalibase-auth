@@ -176,20 +176,31 @@ func (s *Store) ReplaceUnverified(ctx context.Context, email, passwordHash, full
 }
 
 // accountColumns reads an account; a provider-made account has no password.
-const accountColumns = "id, COALESCE(email, ''), COALESCE(password, ''), full_name, role, allowed_roles, enabled, email_verified"
+const accountColumns = "id, COALESCE(email, ''), COALESCE(password, ''), full_name, role, allowed_roles, enabled, email_verified, is_guest"
+
+// accountRow holds a row of accountColumns until its roles are decoded.
+type accountRow struct {
+	account store.Account
+	allowed sql.NullString
+}
+
+func (a *accountRow) fields() []any {
+	return []any{&a.account.ID, &a.account.Email, &a.account.PasswordHash, &a.account.FullName, &a.account.Role,
+		&a.allowed, &a.account.Enabled, &a.account.EmailVerified, &a.account.IsGuest}
+}
+
+func (a *accountRow) decoded() (store.Account, error) {
+	roles, err := decodeRoles(a.allowed)
+	a.account.AllowedRoles = roles
+	return a.account, err
+}
 
 func scanAccount(row rowScanner) (store.Account, error) {
-	var (
-		account store.Account
-		allowed sql.NullString
-	)
-	if err := row.Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
-		&allowed, &account.Enabled, &account.EmailVerified); err != nil {
+	var read accountRow
+	if err := row.Scan(read.fields()...); err != nil {
 		return store.Account{}, notFound(err)
 	}
-	var err error
-	account.AllowedRoles, err = decodeRoles(allowed)
-	return account, err
+	return read.decoded()
 }
 
 func (s *Store) AccountByEmail(ctx context.Context, email string) (store.Account, error) {
@@ -214,7 +225,7 @@ func (s *Store) SetPassword(ctx context.Context, userID int64, passwordHash stri
 func (s *Store) MarkVerified(ctx context.Context, userID int64, keepPassword bool, replacement string) (string, error) {
 	var address string
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		if err := tx.QueryRowContext(ctx, "SELECT email FROM users WHERE id = ? FOR UPDATE", userID).Scan(&address); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(email, '') FROM users WHERE id = ? FOR UPDATE", userID).Scan(&address); err != nil {
 			return notFound(err)
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -238,12 +249,14 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+const managedUserColumns = "id, COALESCE(email, ''), role, allowed_roles, enabled, email_verified, is_guest"
+
 func scanManagedUser(row rowScanner) (domain.ManagedUser, error) {
 	var (
 		user    domain.ManagedUser
 		allowed sql.NullString
 	)
-	if err := row.Scan(&user.ID, &user.Email, &user.Role, &allowed, &user.Enabled, &user.EmailVerified); err != nil {
+	if err := row.Scan(&user.ID, &user.Email, &user.Role, &allowed, &user.Enabled, &user.EmailVerified, &user.IsGuest); err != nil {
 		return domain.ManagedUser{}, err
 	}
 	roles, err := decodeRoles(allowed)
@@ -258,9 +271,7 @@ func scanManagedUser(row rowScanner) (domain.ManagedUser, error) {
 }
 
 func (s *Store) ListUsers(ctx context.Context, limit, offset int) ([]domain.ManagedUser, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, email, role, allowed_roles, enabled, email_verified
-		 FROM users ORDER BY id LIMIT ? OFFSET ?`, limit, offset)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+managedUserColumns+" FROM users ORDER BY id LIMIT ? OFFSET ?", limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -289,8 +300,7 @@ func (s *Store) ApplyRoleChange(ctx context.Context, change store.RoleChange) (d
 	err = s.inTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		before, err = scanManagedUser(tx.QueryRowContext(ctx,
-			`SELECT id, email, role, allowed_roles, enabled, email_verified
-			 FROM users WHERE id = ? FOR UPDATE`, change.UserID))
+			"SELECT "+managedUserColumns+" FROM users WHERE id = ? FOR UPDATE", change.UserID))
 		if err != nil {
 			return notFound(err)
 		}
@@ -392,21 +402,12 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 }
 
 func (s *Store) rotatingAccount(ctx context.Context, tx *sql.Tx, userID int64) (store.Account, error) {
-	var (
-		account store.Account
-		allowed sql.NullString
-	)
-	if err := tx.QueryRowContext(ctx,
-		"SELECT id, email, full_name, role, allowed_roles, email_verified FROM users WHERE id = ?", userID,
-	).Scan(&account.ID, &account.Email, &account.FullName, &account.Role, &allowed, &account.EmailVerified); err != nil {
+	var read accountRow
+	if err := tx.QueryRowContext(ctx, "SELECT "+accountColumns+" FROM users WHERE id = ?", userID).Scan(read.fields()...); err != nil {
 		return store.Account{}, store.ErrNoAccount
 	}
-	roles, err := decodeRoles(allowed)
-	if err != nil {
-		return store.Account{}, err
-	}
-	account.AllowedRoles = roles
-	return account, nil
+	read.account.PasswordHash = ""
+	return read.decoded()
 }
 
 func (s *Store) RefreshTokenState(ctx context.Context, hash string) (store.RefreshState, error) {

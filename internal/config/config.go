@@ -36,6 +36,8 @@ type Config struct {
 	// PasswordHashConcurrency is how many argon2id hashes may run at once.
 	PasswordHashConcurrency int
 	RequestMetrics          RequestMetrics
+	// GuestInactiveDays is how long a guest account may go unused before it is deleted.
+	GuestInactiveDays int
 }
 
 // RequestMetrics is the per-project request counting provisioning scrapes for
@@ -104,8 +106,26 @@ func Load() Config {
 
 		PasswordHashConcurrency: hashConcurrency(),
 		RequestMetrics:          loadRequestMetrics(),
+		GuestInactiveDays:       guestInactiveDays(),
 	}
 }
+
+// guestInactiveDays is 1 to 3650 days; anything else keeps the 30-day default.
+func guestInactiveDays() int {
+	days := envInt("GUEST_INACTIVE_DAYS", defaultGuestInactiveDays)
+	switch {
+	case days < 1:
+		return defaultGuestInactiveDays
+	case days > maxGuestInactiveDays:
+		return maxGuestInactiveDays
+	}
+	return days
+}
+
+const (
+	defaultGuestInactiveDays = 30
+	maxGuestInactiveDays     = 3650
+)
 
 func tenantDBSSLMode() string {
 	mode, err := parseTenantDBSSLMode(os.Getenv("TENANT_DB_SSLMODE"))

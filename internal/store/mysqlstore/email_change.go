@@ -95,6 +95,9 @@ func (s *Store) ConfirmEmailChange(ctx context.Context, userID int64, tokenHash 
 			changed.NewEmail, changed.UserID); err != nil {
 			return err
 		}
+		if err := upgradeGuest(ctx, tx, changed.UserID, changed.NewEmail); err != nil {
+			return err
+		}
 		// Links mailed to the old address must not act on the account any more.
 		for _, statement := range []string{endChangesQuery, tokenTables[store.PasswordReset].invalidate,
 			tokenTables[store.EmailVerification].invalidate} {

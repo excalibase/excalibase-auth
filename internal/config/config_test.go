@@ -201,3 +201,15 @@ func TestLoadExposesProvisioningPATFile(t *testing.T) {
 		t.Errorf("ProvisioningPAT: got %q, want empty — config no longer reads the file itself", cfg.ProvisioningPAT)
 	}
 }
+
+func TestGuestInactiveDays(t *testing.T) {
+	for _, c := range []struct {
+		raw  string
+		want int
+	}{{"", 30}, {"7", 7}, {"0", 30}, {"-3", 30}, {"x", 30}, {"4000", 3650}} {
+		t.Setenv("GUEST_INACTIVE_DAYS", c.raw)
+		if got := Load().GuestInactiveDays; got != c.want {
+			t.Errorf("GUEST_INACTIVE_DAYS=%q: %d, want %d", c.raw, got, c.want)
+		}
+	}
+}

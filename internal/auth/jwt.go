@@ -100,6 +100,10 @@ type Claims struct {
 	// AuthTime is when the end user signed in (unix seconds), kept across
 	// refreshes; zero when unknown.
 	AuthTime int64 `json:"auth_time,omitempty"`
+	// Email is the account's address, omitted when it has none.
+	Email string `json:"email,omitempty"`
+	// IsGuest is emitted only when set: true for a guest account.
+	IsGuest *bool `json:"is_guest,omitempty"`
 	// IssuedAt and ExpiresAt are read back by Verify (unix seconds).
 	IssuedAt  int64 `json:"-"`
 	ExpiresAt int64 `json:"-"`
@@ -184,6 +188,12 @@ func (s *JWTService) Sign(claims Claims) (string, error) {
 	}
 	if claims.AuthTime != 0 {
 		mc["auth_time"] = claims.AuthTime
+	}
+	if claims.Email != "" {
+		mc["email"] = claims.Email
+	}
+	if claims.IsGuest != nil {
+		mc["is_guest"] = *claims.IsGuest
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodES256, mc).SignedString(s.privateKey)
 }
@@ -311,7 +321,14 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	issuedAt, _ := mapClaims["iat"].(float64)
 	expiresAt, _ := mapClaims["exp"].(float64)
 	authTime, _ := mapClaims["auth_time"].(float64)
+	email, _ := mapClaims["email"].(string)
+	var isGuest *bool
+	if guest, ok := mapClaims["is_guest"].(bool); ok {
+		isGuest = &guest
+	}
 	return &Claims{
+		Email:         email,
+		IsGuest:       isGuest,
 		AuthTime:      int64(authTime),
 		IssuedAt:      int64(issuedAt),
 		ExpiresAt:     int64(expiresAt),

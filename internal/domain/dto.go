@@ -44,12 +44,12 @@ type CreateAPIKeyRequest struct {
 // CreateAPIKeyResponse contains the freshly-minted plaintext key (returned
 // once and never readable again) plus the metadata that GET /api-keys exposes.
 type CreateAPIKeyResponse struct {
-	ID         int64  `json:"id"`
-	Plaintext  string `json:"plaintext"`
-	KeyPrefix  string `json:"keyPrefix"`
-	KeyType    string `json:"keyType"`
-	Name       string `json:"name"`
-	CreatedAt  string `json:"createdAt"`
+	ID        int64  `json:"id"`
+	Plaintext string `json:"plaintext"`
+	KeyPrefix string `json:"keyPrefix"`
+	KeyType   string `json:"keyType"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"createdAt"`
 }
 
 // APIKeyInfo is the read-only listing shape (no plaintext, no key_hash).
@@ -74,6 +74,8 @@ type UserInfo struct {
 	ID       int64  `json:"id"`
 	Email    string `json:"email"`
 	FullName string `json:"fullName"`
+	// IsGuest is sent only for a guest, which has no address.
+	IsGuest bool `json:"isGuest,omitempty"`
 }
 
 // Identity is one way an end user's account signs in besides its own address.

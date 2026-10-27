@@ -31,7 +31,7 @@ func managedUserDetail(profile store.Profile) domain.ManagedUserDetail {
 	}
 	return domain.ManagedUserDetail{
 		ManagedUser: domain.ManagedUser{ID: profile.ID, Email: profile.Email, Role: profile.Role, AllowedRoles: allowed,
-			Enabled: profile.Enabled, EmailVerified: profile.EmailVerified},
+			Enabled: profile.Enabled, EmailVerified: profile.EmailVerified, IsGuest: profile.IsGuest},
 		FullName: profile.FullName, UserMetadata: profile.UserMetadata, AppMetadata: profile.AppMetadata,
 		CreatedAt: profile.CreatedAt, LastLoginAt: profile.LastLoginAt,
 	}

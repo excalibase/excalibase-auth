@@ -163,8 +163,7 @@ func (s *Store) AccountByAddress(ctx context.Context, email string) (store.Accou
 	for rows.Next() {
 		var account store.Account
 		var exact bool
-		if err := rows.Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
-			&account.AllowedRoles, &account.Enabled, &account.EmailVerified, &exact); err != nil {
+		if err := rows.Scan(append(accountFields(&account), &exact)...); err != nil {
 			return store.Account{}, err
 		}
 		accounts = append(accounts, account)

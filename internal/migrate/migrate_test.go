@@ -395,3 +395,35 @@ func TestMigrate_AccountSelfServiceColumnsComeAndGo(t *testing.T) {
 		t.Error("auth.email_change_tokens left after the down migration")
 	}
 }
+
+func TestMigrate_GuestAccountColumnsComeAndGo(t *testing.T) {
+	connStr, cleanup := setupTestDB(t)
+	defer cleanup()
+	if err := Run(context.Background(), poolFor(t, connStr)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !columnExists(t, connStr, "users", "is_guest") {
+		t.Error("auth.users.is_guest missing after migration")
+	}
+	for _, table := range []string{"guest_sign_ups", "guest_lock"} {
+		if !tableExists(t, connStr, "auth", table) {
+			t.Errorf("auth.%s missing after migration", table)
+		}
+	}
+	m, err := newMigrate(poolFor(t, connStr))
+	if err != nil {
+		t.Fatalf("newMigrate: %v", err)
+	}
+	defer m.Close()
+	if err := m.Migrate(12); err != nil {
+		t.Fatalf("migrate down to 12: %v", err)
+	}
+	if columnExists(t, connStr, "users", "is_guest") {
+		t.Error("auth.users.is_guest left after the down migration")
+	}
+	for _, table := range []string{"guest_sign_ups", "guest_lock"} {
+		if tableExists(t, connStr, "auth", table) {
+			t.Errorf("auth.%s left after the down migration", table)
+		}
+	}
+}

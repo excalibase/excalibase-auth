@@ -35,9 +35,9 @@ func newPostgresOTPFixture(t *testing.T, tune ...func(*AuthHandler)) *otpFixture
 	return &otpFixture{oauthFixture: newPostgresOAuthFixture(t, append([]func(*AuthHandler){withCapturedMail(sender)}, tune...)...), sender: sender}
 }
 
-func newMySQLOTPFixture(t *testing.T) *otpFixture {
+func newMySQLOTPFixture(t *testing.T, tune ...func(*AuthHandler)) *otpFixture {
 	sender := &stubSender{}
-	return &otpFixture{oauthFixture: newMySQLOAuthFixture(t, withCapturedMail(sender)), sender: sender}
+	return &otpFixture{oauthFixture: newMySQLOAuthFixture(t, append([]func(*AuthHandler){withCapturedMail(sender)}, tune...)...), sender: sender}
 }
 
 func TestIntegration_EmailSignInOnPostgres(t *testing.T) {

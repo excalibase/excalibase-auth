@@ -83,6 +83,9 @@ func (h *AuthHandler) mailEmailChange(projectID, oldEmail, newEmail, link string
 		h.sendOTPMail(projectID, email.Message{ProjectID: projectID, To: newEmail, Template: email.TemplateEmailChange,
 			Data: map[string]string{"userEmail": newEmail, "linkUrl": link, "expiresMin": expires}})
 	}
+	if oldEmail == "" {
+		return
+	}
 	h.sendOTPMail(projectID, email.Message{ProjectID: projectID, To: oldEmail, Template: email.TemplateEmailChangeNotice,
 		Data: map[string]string{"userEmail": oldEmail, "newEmail": newEmail}})
 }

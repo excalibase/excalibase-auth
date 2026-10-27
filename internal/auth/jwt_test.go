@@ -386,3 +386,35 @@ func TestSignVerify_AuthTimeRoundTripsAndIsOmittedWhenUnknown(t *testing.T) {
 		t.Error("auth_time must be omitted when unknown")
 	}
 }
+
+func TestSignVerify_EmailAndGuestClaimsRoundTripAndAreOmittedWhenUnset(t *testing.T) {
+	svc, _ := NewJWTService(testKeyPEM(t), "excalibase", 3600)
+	guest := true
+	signed, err := svc.Sign(Claims{Sub: "7", UserID: 7, ProjectID: "p", Role: "guest", Email: "", IsGuest: &guest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := parseUnverified(t, signed)
+	if _, ok := raw["email"]; ok {
+		t.Fatalf("a token with no address carries email: %v", raw)
+	}
+	if raw["is_guest"] != true {
+		t.Fatalf("is_guest = %v", raw["is_guest"])
+	}
+	claims, err := svc.Verify(signed)
+	if err != nil || claims.Email != "" || claims.IsGuest == nil || !*claims.IsGuest {
+		t.Fatalf("verify = %+v %v", claims, err)
+	}
+
+	signed, _ = svc.Sign(Claims{Sub: "u@test.com", UserID: 8, ProjectID: "p", Role: "user", Email: "u@test.com"})
+	raw = parseUnverified(t, signed)
+	if raw["email"] != "u@test.com" {
+		t.Fatalf("email = %v", raw["email"])
+	}
+	if _, ok := raw["is_guest"]; ok {
+		t.Fatalf("is_guest emitted while unset: %v", raw)
+	}
+	if claims, _ := svc.Verify(signed); claims.Email != "u@test.com" || claims.IsGuest != nil {
+		t.Fatalf("verify = %+v", claims)
+	}
+}

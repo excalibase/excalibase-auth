@@ -18,14 +18,15 @@ func (s *Store) LinkableAccount(ctx context.Context, userID int64) error {
 	return linkTarget(s.db.QueryRowContext(ctx, linkTargetQuery, userID))
 }
 
-func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.IdentityClaim) ([]int64, error) {
-	var deleted []int64
+func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.IdentityClaim) (store.LinkResult, error) {
+	var result store.LinkResult
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
-		if err := linkTarget(tx.QueryRowContext(ctx, linkTargetLockedQuery, userID)); err != nil {
+		guest, err := linkTargetGuest(tx.QueryRowContext(ctx, linkTargetLockedQuery, userID))
+		if err != nil {
 			return err
 		}
 		var owner int64
-		err := tx.QueryRowContext(ctx, "SELECT user_id FROM identities WHERE provider = ? AND subject = ? FOR UPDATE",
+		err = tx.QueryRowContext(ctx, "SELECT user_id FROM identities WHERE provider = ? AND subject = ? FOR UPDATE",
 			claim.Provider, claim.Subject).Scan(&owner)
 		switch {
 		case err == nil:
@@ -33,8 +34,9 @@ func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.Iden
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		if claim.Provider == store.EmailProvider {
-			if deleted, err = claimAddress(ctx, tx, userID, claim.Email); err != nil {
+		// A guest takes the linked address as its own, so it is claimed like one.
+		if claim.Provider == store.EmailProvider || guest {
+			if result.Deleted, err = claimAddress(ctx, tx, userID, claim.Email); err != nil {
 				return err
 			}
 		}
@@ -45,17 +47,32 @@ func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.Iden
 		if errors.As(err, &mysqlErr) && mysqlErr.Number == duplicateEntry {
 			return store.ErrIdentityExists
 		}
-		return err
+		if err != nil || !guest {
+			return err
+		}
+		result.Upgraded = true
+		return upgradeGuest(ctx, tx, userID, claim.Email)
 	})
 	if err != nil {
-		return nil, err
+		return store.LinkResult{}, err
 	}
-	return deleted, nil
+	return result, nil
+}
+
+// upgradeGuest gives a guest its proven address; see pgstore. allowed_roles
+// is assigned before role, which MySQL updates left to right.
+func upgradeGuest(ctx context.Context, tx *sql.Tx, userID int64, email string) error {
+	_, err := tx.ExecContext(ctx,
+		`UPDATE users SET email = ?, email_verified = TRUE, email_verified_at = NOW(6), is_guest = FALSE,
+		        allowed_roles = IF(role = ?, NULL, allowed_roles),
+		        role = IF(role = ?, 'user', role), updated_at = NOW(6)
+		 WHERE id = ? AND is_guest`, email, store.GuestRole, store.GuestRole, userID)
+	return err
 }
 
 const (
-	linkTargetQuery       = "SELECT email_verified AND email_verified_at IS NOT NULL, enabled FROM users WHERE id = ?"
-	linkTargetLockedQuery = "SELECT email_verified AND email_verified_at IS NOT NULL, enabled FROM users WHERE id = ? FOR UPDATE"
+	linkTargetQuery       = "SELECT email_verified AND email_verified_at IS NOT NULL, enabled, is_guest FROM users WHERE id = ?"
+	linkTargetLockedQuery = "SELECT email_verified AND email_verified_at IS NOT NULL, enabled, is_guest FROM users WHERE id = ? FOR UPDATE"
 	listIdentitiesQuery   = `SELECT id, provider, COALESCE(email, ''), created_at, last_sign_in_at FROM identities
 		WHERE user_id = ? ORDER BY id`
 	listIdentitiesLockedQuery = `SELECT id, provider, COALESCE(email, ''), created_at, last_sign_in_at FROM identities
@@ -64,17 +81,23 @@ const (
 
 // linkTarget reads whether the account may take a link; see pgstore.
 func linkTarget(row *sql.Row) error {
-	var proven, enabled bool
-	err := row.Scan(&proven, &enabled)
+	_, err := linkTargetGuest(row)
+	return err
+}
+
+// linkTargetGuest is linkTarget that also says whether the account is a guest.
+func linkTargetGuest(row *sql.Row) (bool, error) {
+	var proven, enabled, guest bool
+	err := row.Scan(&proven, &enabled, &guest)
 	switch {
 	case err != nil:
-		return notFound(err)
+		return false, notFound(err)
 	case !enabled:
-		return store.ErrAccountDisabled
-	case !proven:
-		return store.ErrAddressUnproven
+		return false, store.ErrAccountDisabled
+	case !proven && !guest:
+		return false, store.ErrAddressUnproven
 	}
-	return nil
+	return guest, nil
 }
 
 // claimAddress refuses an address held by the account, a proven or a

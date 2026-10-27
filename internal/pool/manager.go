@@ -52,6 +52,12 @@ type ProjectInfo struct {
 	// UserAPIEnabled lets end users read and change their own account; sent
 	// only while the control plane's authuser flag is on.
 	UserAPIEnabled bool `json:"userApiEnabled,omitempty"`
+	// GuestSignInEnabled is the project's guest switch; nil while the control
+	// plane's authguest flag is off. GuestCaptchaEnabled asks for a Turnstile token.
+	GuestSignInEnabled  *bool `json:"guestSignInEnabled,omitempty"`
+	GuestCaptchaEnabled bool  `json:"guestCaptchaEnabled,omitempty"`
+	// StableSubject makes a token's sub the account id instead of its address.
+	StableSubject bool `json:"stableSubject,omitempty"`
 }
 
 type infoEntry struct {
@@ -144,6 +150,19 @@ func (m *Manager) GetStore(ctx context.Context, orgSlug, projectID string) (stor
 }
 
 // Serves reports whether a store for the project is open: the vault knew it.
+// OpenStores are the stores of every project whose pool is fresh, by project.
+func (m *Manager) OpenStores() map[string]store.Store {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	open := make(map[string]store.Store, len(m.pools))
+	for projectID, entry := range m.pools {
+		if time.Since(entry.createdAt) < m.ttl {
+			open[projectID] = entry.store
+		}
+	}
+	return open
+}
+
 func (m *Manager) Serves(projectID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

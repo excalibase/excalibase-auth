@@ -67,6 +67,16 @@ func TestIntegration_PostgresStoreKeepsTheStoreContract(t *testing.T) {
 				}
 			}
 		},
+		Backdate: func(t *testing.T, id int64, age time.Duration) {
+			for _, statement := range []string{
+				"UPDATE auth.users SET created_at = NOW() - make_interval(secs => $2), last_login_at = NOW() - make_interval(secs => $2) WHERE id = $1",
+				"UPDATE auth.refresh_tokens SET created_at = NOW() - make_interval(secs => $2) WHERE user_id = $1",
+			} {
+				if _, err := pool.Exec(ctx, statement, id, age.Seconds()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		},
 		Count: func(t *testing.T, table string) int {
 			var n int
 			if err := pool.QueryRow(ctx, "SELECT count(*) FROM auth."+table).Scan(&n); err != nil {
