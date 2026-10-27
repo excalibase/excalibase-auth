@@ -43,10 +43,11 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 - `internal/oauth` — Google/GitHub sign-in: PKCE, Google id_token checks, redirect allow-list. `internal/testutil/idpfake` fakes both providers.
 - `internal/emailotp` — eight-digit sign-in codes and the HMAC they are stored as (`handler/email_otp.go` serves `/otp` and `/verify`).
 - `handler/linking.go` — a signed-in user links/unlinks Google, GitHub or another address (`/user/identities`); needs `auth_time` within 5 minutes, writes the link only when the app's PKCE verifier spends the code.
+- `handler/user.go`, `email_change.go`, `sign_out.go`, `user_admin_detail.go` — the signed-in account (`/user`, address change, sign-out scopes) and admin read/merge/delete of accounts, behind `/info`'s `userApiEnabled`; `link_notice.go` mails the account when a way in is added.
 - `internal/domain` — Domain types and DTOs.
 - `internal/config` — Env-based config.
 
-**Database schema** (per tenant, `auth` schema): `users` (password NULL for provider-made accounts), `refresh_tokens`, `identities`, `flow_states`, `auth_codes`, `email_otps` (+ `email_otp_lock`), `audit_log`, and the link/key tables. Managed by golang-migrate migrations in `internal/migrate/migrations/`.
+**Database schema** (per tenant, `auth` schema): `users` (password NULL for provider-made accounts), `refresh_tokens`, `identities`, `flow_states`, `auth_codes`, `email_otps` (+ `email_otp_lock`), `audit_log`, `email_change_tokens`, `users.user_metadata`/`app_metadata` (never in the token), and the link/key tables. Managed by golang-migrate migrations in `internal/migrate/migrations/`.
 
 ## Environment Variables
 

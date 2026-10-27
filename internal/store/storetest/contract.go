@@ -30,6 +30,8 @@ type Fixture struct {
 	Disable func(t *testing.T, email string)
 	// SetEmail changes an account's address straight in the database.
 	SetEmail func(t *testing.T, id int64, email string)
+	// Reference makes an app table row reference the account.
+	Reference func(t *testing.T, id int64)
 }
 
 var sequence atomic.Int64
@@ -75,6 +77,7 @@ func Run(t *testing.T, fx Fixture) {
 	t.Run("email codes", func(t *testing.T) { runEmailOTPs(t, fx) })
 	t.Run("email sign-in", func(t *testing.T) { runEmailSignIn(t, fx) })
 	t.Run("identity linking", func(t *testing.T) { runLinking(t, fx) })
+	t.Run("account self-service", func(t *testing.T) { runAccount(t, fx) })
 }
 
 func runUsers(t *testing.T, fx Fixture) {

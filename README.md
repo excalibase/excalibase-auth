@@ -45,7 +45,7 @@ All endpoints are scoped under `/auth/{orgSlug}/{projectName}/`:
 | `POST` | `/auth/{orgSlug}/{projectName}/login` | Authenticate and receive tokens |
 | `POST` | `/auth/{orgSlug}/{projectName}/validate` | Validate a JWT and return claims |
 | `POST` | `/auth/{orgSlug}/{projectName}/refresh` | Exchange refresh token for new token pair |
-| `POST` | `/auth/{orgSlug}/{projectName}/logout` | Revoke a refresh token |
+| `POST` | `/auth/{orgSlug}/{projectName}/logout` | Revoke a refresh token; `?scope=others` or `?scope=global` (with the access token) ends the user's other or all sessions |
 | `GET`  | `/auth/{orgSlug}/{projectName}/authorize` | Start a Google or GitHub sign-in (PKCE) |
 | `GET`  | `/auth/{orgSlug}/{projectName}/callback/{provider}` | The provider's redirect back; hands the app a single-use code |
 | `POST` | `/auth/{orgSlug}/{projectName}/otp` | Email a sign-in link or eight-digit code (PKCE) |
@@ -54,8 +54,12 @@ All endpoints are scoped under `/auth/{orgSlug}/{projectName}/`:
 | `POST` | `/auth/{orgSlug}/{projectName}/user/identities/authorize` | Start linking Google or GitHub; returns a ticket for `/authorize` (recent sign-in) |
 | `POST` | `/auth/{orgSlug}/{projectName}/user/identities/email` | Email a link or code that proves an address to link (recent sign-in) |
 | `DELETE` | `/auth/{orgSlug}/{projectName}/user/identities/{id}` | Unlink an identity unless it is the last way in (recent sign-in) |
+| `GET`  | `/auth/{orgSlug}/{projectName}/user` | The signed-in user's account with its user and app metadata |
+| `PATCH` | `/auth/{orgSlug}/{projectName}/user` | Change the name, user metadata, password or address (the last two need a recent sign-in) |
+| `POST` | `/auth/{orgSlug}/{projectName}/user/email/confirm` | Spend the link mailed to a new address, with the asking account's token, and move the account to it |
 | `GET`  | `/auth/{orgSlug}/{projectName}/users` | List the project's accounts (user admin or service token) |
 | `PUT`  | `/auth/{orgSlug}/{projectName}/users/{userId}/role` | Set an account's role and allowed roles (user admin or service token) |
+| `GET`/`PATCH`/`DELETE` | `/auth/{orgSlug}/{projectName}/users/{userId}` | Read an account with its metadata, merge its app/user metadata and name, or delete it (user admin or service token) |
 | `GET`  | `/healthz` | Health check |
 
 ### Register
@@ -163,9 +167,24 @@ The session a link returns carries no `auth_time`, so one sign-in cannot be stre
 
 An identity already on any account, or an address another proven account answers to, gets `409 identity_already_exists`; an unproven account answering to the address is deleted, as a sign-in replaces it. `DELETE /user/identities/{id}` answers `204`, `404 identity_not_found`, or `409 last_sign_in_method` when no other identity and no usable password would be left. Each link and unlink writes `auth.audit_log` (`identity_linked`, `identity_unlinked`, and `takeover` for each unproven account a link deleted; method = provider or `email`).
 
+A link also mails the account's own proven address the relay's `identity_linked` notice (the method and the linked address, "if this wasn't you…"), and so does a provider sign-in that joins a proven account by its address. An unproven address is never sent one.
+
+### The signed-in account
+
+Answering only while the control plane's `authuser` flag is on (`userApiEnabled` on `/info`; `404 method_not_enabled` otherwise, `503` when unreadable):
+
+- `GET /user` returns `{id, email, fullName, emailVerified, hasPassword, userMetadata, appMetadata, createdAt}`.
+- `PATCH /user {fullName?, data?, password?, currentPassword?, email?, emailRedirectTo?}`. `data` merges into `user_metadata` by top-level key, `null` removing one; each metadata object is at most 16 KB as compact JSON and 8 levels deep (`400 invalid_metadata` / `metadata_too_large`). A body naming any other field, `appMetadata` included, is `400 invalid_request`: only the project writes app metadata.
+- A password change needs `currentPassword` (under the sign-in failure lock) or a sign-in in the last 5 minutes (`403 reauthentication_required`). It ends every session of the account, every unspent reset link and every pending address change, and answers a new `session` that keeps the old sign-in time. Password and address are changed in separate requests (`400 password_and_email_separately`).
+- An address change needs a sign-in in the last 5 minutes and a proven own address (`403 email_not_verified`). It mails `email_change_notice` to the current address and, when the new address is free, `email_change` with a link to `emailRedirectTo` (default the site URL, allow-listed) carrying `token_hash` and `type=email_change`, valid an hour. The answer and the notice are the same whether or not the address is taken. One a minute and five a day per account, 200 a day per project (`429 rate_limited`). Ending the account's sessions, a password change or reset, a verification or a role change cancels a pending change.
+- `POST /user/email/confirm {"token_hash"}` with the access token of the account that asked moves it to the proven address, so a link sent to someone else's inbox cannot be clicked onto the asker's account. Unproven accounts on the address are deleted (`takeover` in the audit log; `409 user_referenced` when an app table references one), links sent to the old address stop working, and an address a proven account took meanwhile answers `409 email_exists`.
+- `POST /logout?scope=others|global` with the access token: `others` needs the body's `refreshToken` to be a live session of the same user and keeps it.
+
+Metadata never goes into the access token: the engine turns every claim into a permission variable.
+
 ### End-user roles
 
-Two callers may use `/users`, both for the project in the path only:
+Two callers may use `/users`, both for the project in the path only (`/users/{userId}` also needs `authuser`):
 
 - the control plane's **user-admin token**: `token_use: "user_admin"`, `aud: ["excalibase-auth:<projectId>"]`,
   `exp - iat` at most 60 s, and a non-empty `actor` claim naming the Studio platform user;

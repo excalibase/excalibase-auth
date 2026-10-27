@@ -31,6 +31,11 @@ const (
 	// The address-link mails say they add the address to an account.
 	TemplateLinkMagicLink = "link_magic_link"
 	TemplateLinkEmailOTP  = "link_email_otp"
+	// An address change: the link to the new address, the notice to the old.
+	TemplateEmailChange       = "email_change"
+	TemplateEmailChangeNotice = "email_change_notice"
+	// TemplateIdentityLinked tells an account a sign-in method was added to it.
+	TemplateIdentityLinked = "identity_linked"
 )
 
 // sendPath is provisioning's PAT-authenticated transport endpoint.

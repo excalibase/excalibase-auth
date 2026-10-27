@@ -57,6 +57,16 @@ func TestIntegration_PostgresStoreKeepsTheStoreContract(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		Reference: func(t *testing.T, id int64) {
+			for _, statement := range []string{
+				"CREATE TABLE IF NOT EXISTS public.app_owners (user_id BIGINT REFERENCES auth.users(id))",
+				fmt.Sprintf("INSERT INTO public.app_owners (user_id) VALUES (%d)", id),
+			} {
+				if _, err := pool.Exec(ctx, statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+		},
 		Count: func(t *testing.T, table string) int {
 			var n int
 			if err := pool.QueryRow(ctx, "SELECT count(*) FROM auth."+table).Scan(&n); err != nil {

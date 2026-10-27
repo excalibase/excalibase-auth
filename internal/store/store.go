@@ -82,6 +82,7 @@ type RefreshSession struct {
 type RefreshState struct {
 	Revoked  bool
 	FamilyID uuid.UUID
+	UserID   int64
 }
 
 // SingleUseToken is a live link row found by its hash.
@@ -355,6 +356,33 @@ type Store interface {
 	// UnlinkIdentity removes one of the account's identities unless no other
 	// identity nor a password would be left: ErrLastSignInMethod.
 	UnlinkIdentity(ctx context.Context, userID, identityID int64) (Identity, error)
+
+	// Profile reads an account with its metadata.
+	Profile(ctx context.Context, userID int64) (Profile, error)
+	// UpdateProfile applies a change in one transaction; ErrMetadataTooLarge
+	// when a merged object would pass the limit.
+	UpdateProfile(ctx context.Context, userID int64, change ProfileChange) (Profile, error)
+	// ChangePassword stores the hash, ends every session and link in flight and
+	// every unspent reset link, all at once.
+	ChangePassword(ctx context.Context, userID int64, passwordHash string) error
+	// SaveEmailChange records a request within the limits and ends the
+	// account's earlier ones. Past the project's daily budget nothing is
+	// mailed; the link is not mailed when the address answers to another
+	// proven or disabled account. ErrRateLimited past the account's budget;
+	// ErrAccountDisabled, ErrAddressUnproven or ErrNotFound for the account.
+	SaveEmailChange(ctx context.Context, change EmailChange, limits EmailChangeLimits) (EmailChangeMail, error)
+	// ConfirmEmailChange spends the account's live request and moves it to
+	// its address, proven, deleting the unproven accounts answering to it and
+	// ending every unspent link sent to the old one. ErrNotFound unless the
+	// request is the account's; ErrIdentityExists when another proven or
+	// disabled account holds the address; ErrUserReferenced when an app table
+	// references an unproven one.
+	ConfirmEmailChange(ctx context.Context, userID int64, tokenHash string) (ChangedEmail, error)
+	// RevokeOtherSessions ends every session of the account but keep.
+	RevokeOtherSessions(ctx context.Context, userID int64, keep uuid.UUID) error
+	// DeleteUser removes the account and everything of it in the auth tables;
+	// ErrUserReferenced when an app table still references it.
+	DeleteUser(ctx context.Context, userID int64) error
 
 	CreateAPIKey(ctx context.Context, hash, prefix, keyType, name string) (int64, time.Time, error)
 	ListAPIKeys(ctx context.Context) ([]APIKeyListing, error)

@@ -29,11 +29,14 @@ var errUserNotFound = errors.New("user_not_found")
 
 type actorCtxKey struct{}
 
-// UserRoutes registers the end-user role endpoints. Routes mounts them behind
+// UserRoutes registers the end-user administration endpoints. Routes mounts them behind
 // RequireJWT and requireUserManager.
 func (h *AuthHandler) UserRoutes(r chi.Router) {
 	r.Get("/", h.ListUsers)
 	r.With(h.limit(rateLimitToken)).Put("/{userId}/role", h.SetUserRole)
+	r.Get("/{userId}", h.GetManagedUser)
+	r.With(h.limit(rateLimitToken)).Patch("/{userId}", h.UpdateManagedUser)
+	r.With(h.limit(rateLimitToken)).Delete("/{userId}", h.DeleteManagedUser)
 }
 
 // requireUserManager admits only callers allowed to manage the project's

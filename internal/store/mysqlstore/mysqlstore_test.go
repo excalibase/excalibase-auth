@@ -63,6 +63,15 @@ func TestIntegration_MySQLStoreKeepsTheStoreContract(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		Reference: func(t *testing.T, id int64) {
+			if _, err := root.Exec("CREATE TABLE IF NOT EXISTS `auth`.`app_owners` (user_id BIGINT, " +
+				"FOREIGN KEY (user_id) REFERENCES `auth`.`users` (id))"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := root.Exec("INSERT INTO `auth`.`app_owners` (user_id) VALUES (?)", id); err != nil {
+				t.Fatal(err)
+			}
+		},
 		Count: func(t *testing.T, table string) int {
 			var n int
 			if err := root.QueryRow("SELECT COUNT(*) FROM `auth`.`" + table + "`").Scan(&n); err != nil {

@@ -45,6 +45,7 @@ type signInSettings struct {
 	redirectURLs  []string
 	allowNewUsers bool
 	emailOTP      bool
+	userAPI       bool
 	infoDown      bool
 	secretMissing bool
 }
@@ -82,7 +83,7 @@ func (s *signInSettings) info(authURL string) map[string]any {
 	return map[string]any{
 		"projectId": "test-project", "orgSlug": "test-org", "siteUrl": "https://app.test",
 		"redirectUrls": s.redirectURLs, "allowNewUsers": s.allowNewUsers, "oauthProviders": providers,
-		"emailOtpEnabled": s.emailOTP,
+		"emailOtpEnabled": s.emailOTP, "userApiEnabled": s.userAPI,
 	}
 }
 
@@ -113,7 +114,7 @@ func (s *signInSettings) provisioning(record any, authURL *string) http.Handler 
 
 func newOAuthFixture(t *testing.T, record any, configure func(*pool.Manager), tune ...func(*AuthHandler)) *oauthFixture {
 	t.Helper()
-	settings := &signInSettings{providers: []string{"google", "github"}, redirectURLs: []string{appCallback}, allowNewUsers: true, emailOTP: true}
+	settings := &signInSettings{providers: []string{"google", "github"}, redirectURLs: []string{appCallback}, allowNewUsers: true, emailOTP: true, userAPI: true}
 	var authURL string
 	provisioning := httptest.NewServer(settings.provisioning(record, &authURL))
 	t.Cleanup(provisioning.Close)
