@@ -87,6 +87,9 @@ type AuthHandler struct {
 	otpKey       []byte
 	otpLimits    store.OTPLimits
 	dispatchMail func(send func())
+
+	// Account self-service (EXC-662): on for a project only when /info says so.
+	emailChangeLimits store.EmailChangeLimits
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
@@ -96,15 +99,16 @@ func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshE
 		refreshExp: refreshExp,
 		// Default to dropping mail so a deployment without an email path still
 		// registers users rather than failing closed on an unset dependency.
-		emailSender:    email.NoopSender{},
-		resendThrottle: throttle.New(resendVerificationLimit, resendVerificationWindow),
-		forgotThrottle: throttle.New(forgotPasswordLimit, forgotPasswordWindow),
-		hasher:         auth.NewHasher(auth.DefaultHashSlots, auth.DefaultHashWait),
-		oauthProviders: defaultOAuthProviders(),
-		oauthHTTP:      &http.Client{Timeout: providerTimeout},
-		signInMaxAge:   defaultSignInMaxAge,
-		otpLimits:      defaultOTPLimits,
-		dispatchMail:   func(send func()) { go send() },
+		emailSender:       email.NoopSender{},
+		resendThrottle:    throttle.New(resendVerificationLimit, resendVerificationWindow),
+		forgotThrottle:    throttle.New(forgotPasswordLimit, forgotPasswordWindow),
+		hasher:            auth.NewHasher(auth.DefaultHashSlots, auth.DefaultHashWait),
+		oauthProviders:    defaultOAuthProviders(),
+		oauthHTTP:         &http.Client{Timeout: providerTimeout},
+		signInMaxAge:      defaultSignInMaxAge,
+		otpLimits:         defaultOTPLimits,
+		emailChangeLimits: defaultEmailChangeLimits,
+		dispatchMail:      func(send func()) { go send() },
 	}
 	if jwtService != nil {
 		key, err := jwtService.DerivedKey(otpKeyPurpose)
@@ -188,11 +192,15 @@ func (h *AuthHandler) Routes(r chi.Router) {
 		r.With(h.limit(rateLimitOTP)).Post("/otp", h.SendOTP)
 		r.With(h.limit(rateLimitToken)).Post("/verify", h.VerifyOTP)
 
-		// A signed-in end user's identities (EXC-662); off with every method off.
+		// A signed-in end user's identities and own account (EXC-662); each
+		// answers 404 while its method is off for the project.
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireJWT(h.jwtService))
 			r.Route("/user/identities", h.IdentityRoutes)
+			r.With(requireEndUser).Get("/user", h.GetUser)
+			r.With(requireEndUser, h.limit(rateLimitToken)).Patch("/user", h.UpdateUser)
 		})
+		r.With(h.limit(rateLimitToken)).Post("/user/email/confirm", h.ConfirmEmailChange)
 
 		// API key management — protected by JWT. Mounting RequireJWT here at
 		// the route registration site (instead of inside apikey.go) makes the
@@ -594,27 +602,6 @@ func (h *AuthHandler) exchangeAPIKey(r *http.Request, projectID, apiKey string) 
 		return nil, 500, errTokenGeneration
 	}
 	return resp, 200, nil
-}
-
-func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	projectID := projectKey(r)
-	var req domain.RefreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpError(w, "invalid request", 400)
-		return
-	}
-
-	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
-	if err != nil {
-		writePoolFailure(w, err)
-		return
-	}
-
-	if err := db.RevokeRefreshToken(r.Context(), token.Hash(req.RefreshToken)); err != nil {
-		httpError(w, "failed to log out", 500)
-		return
-	}
-	writeJSON(w, map[string]string{"message": "Logged out successfully"})
 }
 
 // generateAuthResponse starts a new session for the user.

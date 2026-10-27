@@ -26,6 +26,7 @@ func withCapturedMail(sender *stubSender) func(*AuthHandler) {
 		h.dispatchMail = func(send func()) { send() }
 		h.otpLimits.MinInterval = testOTPInterval
 		h.otpLimits.PerIPDay = 1000
+		h.emailChangeLimits.MinInterval = testChangeInterval
 	}
 }
 
@@ -243,7 +244,10 @@ func otpWait(t *testing.T, _ *otpFixture) {
 	time.Sleep(testOTPInterval + 50*time.Millisecond)
 }
 
-const testOTPInterval = 200 * time.Millisecond
+const (
+	testOTPInterval    = 200 * time.Millisecond
+	testChangeInterval = 50 * time.Millisecond
+)
 
 func otpAttempts(t *testing.T, fx *otpFixture) {
 	address := mailbox("attempts")

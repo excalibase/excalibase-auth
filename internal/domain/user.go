@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type User struct {
 	ID       int64
@@ -33,4 +36,26 @@ type ManagedUser struct {
 type SetRoleRequest struct {
 	Role         string   `json:"role"`
 	AllowedRoles []string `json:"allowedRoles"`
+}
+
+// AccountUser is an end user's own account as GET /user answers it.
+type AccountUser struct {
+	ID            int64           `json:"id"`
+	Email         string          `json:"email"`
+	FullName      string          `json:"fullName"`
+	EmailVerified bool            `json:"emailVerified"`
+	HasPassword   bool            `json:"hasPassword"`
+	UserMetadata  json.RawMessage `json:"userMetadata"`
+	AppMetadata   json.RawMessage `json:"appMetadata"`
+	CreatedAt     time.Time       `json:"createdAt"`
+}
+
+// ManagedUserDetail is one account as the project's user administration reads it.
+type ManagedUserDetail struct {
+	ManagedUser
+	FullName     string          `json:"fullName"`
+	UserMetadata json.RawMessage `json:"userMetadata"`
+	AppMetadata  json.RawMessage `json:"appMetadata"`
+	CreatedAt    time.Time       `json:"createdAt"`
+	LastLoginAt  *time.Time      `json:"lastLoginAt"`
 }

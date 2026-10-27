@@ -49,6 +49,9 @@ type ProjectInfo struct {
 	// EmailOTPEnabled turns on sign-in by emailed link or code; sent only
 	// while the control plane's authotp flag is on.
 	EmailOTPEnabled bool `json:"emailOtpEnabled,omitempty"`
+	// UserAPIEnabled lets end users read and change their own account; sent
+	// only while the control plane's authuser flag is on.
+	UserAPIEnabled bool `json:"userApiEnabled,omitempty"`
 }
 
 type infoEntry struct {

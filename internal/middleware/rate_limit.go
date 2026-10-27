@@ -163,6 +163,22 @@ func (rl *RateLimits) Token(next http.Handler) http.Handler {
 	})
 }
 
+// PasswordLockedOut is whether an address used up its failed password checks;
+// a password checked on another route shares the sign-in lock.
+func (rl *RateLimits) PasswordLockedOut(address string) bool {
+	return rl.loginFailures.Exhausted(ratelimit.IdentityKey(address)).Blocked()
+}
+
+// RecordPasswordCheck charges a failed check to the address or clears its count.
+func (rl *RateLimits) RecordPasswordCheck(address string, matched bool) {
+	key := ratelimit.IdentityKey(address)
+	if matched {
+		rl.loginFailures.Reset(key)
+		return
+	}
+	rl.loginFailures.Allow(key)
+}
+
 func (rl *RateLimits) clientIP(r *http.Request) string {
 	return ratelimit.ClientIP(r, rl.trusted)
 }
