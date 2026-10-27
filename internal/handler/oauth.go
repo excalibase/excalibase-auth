@@ -235,6 +235,9 @@ func (h *AuthHandler) finishSignIn(ctx context.Context, db store.Store, projectI
 		return "", failure
 	}
 	h.audit(ctx, db, projectID, store.AuditEvent{UserID: account.ID, Method: flow.Provider, IP: clientIP}, outcome)
+	if outcome == store.IdentityLinked {
+		h.noticeLinked(ctx, db, projectID, account.ID, flow.Provider, identity.Email)
+	}
 	return h.issueAuthCode(ctx, db, store.AuthCode{UserID: account.ID, CodeChallenge: flow.ClientCodeChallenge})
 }
 

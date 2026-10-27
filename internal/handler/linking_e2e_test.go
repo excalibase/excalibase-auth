@@ -42,6 +42,7 @@ func runLinkingFlows(t *testing.T, fx *otpFixture) {
 	t.Run("ALinkStartIsCheckedBeforeAnythingIsSaved", func(t *testing.T) { linkStartRefusals(t, fx) })
 	t.Run("AnAccountDisabledMidwayGetsNoLink", func(t *testing.T) { linkDisabledMidway(t, fx) })
 	t.Run("AnAddressLinkRefusesNonASCIIAndAuditsTheAccountItReplaces", func(t *testing.T) { linkAddressRefusals(t, fx) })
+	t.Run("EveryNewWayInIsNoticedToTheAccountsOwnAddress", func(t *testing.T) { linkNotices(t, fx) })
 }
 
 const identitiesPath = oauthProject + "/user/identities"
@@ -445,4 +446,59 @@ func linkAddressRefusals(t *testing.T, fx *otpFixture) {
 	if resp := postJSON(fx.srv, oauthProject+"/login", map[string]string{"email": squatted, "password": oauthPassword}); resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("the squatter still signs in: %d", resp.StatusCode)
 	}
+}
+
+func linkNotice(fx *otpFixture, to string) *email.Message {
+	return mailTo(fx.sender.all(), email.TemplateIdentityLinked, to)
+}
+
+func linkNotices(t *testing.T, fx *otpFixture) {
+	google := person("notice-owner")
+	owner := fx.signIn(t, "google", google)
+	github := person("notice-github")
+	fx.sender.reset()
+	if resp, body := fx.link(t, accessTokenOf(owner), "github", github); resp.StatusCode != http.StatusOK {
+		t.Fatalf("link: %d %v", resp.StatusCode, body)
+	}
+	notice := linkNotice(fx, google.Email)
+	if notice == nil || notice.Data["method"] != "github" || notice.Data["linkedEmail"] != github.Email || notice.ProjectID != "test-project" {
+		t.Fatalf("provider link notice = %+v in %v", notice, fx.sender.all())
+	}
+
+	added := mailbox("notice-added")
+	verifier := newVerifier(t)
+	fresh := accessTokenOf(fx.signIn(t, "google", google))
+	fx.call(http.MethodPost, identitiesPath+"/email", fresh, map[string]string{
+		"email": added, "type": "email", "code_challenge": oauth.S256(verifier), "code_challenge_method": "S256"})
+	code := fx.linkCode(t, added)
+	fx.sender.reset()
+	if resp, body := fx.verifyCode(added, code, verifier); resp.StatusCode != http.StatusOK {
+		t.Fatalf("address link: %d %v", resp.StatusCode, body)
+	}
+	if notice := linkNotice(fx, google.Email); notice == nil || notice.Data["method"] != "email" || notice.Data["linkedEmail"] != added {
+		t.Fatalf("address link notice = %+v in %v", notice, fx.sender.all())
+	}
+
+	proven := mailbox("notice-auto")
+	fx.signInWithCode(t, proven)
+	fx.sender.reset()
+	fx.signIn(t, "google", idpfakeUser(proven))
+	if notice := linkNotice(fx, proven); notice == nil || notice.Data["method"] != "google" {
+		t.Fatalf("a provider joining a proven account was not noticed: %v", fx.sender.all())
+	}
+
+	squatted := mailbox("notice-takeover")
+	tokenResponse(t, postJSON(fx.srv, oauthProject+"/register", map[string]string{
+		"email": squatted, "password": oauthPassword, "fullName": "Squatter"}), "register")
+	fx.sender.reset()
+	fx.signIn(t, "github", idpfakeUser(squatted))
+	if len(fx.sender.all()) != 0 {
+		t.Fatalf("an unproven address was mailed a notice: %v", fx.sender.all())
+	}
+}
+
+func idpfakeUser(address string) idpfake.User {
+	user := person("notice")
+	user.Email = address
+	return user
 }

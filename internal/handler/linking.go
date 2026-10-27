@@ -320,6 +320,7 @@ func (h *AuthHandler) commitLink(ctx context.Context, db store.Store, projectID 
 		h.recordAudit(ctx, db, projectID, store.AuditEvent{UserID: squatter, Event: "takeover", Method: claim.Provider, IP: clientIP})
 	}
 	h.recordAudit(ctx, db, projectID, store.AuditEvent{UserID: userID, Event: "identity_linked", Method: claim.Provider, IP: clientIP})
+	h.noticeLinked(ctx, db, projectID, userID, claim.Provider, claim.Email)
 	return http.StatusOK, nil
 }
 
