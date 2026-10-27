@@ -178,7 +178,7 @@ func (h *AuthHandler) Routes(r chi.Router) {
 		r.Get("/.well-known/jwks.json", h.JWKS)
 		r.With(h.limit(rateLimitRegister)).Post("/register", h.Register)
 		// Guest accounts (EXC-662); a project without them answers 404.
-		r.With(h.limit(rateLimitRegister)).Post("/guest", h.SignInAsGuest)
+		r.With(h.limit(rateLimitGuest)).Post("/guest", h.SignInAsGuest)
 		r.With(h.limit(rateLimitLogin)).Post("/login", h.Login)
 		r.Post("/validate", h.Validate)
 		// /refresh is the legacy alias of grant_type=refresh_token, so it
@@ -240,6 +240,7 @@ type rateLimitRoute func(*middleware.RateLimits, http.Handler) http.Handler
 
 var (
 	rateLimitRegister rateLimitRoute = (*middleware.RateLimits).Register
+	rateLimitGuest    rateLimitRoute = (*middleware.RateLimits).Guest
 	rateLimitLogin    rateLimitRoute = (*middleware.RateLimits).Login
 	rateLimitToken    rateLimitRoute = (*middleware.RateLimits).Token
 	rateLimitOTP      rateLimitRoute = (*middleware.RateLimits).OTP

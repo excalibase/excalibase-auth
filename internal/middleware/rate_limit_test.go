@@ -387,3 +387,27 @@ func TestOTPThrottlesSendsPerClientIP(t *testing.T) {
 		t.Fatalf("another client shares the budget: %d", w.Code)
 	}
 }
+
+// Guest sign-ups are paced per client here and per project in the project's
+// database; they leave /register's project budget to real sign-ups.
+func TestRateLimit_GuestIsPerClientAndLeavesTheRegisterBudget(t *testing.T) {
+	cfg := testConfig()
+	cfg.RegisterPerIP = 2
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	limits := NewRateLimits(cfg, ratelimit.WithClock(clock.Now))
+	r := chi.NewRouter()
+	r.With(limits.Guest).Post("/auth/{orgSlug}/{projectId}/guest", statusHandler(http.StatusOK).ServeHTTP)
+	for i := range 2 {
+		if w := post(r, "/auth/org/proj/guest", "203.0.113.1", "{}"); w.Code != http.StatusOK {
+			t.Fatalf("guest %d: %d", i+1, w.Code)
+		}
+	}
+	if w := post(r, "/auth/org/proj/guest", "203.0.113.1", "{}"); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("third guest from one client: %d, want 429", w.Code)
+	}
+	for range cfg.RegisterPerProject {
+		if !limits.AllowSignup("proj") {
+			t.Fatal("guest sign-ups spent the project's register budget")
+		}
+	}
+}

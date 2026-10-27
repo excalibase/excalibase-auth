@@ -20,3 +20,9 @@ CREATE TABLE IF NOT EXISTS auth.guest_lock (
     cleaned_at TIMESTAMPTZ
 );
 INSERT INTO auth.guest_lock (id) VALUES (1) ON CONFLICT DO NOTHING;
+
+-- A guest's address change records its client, capped per client and held
+-- to a share of the project's mail budget.
+ALTER TABLE auth.email_change_tokens ADD COLUMN IF NOT EXISTS guest_client VARCHAR(64);
+CREATE INDEX IF NOT EXISTS idx_email_change_tokens_guest ON auth.email_change_tokens (guest_client, created_at)
+    WHERE guest_client IS NOT NULL;

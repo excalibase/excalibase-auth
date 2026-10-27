@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,6 +83,8 @@ func runGuestFlows(t *testing.T, fx *otpFixture, turnstileDown *bool) {
 	t.Run("AGuestBecomesAFullAccountByProvingAnAddress", func(t *testing.T) { guestUpgradesByAddressChange(t, fx) })
 	t.Run("AGuestBecomesAFullAccountByLinkingAProvider", func(t *testing.T) { guestUpgradesByProvider(t, fx) })
 	t.Run("AGuestCannotTakeAProvenAddress", func(t *testing.T) { guestCannotTakeProvenAddress(t, fx) })
+	t.Run("GuestAddressChangesAreCappedPerClient", func(t *testing.T) { guestChangesCappedPerClient(t, fx) })
+	t.Run("AGuestCannotSetAPasswordBeforeItHasAnAddress", func(t *testing.T) { guestCannotSetPassword(t, fx) })
 	t.Run("TheSubjectIsTheIDAndTheAddressItsOwnClaimOnlyWithTheFlag", func(t *testing.T) { tokenShapeFollowsTheFlag(t, fx) })
 	t.Run("TheSweeperDeletesIdleGuestsOnlyWhileGuestsAreOn", func(t *testing.T) { guestSweeper(t, fx) })
 }
@@ -172,6 +175,12 @@ func guestFailsClosed(t *testing.T, fx *otpFixture) {
 		if resp, body := fx.call(http.MethodPost, guestPath, "", nil); resp.StatusCode != c.status || body["error"] != c.code {
 			t.Errorf("%s: %d %v", c.name, resp.StatusCode, body)
 		}
+	}
+	// A body that would be refused still answers as a route that is off.
+	fx.settings.set(func(s *signInSettings) { s.guests = nil })
+	oversized := map[string]string{"captchaToken": strings.Repeat("a", maxCaptchaToken+1)}
+	if resp, body := fx.call(http.MethodPost, guestPath, "", oversized); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("flag off with a bad body: %d %v", resp.StatusCode, body)
 	}
 	if fx.count(t, "users") != before {
 		t.Fatal("a refused guest sign-in made an account")
@@ -378,5 +387,31 @@ func TestIntegration_ADisabledAccountCannotRefresh(t *testing.T) {
 	fx.disable(t, address)
 	if resp, body := fx.refreshWith(refreshTokenOf(session)); resp.StatusCode != http.StatusForbidden || body["error"] != errAccountDisabled.Error() {
 		t.Fatalf("refresh of a disabled account: %d %v", resp.StatusCode, body)
+	}
+}
+
+func guestChangesCappedPerClient(t *testing.T, fx *otpFixture) {
+	saved := fx.handler.emailChangeLimits
+	defer func() { fx.handler.emailChangeLimits = saved }()
+	fx.handler.emailChangeLimits.PerGuestClientDay = fx.count(t, "email_change_tokens") + 1
+	request := func() (*http.Response, map[string]any) {
+		guest := userIDOf(fx.signInAsGuest(t))
+		token := fx.staleGuestToken(t, int64(guest), "guest")
+		return fx.call(http.MethodPatch, userPath, token, map[string]any{"email": mailbox("guest-capped"), "emailRedirectTo": appCallback})
+	}
+	if resp, body := request(); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first change from the client: %d %v", resp.StatusCode, body)
+	}
+	if resp, body := request(); resp.StatusCode != http.StatusTooManyRequests || body["error"] != codeRateLimited {
+		t.Fatalf("past the client's guest budget: %d %v", resp.StatusCode, body)
+	}
+}
+
+func guestCannotSetPassword(t *testing.T, fx *otpFixture) {
+	guest := userIDOf(fx.signInAsGuest(t))
+	token := fx.staleGuestToken(t, int64(guest), "guest")
+	resp, body := fx.call(http.MethodPatch, userPath, token, map[string]any{"password": "a-long-enough-password"})
+	if resp.StatusCode != http.StatusBadRequest || body["error"] != codeAddressRequired {
+		t.Fatalf("a guest set a password: %d %v", resp.StatusCode, body)
 	}
 }

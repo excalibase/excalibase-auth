@@ -26,6 +26,11 @@ func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, l
 		if recent.Int64 > 0 || today.Int64 >= int64(limits.PerAccountDay) {
 			return store.ErrRateLimited
 		}
+		if change.GuestClient != "" {
+			if err := guestChangeAllowed(ctx, tx, change.GuestClient, limits); err != nil {
+				return err
+			}
+		}
 		var err error
 		if mail, err = changeMail(ctx, tx, change, limits.PerProjectDay); err != nil {
 			return err
@@ -37,8 +42,9 @@ func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, l
 			return err
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO email_change_tokens (user_id, new_email, token_hash, mailed, expires_at) VALUES (?, ?, ?, ?, ?)`,
-			change.UserID, change.NewEmail, change.TokenHash, mail.Notice, change.ExpiresAt.UTC())
+			`INSERT INTO email_change_tokens (user_id, new_email, token_hash, mailed, expires_at, guest_client)
+			 VALUES (?, ?, ?, ?, ?, NULLIF(?, ''))`,
+			change.UserID, change.NewEmail, change.TokenHash, mail.Notice, change.ExpiresAt.UTC(), change.GuestClient)
 		return err
 	})
 	if err != nil {
@@ -127,4 +133,24 @@ func releaseOwnLinkedAddress(ctx context.Context, tx *sql.Tx, changed store.Chan
 	_, err = tx.ExecContext(ctx, "DELETE FROM identities WHERE provider = ? AND subject = ?",
 		store.EmailProvider, store.AddressKey(changed.NewEmail))
 	return err
+}
+
+// guestChangeAllowed counts a guest's request, under the guest sign-up lock,
+// against its client's and the guests' share of the project's budget.
+func guestChangeAllowed(ctx context.Context, tx *sql.Tx, client string, limits store.EmailChangeLimits) error {
+	var locked int
+	if err := tx.QueryRowContext(ctx, "SELECT id FROM guest_lock WHERE id = 1 FOR UPDATE").Scan(&locked); err != nil {
+		return err
+	}
+	var fromClient, guests int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(guest_client = ?), 0), COALESCE(SUM(mailed), 0)
+		 FROM email_change_tokens WHERE guest_client IS NOT NULL AND created_at > NOW(6) - INTERVAL 1 DAY`,
+		client).Scan(&fromClient, &guests); err != nil {
+		return err
+	}
+	if fromClient >= limits.PerGuestClientDay || guests >= limits.GuestPerProjectDay {
+		return store.ErrRateLimited
+	}
+	return nil
 }

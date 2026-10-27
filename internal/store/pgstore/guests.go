@@ -21,7 +21,9 @@ func (s *Store) CreateGuest(ctx context.Context, client string, limits store.Gue
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err := tx.Exec(ctx, "SELECT 1 FROM auth.guest_lock WHERE id = 1 FOR UPDATE"); err != nil {
+	// A missing lock row would leave the counts unserialised, so it is an error.
+	var locked int
+	if err := tx.QueryRow(ctx, "SELECT id FROM auth.guest_lock WHERE id = 1 FOR UPDATE").Scan(&locked); err != nil {
 		return store.Account{}, err
 	}
 	var fromClient, today int

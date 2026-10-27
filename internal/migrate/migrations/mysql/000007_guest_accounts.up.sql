@@ -15,3 +15,6 @@ CREATE TABLE IF NOT EXISTS guest_lock (
     CONSTRAINT ck_guest_lock_one CHECK (id = 1)
 ) ENGINE=InnoDB;
 INSERT IGNORE INTO guest_lock (id) VALUES (1);
+
+ALTER TABLE email_change_tokens ADD COLUMN guest_client VARCHAR(64) NULL,
+    ADD KEY idx_email_change_tokens_guest (guest_client, created_at);

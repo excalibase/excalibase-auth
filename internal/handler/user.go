@@ -31,6 +31,8 @@ const (
 	// A password change ends every pending address change, so the two are
 	// never asked for at once.
 	codeOneSensitiveChange = "password_and_email_separately"
+	// codeAddressRequired refuses a password on a guest: it could never sign in with one.
+	codeAddressRequired = "email_required"
 )
 
 // updateUserRequest is PATCH /user. App metadata is not a field: only the
@@ -210,6 +212,10 @@ func validFullName(name string) bool {
 func (h *AuthHandler) mayChangeSensitive(w http.ResponseWriter, r *http.Request, db store.Store, update userUpdate, claims *auth.Claims, account store.Account) bool {
 	if !update.sensitive() {
 		return true
+	}
+	if update.request.Password != nil && account.IsGuest {
+		httpError(w, codeAddressRequired, http.StatusBadRequest)
+		return false
 	}
 	if update.email != "" && store.AddressKey(update.email) == store.AddressKey(account.Email) {
 		httpError(w, codeSameEmail, http.StatusBadRequest)

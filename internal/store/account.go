@@ -32,6 +32,9 @@ type EmailChange struct {
 	NewEmail  string
 	TokenHash string
 	ExpiresAt time.Time
+	// GuestClient is set for a guest's request: its client (IP or IPv6 /64),
+	// counted against the guest budgets below.
+	GuestClient string
 }
 
 // EmailChangeLimits are the change budgets, counted from the rows so every
@@ -40,6 +43,10 @@ type EmailChangeLimits struct {
 	MinInterval   time.Duration
 	PerAccountDay int
 	PerProjectDay int // mailed requests only
+	// A guest is free to make, so its requests are also capped per client
+	// and held to a share of the project's budget, leaving the rest to full accounts.
+	PerGuestClientDay  int
+	GuestPerProjectDay int
 }
 
 // EmailChangeMail says which mails a recorded change may send: the notice to

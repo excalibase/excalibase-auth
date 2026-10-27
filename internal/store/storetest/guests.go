@@ -19,7 +19,9 @@ func runGuests(t *testing.T, fx Fixture) {
 	t.Run("linking an address makes a guest a full account with the same id", func(t *testing.T) { guestLinksAddress(t, fx.Store) })
 	t.Run("linking a provider gives a guest the provider's address", func(t *testing.T) { guestLinksProvider(t, fx.Store) })
 	t.Run("a guest cannot take an address a proven account holds", func(t *testing.T) { guestAddressTaken(t, fx.Store) })
+	t.Run("a guest cannot take an address linked to another account", func(t *testing.T) { guestLinkedAddressTaken(t, fx.Store) })
 	t.Run("an address change makes a guest a full account", func(t *testing.T) { guestChangesAddress(t, fx.Store) })
+	t.Run("guest address changes are capped per client and per project", func(t *testing.T) { guestChangeBudgets(t, fx.Store) })
 	t.Run("a role the project gave a guest is kept on upgrade", func(t *testing.T) { guestKeepsGivenRole(t, fx.Store) })
 	t.Run("only inactive, unreferenced guests are deleted", func(t *testing.T) { guestCleanup(t, fx) })
 	t.Run("the cleanup is claimed once per interval", func(t *testing.T) { guestCleanupClaim(t, fx.Store) })
@@ -266,5 +268,56 @@ func guestCleanupClaim(t *testing.T, db store.Store) {
 	}
 	if soon, err := db.ClaimGuestCleanup(ctx, time.Nanosecond); err != nil || !soon {
 		t.Fatalf("claim after the interval = %v %v", soon, err)
+	}
+}
+
+func guestLinkedAddressTaken(t *testing.T, db store.Store) {
+	ctx := context.Background()
+	owner, _ := provenUser(t, db, "guest-linked-owner")
+	second := uniqueEmail("guest-linked-second")
+	if _, err := db.LinkIdentity(ctx, owner, emailClaim(second)); err != nil {
+		t.Fatalf("link the second address: %v", err)
+	}
+	guest := newGuest(t, db)
+	if _, err := db.LinkIdentity(ctx, guest.ID, claimFor("google", second)); !errors.Is(err, store.ErrIdentityExists) {
+		t.Fatalf("a guest took a linked address by a provider: %v", err)
+	}
+	if account, err := db.AccountByID(ctx, guest.ID); err != nil || !account.IsGuest || account.Email != "" {
+		t.Fatalf("the refused guest changed: %+v %v", account, err)
+	}
+	if found, err := db.AccountByAddress(ctx, second); err != nil || found.ID != owner {
+		t.Fatalf("the linked address now reaches %+v %v", found, err)
+	}
+}
+
+func guestChangeBudgets(t *testing.T, db store.Store) {
+	ctx := context.Background()
+	limits := store.EmailChangeLimits{PerAccountDay: 100, PerProjectDay: 1_000_000, PerGuestClientDay: 2, GuestPerProjectDay: 1_000_000}
+	save := func(account int64, client string, limits store.EmailChangeLimits) error {
+		_, err := db.SaveEmailChange(ctx, store.EmailChange{UserID: account, NewEmail: uniqueEmail("guest-budget"),
+			TokenHash: hash(t), ExpiresAt: time.Now().Add(time.Hour), GuestClient: client}, limits)
+		return err
+	}
+	client := newClient()
+	for i := 0; i < 2; i++ {
+		if err := save(newGuest(t, db).ID, client, limits); err != nil {
+			t.Fatalf("change %d: %v", i, err)
+		}
+	}
+	if err := save(newGuest(t, db).ID, client, limits); !errors.Is(err, store.ErrRateLimited) {
+		t.Fatalf("third change from one client: %v, want ErrRateLimited", err)
+	}
+	if err := save(newGuest(t, db).ID, newClient(), limits); err != nil {
+		t.Fatalf("another client: %v", err)
+	}
+	// Guests share a part of the project's budget; past it they are refused.
+	tight := limits
+	tight.GuestPerProjectDay = 0
+	if err := save(newGuest(t, db).ID, newClient(), tight); !errors.Is(err, store.ErrRateLimited) {
+		t.Fatalf("past the guests' project share: %v, want ErrRateLimited", err)
+	}
+	user, _ := provenUser(t, db, "guest-budget-full")
+	if err := save(user, "", tight); err != nil {
+		t.Fatalf("a full account is held to the guests' share: %v", err)
 	}
 }

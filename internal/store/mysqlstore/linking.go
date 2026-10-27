@@ -34,7 +34,13 @@ func (s *Store) LinkIdentity(ctx context.Context, userID int64, claim store.Iden
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		// A guest takes the linked address as its own, so it is claimed like one.
+		// A guest takes the linked address as its own, so it is claimed like one;
+		// an address another account linked stays that account's.
+		if guest && claim.Provider != store.EmailProvider {
+			if err := addressLinkedElsewhere(ctx, tx, userID, claim.Email); err != nil {
+				return err
+			}
+		}
 		if claim.Provider == store.EmailProvider || guest {
 			if result.Deleted, err = claimAddress(ctx, tx, userID, claim.Email); err != nil {
 				return err
@@ -197,4 +203,19 @@ func (s *Store) UnlinkIdentity(ctx context.Context, userID, identityID int64) (s
 		return err
 	})
 	return removed, err
+}
+
+func addressLinkedElsewhere(ctx context.Context, tx *sql.Tx, userID int64, email string) error {
+	var owner int64
+	err := tx.QueryRowContext(ctx, "SELECT user_id FROM identities WHERE provider = ? AND subject = ? FOR UPDATE",
+		store.EmailProvider, store.AddressKey(email)).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return err
+	case owner != userID:
+		return store.ErrIdentityExists
+	}
+	return nil
 }

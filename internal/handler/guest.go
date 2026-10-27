@@ -56,20 +56,16 @@ func (h *AuthHandler) WithGuestInactivity(days int) *AuthHandler {
 
 // SignInAsGuest makes an account with no address and starts its session.
 func (h *AuthHandler) SignInAsGuest(w http.ResponseWriter, r *http.Request) {
-	req, ok := decodeGuestRequest(w, r)
+	info, ok := h.guestSettings(w, r)
 	if !ok {
 		return
 	}
-	info, ok := h.guestSettings(w, r)
+	req, ok := decodeGuestRequest(w, r)
 	if !ok {
 		return
 	}
 	projectID := projectKey(r)
 	if info.GuestCaptchaEnabled && !h.captchaPassed(w, r, projectID, req.CaptchaToken) {
-		return
-	}
-	if h.limits != nil && !h.limits.AllowSignup(projectID) {
-		httpError(w, codeRateLimited, http.StatusTooManyRequests)
 		return
 	}
 	db, ok := h.storeFor(w, r)
