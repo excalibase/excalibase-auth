@@ -111,14 +111,19 @@ func (s *Store) RevokeOtherSessions(ctx context.Context, userID int64, keep uuid
 	return err
 }
 
+// referenced reads an app table's reference to a deleted account as ErrUserReferenced.
+func referenced(err error) error {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == rowIsReferenced {
+		return store.ErrUserReferenced
+	}
+	return err
+}
+
 func (s *Store) DeleteUser(ctx context.Context, userID int64) error {
 	result, err := s.db.ExecContext(ctx, "DELETE FROM users WHERE id = ?", userID)
-	var mysqlErr *mysql.MySQLError
-	switch {
-	case errors.As(err, &mysqlErr) && mysqlErr.Number == rowIsReferenced:
-		return store.ErrUserReferenced
-	case err != nil:
-		return err
+	if err != nil {
+		return referenced(err)
 	}
 	deleted, err := result.RowsAffected()
 	if err == nil && deleted == 0 {

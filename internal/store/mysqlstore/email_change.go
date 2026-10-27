@@ -10,8 +10,8 @@ import (
 
 const endChangesQuery = "UPDATE email_change_tokens SET consumed_at = NOW(6) WHERE user_id = ? AND consumed_at IS NULL"
 
-func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, limits store.EmailChangeLimits) (bool, error) {
-	var mailed bool
+func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, limits store.EmailChangeLimits) (store.EmailChangeMail, error) {
+	var mail store.EmailChangeMail
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		if err := linkTarget(tx.QueryRowContext(ctx, linkTargetLockedQuery, change.UserID)); err != nil {
 			return err
@@ -27,7 +27,7 @@ func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, l
 			return store.ErrRateLimited
 		}
 		var err error
-		if mailed, err = mayMailChange(ctx, tx, change, limits.PerProjectDay); err != nil {
+		if mail, err = changeMail(ctx, tx, change, limits.PerProjectDay); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, endChangesQuery, change.UserID); err != nil {
@@ -38,15 +38,17 @@ func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, l
 		}
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO email_change_tokens (user_id, new_email, token_hash, mailed, expires_at) VALUES (?, ?, ?, ?, ?)`,
-			change.UserID, change.NewEmail, change.TokenHash, mailed, change.ExpiresAt.UTC())
+			change.UserID, change.NewEmail, change.TokenHash, mail.Notice, change.ExpiresAt.UTC())
 		return err
 	})
-	return mailed, err
+	if err != nil {
+		return store.EmailChangeMail{}, err
+	}
+	return mail, nil
 }
 
-// mayMailChange is false when the address answers to another proven or
-// disabled account, or the project's mailed requests reached today's budget.
-func mayMailChange(ctx context.Context, tx *sql.Tx, change store.EmailChange, perProjectDay int) (bool, error) {
+// changeMail decides the mails; see pgstore.
+func changeMail(ctx context.Context, tx *sql.Tx, change store.EmailChange, perProjectDay int) (store.EmailChangeMail, error) {
 	var (
 		held bool
 		sent int
@@ -58,18 +60,19 @@ func mayMailChange(ctx context.Context, tx *sql.Tx, change store.EmailChange, pe
 		        (SELECT COUNT(*) FROM email_change_tokens WHERE mailed AND created_at > NOW(6) - INTERVAL 1 DAY)`,
 		change.NewEmail, change.UserID, store.EmailProvider, store.AddressKey(change.NewEmail), change.UserID).Scan(&held, &sent)
 	if err != nil {
-		return false, err
+		return store.EmailChangeMail{}, err
 	}
-	return !held && sent < perProjectDay, nil
+	notice := sent < perProjectDay
+	return store.EmailChangeMail{Notice: notice, Link: notice && !held}, nil
 }
 
-func (s *Store) ConfirmEmailChange(ctx context.Context, tokenHash string) (store.ChangedEmail, error) {
+func (s *Store) ConfirmEmailChange(ctx context.Context, userID int64, tokenHash string) (store.ChangedEmail, error) {
 	var changed store.ChangedEmail
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx,
 			`SELECT user_id, new_email FROM email_change_tokens
-			 WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > NOW(6) FOR UPDATE`,
-			tokenHash).Scan(&changed.UserID, &changed.NewEmail); err != nil {
+			 WHERE token_hash = ? AND user_id = ? AND consumed_at IS NULL AND expires_at > NOW(6) FOR UPDATE`,
+			tokenHash, userID).Scan(&changed.UserID, &changed.NewEmail); err != nil {
 			return notFound(err)
 		}
 		var enabled bool
@@ -85,7 +88,7 @@ func (s *Store) ConfirmEmailChange(ctx context.Context, tokenHash string) (store
 		}
 		var err error
 		if changed.Replaced, err = claimAddress(ctx, tx, changed.UserID, changed.NewEmail); err != nil {
-			return err
+			return referenced(err)
 		}
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE users SET email = ?, email_verified = TRUE, email_verified_at = NOW(6), updated_at = NOW(6) WHERE id = ?",

@@ -11,15 +11,16 @@ import (
 
 const endChangesQuery = "UPDATE auth.email_change_tokens SET consumed_at = NOW() WHERE user_id = $1 AND consumed_at IS NULL"
 
-func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, limits store.EmailChangeLimits) (bool, error) {
+func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, limits store.EmailChangeLimits) (store.EmailChangeMail, error) {
+	var none store.EmailChangeMail
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("%w: %w", store.ErrUnavailable, err)
+		return none, fmt.Errorf("%w: %w", store.ErrUnavailable, err)
 	}
 	defer tx.Rollback(ctx)
 
 	if err := linkTarget(ctx, tx.QueryRow(ctx, linkTargetLockedQuery, change.UserID)); err != nil {
-		return false, err
+		return none, err
 	}
 	var today int
 	var recent bool
@@ -27,33 +28,34 @@ func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, l
 		`SELECT count(*), COALESCE(bool_or(created_at > NOW() - make_interval(secs => $2)), false)
 		 FROM auth.email_change_tokens WHERE user_id = $1 AND created_at > NOW() - INTERVAL '1 day'`,
 		change.UserID, limits.MinInterval.Seconds()).Scan(&today, &recent); err != nil {
-		return false, err
+		return none, err
 	}
 	if recent || today >= limits.PerAccountDay {
-		return false, store.ErrRateLimited
+		return none, store.ErrRateLimited
 	}
-	mailed, err := mayMailChange(ctx, tx, change, limits.PerProjectDay)
+	mail, err := changeMail(ctx, tx, change, limits.PerProjectDay)
 	if err != nil {
-		return false, err
+		return none, err
 	}
 	if _, err := tx.Exec(ctx, endChangesQuery, change.UserID); err != nil {
-		return false, err
+		return none, err
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM auth.email_change_tokens WHERE created_at < NOW() - INTERVAL '1 day'"); err != nil {
-		return false, err
+		return none, err
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO auth.email_change_tokens (user_id, new_email, token_hash, mailed, expires_at)
 		 VALUES ($1, $2, $3, $4, $5)`,
-		change.UserID, change.NewEmail, change.TokenHash, mailed, change.ExpiresAt); err != nil {
-		return false, err
+		change.UserID, change.NewEmail, change.TokenHash, mail.Notice, change.ExpiresAt); err != nil {
+		return none, err
 	}
-	return mailed, tx.Commit(ctx)
+	return mail, tx.Commit(ctx)
 }
 
-// mayMailChange is false when the address answers to another proven or
-// disabled account, or the project's mailed requests reached today's budget.
-func mayMailChange(ctx context.Context, tx pgx.Tx, change store.EmailChange, perProjectDay int) (bool, error) {
+// changeMail mails nothing past the project's daily budget, and the link only
+// when the address answers to no other proven or disabled account; the notice
+// goes out either way, so the own inbox does not tell the two apart.
+func changeMail(ctx context.Context, tx pgx.Tx, change store.EmailChange, perProjectDay int) (store.EmailChangeMail, error) {
 	var held bool
 	var sent int
 	err := tx.QueryRow(ctx,
@@ -63,12 +65,13 @@ func mayMailChange(ctx context.Context, tx pgx.Tx, change store.EmailChange, per
 		        (SELECT count(*) FROM auth.email_change_tokens WHERE mailed AND created_at > NOW() - INTERVAL '1 day')`,
 		change.UserID, change.NewEmail, store.EmailProvider, store.AddressKey(change.NewEmail)).Scan(&held, &sent)
 	if err != nil {
-		return false, err
+		return store.EmailChangeMail{}, err
 	}
-	return !held && sent < perProjectDay, nil
+	notice := sent < perProjectDay
+	return store.EmailChangeMail{Notice: notice, Link: notice && !held}, nil
 }
 
-func (s *Store) ConfirmEmailChange(ctx context.Context, tokenHash string) (store.ChangedEmail, error) {
+func (s *Store) ConfirmEmailChange(ctx context.Context, userID int64, tokenHash string) (store.ChangedEmail, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return store.ChangedEmail{}, fmt.Errorf("%w: %w", store.ErrUnavailable, err)
@@ -78,8 +81,8 @@ func (s *Store) ConfirmEmailChange(ctx context.Context, tokenHash string) (store
 	var changed store.ChangedEmail
 	if err := tx.QueryRow(ctx,
 		`SELECT user_id, new_email FROM auth.email_change_tokens
-		 WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > NOW() FOR UPDATE`,
-		tokenHash).Scan(&changed.UserID, &changed.NewEmail); err != nil {
+		 WHERE token_hash = $1 AND user_id = $2 AND consumed_at IS NULL AND expires_at > NOW() FOR UPDATE`,
+		tokenHash, userID).Scan(&changed.UserID, &changed.NewEmail); err != nil {
 		return store.ChangedEmail{}, notFound(err)
 	}
 	var enabled bool
@@ -94,7 +97,7 @@ func (s *Store) ConfirmEmailChange(ctx context.Context, tokenHash string) (store
 		return store.ChangedEmail{}, err
 	}
 	if changed.Replaced, err = claimAddress(ctx, tx, changed.UserID, changed.NewEmail); err != nil {
-		return store.ChangedEmail{}, err
+		return store.ChangedEmail{}, referenced(err)
 	}
 	if _, err := tx.Exec(ctx,
 		"UPDATE auth.users SET email = $2, email_verified = true, email_verified_at = NOW(), updated_at = NOW() WHERE id = $1",

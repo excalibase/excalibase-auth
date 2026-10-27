@@ -366,16 +366,18 @@ type Store interface {
 	// every unspent reset link, all at once.
 	ChangePassword(ctx context.Context, userID int64, passwordHash string) error
 	// SaveEmailChange records a request within the limits and ends the
-	// account's earlier ones. mailed is false, and the row kept, when the
-	// address answers to another proven or disabled account or the project's
-	// daily budget is spent. ErrRateLimited past the account's budget;
+	// account's earlier ones. Past the project's daily budget nothing is
+	// mailed; the link is not mailed when the address answers to another
+	// proven or disabled account. ErrRateLimited past the account's budget;
 	// ErrAccountDisabled, ErrAddressUnproven or ErrNotFound for the account.
-	SaveEmailChange(ctx context.Context, change EmailChange, limits EmailChangeLimits) (mailed bool, err error)
-	// ConfirmEmailChange spends a live request and moves the account to its
-	// address, proven, deleting the unproven accounts answering to it and
-	// ending every unspent link sent to the old one. ErrIdentityExists when
-	// another proven or disabled account holds the address.
-	ConfirmEmailChange(ctx context.Context, tokenHash string) (ChangedEmail, error)
+	SaveEmailChange(ctx context.Context, change EmailChange, limits EmailChangeLimits) (EmailChangeMail, error)
+	// ConfirmEmailChange spends the account's live request and moves it to
+	// its address, proven, deleting the unproven accounts answering to it and
+	// ending every unspent link sent to the old one. ErrNotFound unless the
+	// request is the account's; ErrIdentityExists when another proven or
+	// disabled account holds the address; ErrUserReferenced when an app table
+	// references an unproven one.
+	ConfirmEmailChange(ctx context.Context, userID int64, tokenHash string) (ChangedEmail, error)
 	// RevokeOtherSessions ends every session of the account but keep.
 	RevokeOtherSessions(ctx context.Context, userID int64, keep uuid.UUID) error
 	// DeleteUser removes the account and everything of it in the auth tables;

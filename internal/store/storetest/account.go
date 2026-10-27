@@ -27,6 +27,9 @@ func runAccount(t *testing.T, fx Fixture) {
 	t.Run("address changes are paced per account and capped per project", func(t *testing.T) { emailChangeBudgets(t, fx.Store) })
 	t.Run("only an enabled account with a proven address asks for a change", func(t *testing.T) { emailChangeRefused(t, fx) })
 	t.Run("deleting an account removes it and its sessions", func(t *testing.T) { deleteUser(t, fx) })
+	t.Run("ending the sessions or changing the roles ends a pending change", func(t *testing.T) { pendingChangeEnds(t, fx.Store) })
+	t.Run("only the account that asked confirms its change", func(t *testing.T) { confirmNeedsTheRequester(t, fx.Store) })
+	t.Run("an unproven holder an app table references blocks the change", func(t *testing.T) { referencedSquatter(t, fx) })
 }
 
 func patch(t *testing.T, raw string) map[string]json.RawMessage {
@@ -180,12 +183,19 @@ func refreshStateNamesAccount(t *testing.T, db store.Store) {
 func requestChange(t *testing.T, db store.Store, userID int64, address string) (string, bool) {
 	t.Helper()
 	digest := hash(t)
-	mailed, err := db.SaveEmailChange(context.Background(), store.EmailChange{UserID: userID, NewEmail: address,
+	mail, err := db.SaveEmailChange(context.Background(), store.EmailChange{UserID: userID, NewEmail: address,
 		TokenHash: digest, ExpiresAt: time.Now().Add(time.Hour)}, testChangeLimits)
 	if err != nil {
 		t.Fatalf("request change of %d to %s: %v", userID, address, err)
 	}
-	return digest, mailed
+	if mail.Link && !mail.Notice {
+		t.Fatalf("a link mailed without the notice: %+v", mail)
+	}
+	return digest, mail.Link
+}
+
+func confirm(db store.Store, userID int64, digest string) (store.ChangedEmail, error) {
+	return db.ConfirmEmailChange(context.Background(), userID, digest)
 }
 
 func emailChangeMoves(t *testing.T, db store.Store) {
@@ -202,10 +212,10 @@ func emailChangeMoves(t *testing.T, db store.Store) {
 	if !mailed {
 		t.Fatal("a free address was not mailed")
 	}
-	if _, err := db.ConfirmEmailChange(ctx, stale); !errors.Is(err, store.ErrNotFound) {
+	if _, err := confirm(db, id, stale); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("an earlier request stayed live: %v", err)
 	}
-	changed, err := db.ConfirmEmailChange(ctx, digest)
+	changed, err := confirm(db, id, digest)
 	if err != nil || changed.UserID != id || changed.OldEmail != old || changed.NewEmail != target {
 		t.Fatalf("confirm = %+v %v", changed, err)
 	}
@@ -222,7 +232,7 @@ func emailChangeMoves(t *testing.T, db store.Store) {
 	if _, err := db.LookupToken(ctx, store.PasswordReset, reset); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("a reset link sent to the old address survived: %v", err)
 	}
-	if _, err := db.ConfirmEmailChange(ctx, digest); !errors.Is(err, store.ErrNotFound) {
+	if _, err := confirm(db, id, digest); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("a link spent twice: %v", err)
 	}
 }
@@ -232,9 +242,12 @@ func emailChangeTaken(t *testing.T, fx Fixture) {
 	db := fx.Store
 	id, _ := provenUser(t, db, "change-taken")
 	_, holder := provenUser(t, db, "change-holder")
-	if _, mailed := requestChange(t, db, id, strings.ToUpper(holder[:1])+holder[1:]); mailed {
-		t.Fatal("an address a proven account holds was mailed")
+	mail, err := db.SaveEmailChange(ctx, store.EmailChange{UserID: id, NewEmail: strings.ToUpper(holder[:1]) + holder[1:],
+		TokenHash: hash(t), ExpiresAt: time.Now().Add(time.Hour)}, testChangeLimits)
+	if err != nil || mail.Link || !mail.Notice {
+		t.Fatalf("an address a proven account holds: %+v %v; want only the notice", mail, err)
 	}
+	time.Sleep(2 * time.Millisecond)
 	linker, _ := provenUser(t, db, "change-linker")
 	linked := uniqueEmail("change-linked")
 	link(t, db, linker, emailClaim(linked))
@@ -249,7 +262,7 @@ func emailChangeTaken(t *testing.T, fx Fixture) {
 	if _, err := db.MarkVerified(ctx, racer, true, "!marker"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ConfirmEmailChange(ctx, digest); !errors.Is(err, store.ErrIdentityExists) {
+	if _, err := confirm(db, id, digest); !errors.Is(err, store.ErrIdentityExists) {
 		t.Fatalf("confirming onto a proven account's address: %v", err)
 	}
 	if account, _ := db.AccountByEmail(ctx, free); account.ID != racer {
@@ -268,7 +281,7 @@ func emailChangeReplaces(t *testing.T, fx Fixture) {
 	if !mailed {
 		t.Fatal("an address only an unproven account holds was not mailed")
 	}
-	changed, err := db.ConfirmEmailChange(ctx, digest)
+	changed, err := confirm(db, id, digest)
 	if err != nil || len(changed.Replaced) != 1 || changed.Replaced[0] != squatter {
 		t.Fatalf("confirm = %+v %v", changed, err)
 	}
@@ -277,7 +290,7 @@ func emailChangeReplaces(t *testing.T, fx Fixture) {
 	}
 	time.Sleep(2 * time.Millisecond)
 	digest, _ = requestChange(t, db, id, ownLinked)
-	if _, err := db.ConfirmEmailChange(ctx, digest); err != nil {
+	if _, err := confirm(db, id, digest); err != nil {
 		t.Fatalf("moving to an address the account already links: %v", err)
 	}
 	for _, identity := range identitiesOf(t, db, id) {
@@ -312,10 +325,10 @@ func emailChangeBudgets(t *testing.T, db store.Store) {
 		t.Fatalf("a request past the day's budget: %v", err)
 	}
 	other, _ := provenUser(t, db, "change-project-cap")
-	mailed, err := db.SaveEmailChange(ctx, store.EmailChange{UserID: other, NewEmail: uniqueEmail("cap"), TokenHash: hash(t),
+	mail, err := db.SaveEmailChange(ctx, store.EmailChange{UserID: other, NewEmail: uniqueEmail("cap"), TokenHash: hash(t),
 		ExpiresAt: time.Now().Add(time.Hour)}, store.EmailChangeLimits{MinInterval: time.Millisecond, PerAccountDay: 5, PerProjectDay: 1})
-	if err != nil || mailed {
-		t.Fatalf("a request past the project's budget: mailed=%v err=%v", mailed, err)
+	if err != nil || mail.Link || mail.Notice {
+		t.Fatalf("a request past the project's budget: %+v err=%v", mail, err)
 	}
 }
 
@@ -333,7 +346,7 @@ func emailChangeRefused(t *testing.T, fx Fixture) {
 		TokenHash: hash(t), ExpiresAt: time.Now().Add(time.Hour)}, testChangeLimits); !errors.Is(err, store.ErrAccountDisabled) {
 		t.Fatalf("disabled: %v", err)
 	}
-	if _, err := db.ConfirmEmailChange(context.Background(), digest); !errors.Is(err, store.ErrAccountDisabled) {
+	if _, err := confirm(db, disabled, digest); !errors.Is(err, store.ErrAccountDisabled) {
 		t.Fatalf("confirming for a disabled account: %v", err)
 	}
 	expired := hash(t)
@@ -342,7 +355,7 @@ func emailChangeRefused(t *testing.T, fx Fixture) {
 		TokenHash: expired, ExpiresAt: time.Now().Add(-time.Second)}, testChangeLimits); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ConfirmEmailChange(context.Background(), expired); !errors.Is(err, store.ErrNotFound) {
+	if _, err := confirm(db, id, expired); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("an expired link: %v", err)
 	}
 }
@@ -372,5 +385,52 @@ func deleteUser(t *testing.T, fx Fixture) {
 	fx.Reference(t, referenced)
 	if err := db.DeleteUser(ctx, referenced); !errors.Is(err, store.ErrUserReferenced) {
 		t.Fatalf("deleting an account an app table references: %v", err)
+	}
+}
+
+func pendingChangeEnds(t *testing.T, db store.Store) {
+	ctx := context.Background()
+	for name, end := range map[string]func(int64) error{
+		"password": func(id int64) error { return db.ChangePassword(ctx, id, "other-hash") },
+		"sessions": func(id int64) error { return db.RevokeUserRefreshTokens(ctx, id) },
+		"roles": func(id int64) error {
+			_, err := db.ApplyRoleChange(ctx, store.RoleChange{UserID: id, Role: "editor", Allowed: []string{"editor"}, Actor: "test"})
+			return err
+		},
+	} {
+		id, _ := provenUser(t, db, "pending-"+name)
+		digest, _ := requestChange(t, db, id, uniqueEmail("pending-"+name))
+		if err := end(id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := confirm(db, id, digest); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("a change survived ending the %s: %v", name, err)
+		}
+	}
+}
+
+func confirmNeedsTheRequester(t *testing.T, db store.Store) {
+	id, _ := provenUser(t, db, "confirm-owner")
+	other, _ := provenUser(t, db, "confirm-other")
+	digest, _ := requestChange(t, db, id, uniqueEmail("confirm-target"))
+	if _, err := confirm(db, other, digest); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("another account confirmed the change: %v", err)
+	}
+	if _, err := confirm(db, id, digest); err != nil {
+		t.Fatalf("the requester could not confirm after a refused try: %v", err)
+	}
+}
+
+func referencedSquatter(t *testing.T, fx Fixture) {
+	if fx.Reference == nil {
+		return
+	}
+	db := fx.Store
+	id, _ := provenUser(t, db, "change-referenced")
+	squatter, address := newUser(t, db, "change-referenced-squatter")
+	fx.Reference(t, squatter)
+	digest, _ := requestChange(t, db, id, address)
+	if _, err := confirm(db, id, digest); !errors.Is(err, store.ErrUserReferenced) {
+		t.Fatalf("replacing a referenced account: %v", err)
 	}
 }

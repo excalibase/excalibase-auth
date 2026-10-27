@@ -28,6 +28,9 @@ const (
 	codeMetadataTooLarge = "metadata_too_large"
 	codeInvalidFullName  = "invalid_full_name"
 	codeSameEmail        = "email_unchanged"
+	// A password change ends every pending address change, so the two are
+	// never asked for at once.
+	codeOneSensitiveChange = "password_and_email_separately"
 )
 
 // updateUserRequest is PATCH /user. App metadata is not a field: only the
@@ -65,6 +68,15 @@ func (h *AuthHandler) userAPISettings(w http.ResponseWriter, r *http.Request) (p
 	return info, true
 }
 
+// requireUserAPI answers before anything else is read while the routes are off.
+func (h *AuthHandler) requireUserAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := h.userAPISettings(w, r); ok {
+			next.ServeHTTP(w, r)
+		}
+	})
+}
+
 func accountUser(profile store.Profile) domain.AccountUser {
 	return domain.AccountUser{ID: profile.ID, Email: profile.Email, FullName: profile.FullName,
 		EmailVerified: profile.EmailVerified, HasPassword: store.HasUsablePassword(profile.PasswordHash),
@@ -73,9 +85,6 @@ func accountUser(profile store.Profile) domain.AccountUser {
 
 // GetUser answers the caller's own account with its metadata.
 func (h *AuthHandler) GetUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.userAPISettings(w, r); !ok {
-		return
-	}
 	db, ok := h.storeFor(w, r)
 	if !ok {
 		return
@@ -178,6 +187,9 @@ func (u *userUpdate) validate() (string, error) {
 		if err := validatePassword(*req.Password); err != nil {
 			return err.Error(), err
 		}
+	}
+	if req.Email != nil && req.Password != nil {
+		return codeOneSensitiveChange, errors.New(codeOneSensitiveChange)
 	}
 	if req.Email != nil {
 		u.email = strings.TrimSpace(*req.Email)

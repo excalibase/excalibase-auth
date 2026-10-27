@@ -119,6 +119,8 @@ func userMetadataMerges(t *testing.T, fx *otpFixture) {
 		{map[string]any{"data": map[string]any{"blob": strings.Repeat("x", store.MaxMetadataBytes)}}, "metadata_too_large"},
 		{map[string]any{"fullName": "  "}, "invalid_full_name"},
 		{map[string]any{"password": "short"}, ""},
+		{map[string]any{"password": "brand-new-password", "email": mailbox("both")}, codeOneSensitiveChange},
+		{map[string]any{"data": map[string]any{"nul": "a\u0000b"}}, "invalid_metadata"},
 	} {
 		resp, body := fx.call(http.MethodPatch, userPath, bearer, refused.body)
 		if resp.StatusCode != http.StatusBadRequest || (refused.code != "" && body["error"] != refused.code) {
@@ -227,13 +229,21 @@ func emailChange(t *testing.T, fx *otpFixture) {
 	if notice == nil || notice.Data["newEmail"] != target {
 		t.Fatalf("no notice to the old address in %v", fx.sender.all())
 	}
-	if resp, body := fx.call(http.MethodPost, confirmEmailPath, "", map[string]string{"token_hash": tokenHash + "x"}); resp.StatusCode != http.StatusBadRequest {
+	bearer := accessTokenOf(session)
+	if resp, body := fx.call(http.MethodPost, confirmEmailPath, bearer, map[string]string{"token_hash": tokenHash + "x"}); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("a wrong link: %d %v", resp.StatusCode, body)
 	}
-	if resp, body := fx.call(http.MethodPost, confirmEmailPath, "", map[string]string{"token_hash": tokenHash}); resp.StatusCode != http.StatusOK {
+	if resp, body := fx.call(http.MethodPost, confirmEmailPath, "", map[string]string{"token_hash": tokenHash}); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("a link spent with no session: %d %v", resp.StatusCode, body)
+	}
+	victim := fx.signIn(t, "github", person("user-change-clicker"))
+	if resp, body := fx.call(http.MethodPost, confirmEmailPath, accessTokenOf(victim), map[string]string{"token_hash": tokenHash}); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a link spent by another account's session: %d %v", resp.StatusCode, body)
+	}
+	if resp, body := fx.call(http.MethodPost, confirmEmailPath, bearer, map[string]string{"token_hash": tokenHash}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("confirm: %d %v", resp.StatusCode, body)
 	}
-	if resp, body := fx.call(http.MethodPost, confirmEmailPath, "", map[string]string{"token_hash": tokenHash}); resp.StatusCode != http.StatusBadRequest || body["error"] != errTokenNotRedeemable.Error() {
+	if resp, body := fx.call(http.MethodPost, confirmEmailPath, bearer, map[string]string{"token_hash": tokenHash}); resp.StatusCode != http.StatusBadRequest || body["error"] != errTokenNotRedeemable.Error() {
 		t.Fatalf("a link spent twice: %d %v", resp.StatusCode, body)
 	}
 	resp, refreshed := fx.refreshWith(refreshTokenOf(session))
@@ -251,11 +261,16 @@ func emailChangeTakenSilently(t *testing.T, fx *otpFixture) {
 	session := fx.signIn(t, "google", person("user-change-prober"))
 	fx.sender.reset()
 	taken, takenBody := fx.call(http.MethodPatch, userPath, accessTokenOf(session), map[string]any{"email": holder.Email})
-	if len(fx.sender.all()) != 0 {
-		t.Fatalf("a taken address was mailed: %v", fx.sender.all())
+	takenMail := fx.sender.all()
+	if len(takenMail) != 1 || takenMail[0].Template != email.TemplateEmailChangeNotice {
+		t.Fatalf("a taken address: want only the notice to the own address, got %v", takenMail)
 	}
 	time.Sleep(testChangeInterval)
+	fx.sender.reset()
 	free, freeBody := fx.call(http.MethodPatch, userPath, accessTokenOf(session), map[string]any{"email": mailbox("user-change-free")})
+	if len(fx.sender.all()) != 2 {
+		t.Fatalf("a free address: want the link and the notice, got %v", fx.sender.all())
+	}
 	if taken.StatusCode != free.StatusCode || takenBody["emailChangeRequested"] != freeBody["emailChangeRequested"] {
 		t.Fatalf("taken %d %v, free %d %v", taken.StatusCode, takenBody, free.StatusCode, freeBody)
 	}

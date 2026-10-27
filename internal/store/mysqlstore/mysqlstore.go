@@ -224,8 +224,11 @@ func (s *Store) MarkVerified(ctx context.Context, userID int64, keepPassword boo
 			keepPassword, replacement, userID); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx,
-			"UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ? AND revoked = FALSE", userID)
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ? AND revoked = FALSE", userID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, endChangesQuery, userID)
 		return err
 	})
 	return address, err
@@ -303,6 +306,7 @@ func (s *Store) ApplyRoleChange(ctx context.Context, change store.RoleChange) (d
 				[]any{change.Role, stored, change.UserID}},
 			{"UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = ? AND revoked = FALSE",
 				[]any{change.UserID}},
+			{endChangesQuery, []any{change.UserID}},
 			{`INSERT INTO role_changes (user_id, old_role, new_role, old_allowed_roles, new_allowed_roles, actor)
 			  VALUES (?, ?, ?, ?, ?, ?)`,
 				[]any{change.UserID, before.Role, change.Role, oldAllowed, newAllowed, change.Actor}},
@@ -442,6 +446,7 @@ func endSessionsAndLinks(ctx context.Context, tx *sql.Tx, userID int64) error {
 		"DELETE FROM flow_states WHERE link_user_id = ?",
 		"DELETE FROM auth_codes WHERE user_id = ? AND link_provider IS NOT NULL",
 		"UPDATE email_otps SET consumed_at = NOW(6) WHERE link_user_id = ? AND consumed_at IS NULL",
+		endChangesQuery,
 	} {
 		if _, err := tx.ExecContext(ctx, statement, userID); err != nil {
 			return err

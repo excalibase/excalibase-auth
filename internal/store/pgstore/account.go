@@ -113,14 +113,20 @@ func (s *Store) RevokeOtherSessions(ctx context.Context, userID int64, keep uuid
 	return err
 }
 
+// referenced reads an app table's reference to a deleted account as ErrUserReferenced.
+func referenced(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation {
+		return store.ErrUserReferenced
+	}
+	return err
+}
+
 func (s *Store) DeleteUser(ctx context.Context, userID int64) error {
 	tag, err := s.pool.Exec(ctx, "DELETE FROM auth.users WHERE id = $1", userID)
-	var pgErr *pgconn.PgError
 	switch {
-	case errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation:
-		return store.ErrUserReferenced
 	case err != nil:
-		return err
+		return referenced(err)
 	case tag.RowsAffected() == 0:
 		return store.ErrNotFound
 	}

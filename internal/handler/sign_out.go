@@ -33,7 +33,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		h.logoutLocal(w, r, req.RefreshToken)
 	case scopeOthers, scopeGlobal:
 		scoped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.logoutScoped(w, r, scope, req.RefreshToken) })
-		middleware.RequireJWT(h.jwtService)(requireEndUser(scoped)).ServeHTTP(w, r)
+		h.requireUserAPI(middleware.RequireJWT(h.jwtService)(requireEndUser(scoped))).ServeHTTP(w, r)
 	default:
 		httpError(w, codeInvalidScope, http.StatusBadRequest)
 	}
@@ -52,9 +52,6 @@ func (h *AuthHandler) logoutLocal(w http.ResponseWriter, r *http.Request, refres
 }
 
 func (h *AuthHandler) logoutScoped(w http.ResponseWriter, r *http.Request, scope, refreshToken string) {
-	if _, ok := h.userAPISettings(w, r); !ok {
-		return
-	}
 	db, ok := h.storeFor(w, r)
 	if !ok {
 		return

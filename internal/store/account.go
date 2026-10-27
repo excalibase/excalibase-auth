@@ -42,6 +42,13 @@ type EmailChangeLimits struct {
 	PerProjectDay int // mailed requests only
 }
 
+// EmailChangeMail says which mails a recorded change may send: the notice to
+// the current address, and the link only when the new address is free.
+type EmailChangeMail struct {
+	Notice bool
+	Link   bool
+}
+
 // ChangedEmail is an address change that was confirmed.
 type ChangedEmail struct {
 	UserID   int64

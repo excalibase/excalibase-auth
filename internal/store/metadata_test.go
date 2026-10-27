@@ -54,7 +54,7 @@ func TestMergeMetadataRefusesAResultPastTheLimit(t *testing.T) {
 
 func TestParseMetadataPatchRefusesAnythingButAShallowEnoughObject(t *testing.T) {
 	deep := strings.Repeat(`{"a":`, MaxMetadataDepth+1) + "1" + strings.Repeat("}", MaxMetadataDepth+1)
-	for _, raw := range []string{`[1]`, `"x"`, `null`, `1`, `{"a":1`, `{"a":1} {}`, deep} {
+	for _, raw := range []string{`{"a":"\u0000"}`, `[1]`, `"x"`, `null`, `1`, `{"a":1`, `{"a":1} {}`, deep} {
 		if _, err := ParseMetadataPatch([]byte(raw)); !errors.Is(err, ErrInvalidMetadata) {
 			t.Errorf("%.40s: err = %v, want ErrInvalidMetadata", raw, err)
 		}

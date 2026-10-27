@@ -23,7 +23,8 @@ var ErrMetadataTooLarge = errors.New("metadata is too large")
 // ParseMetadataPatch reads a patch: a JSON object whose top-level keys replace
 // the stored ones, a null value removing its key.
 func ParseMetadataPatch(raw []byte) (map[string]json.RawMessage, error) {
-	if !withinDepth(raw) {
+	// Postgres jsonb refuses the NUL character, so both engines refuse it here.
+	if !withinDepth(raw) || bytes.Contains(raw, []byte(`\u0000`)) {
 		return nil, ErrInvalidMetadata
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))

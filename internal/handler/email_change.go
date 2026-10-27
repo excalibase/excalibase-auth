@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/excalibase/auth/internal/email"
+	"github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/oauth"
 	"github.com/excalibase/auth/internal/pool"
 	"github.com/excalibase/auth/internal/store"
@@ -24,8 +25,9 @@ const (
 )
 
 // defaultEmailChangeLimits pace an account's changes to one a minute and five
-// a day, and bound a project's mailed changes a day like its sign-in mail.
-var defaultEmailChangeLimits = store.EmailChangeLimits{MinInterval: time.Minute, PerAccountDay: 5, PerProjectDay: 500}
+// a day; a project's 200 a day (two mails each) stay inside the relay's own
+// account-mail budget.
+var defaultEmailChangeLimits = store.EmailChangeLimits{MinInterval: time.Minute, PerAccountDay: 5, PerProjectDay: 200}
 
 // emailChangeTarget is the allowed page the link lands on, the site URL by default.
 func emailChangeTarget(w http.ResponseWriter, requested string, info pool.ProjectInfo) (string, bool) {
@@ -50,7 +52,7 @@ func (h *AuthHandler) requestEmailChange(w http.ResponseWriter, r *http.Request,
 		httpError(w, "internal error", http.StatusInternalServerError)
 		return false
 	}
-	mailed, err := db.SaveEmailChange(r.Context(), store.EmailChange{UserID: account.ID, NewEmail: newEmail,
+	mail, err := db.SaveEmailChange(r.Context(), store.EmailChange{UserID: account.ID, NewEmail: newEmail,
 		TokenHash: digest, ExpiresAt: time.Now().Add(emailChangeTTL)}, h.emailChangeLimits)
 	if errors.Is(err, store.ErrRateLimited) {
 		w.Header().Set("Retry-After", strconv.Itoa(int(h.emailChangeLimits.MinInterval.Seconds())+1))
@@ -63,17 +65,24 @@ func (h *AuthHandler) requestEmailChange(w http.ResponseWriter, r *http.Request,
 	}
 	projectID := projectKey(r)
 	h.recordAudit(r.Context(), db, projectID, store.AuditEvent{UserID: account.ID, Event: "email_change_requested", IP: h.clientIP(r)})
-	if mailed {
-		link := oauth.WithParam(oauth.WithParam(redirectTo, "token_hash", plaintext), "type", emailChangeType)
+	link := ""
+	if mail.Link {
+		link = oauth.WithParam(oauth.WithParam(redirectTo, "token_hash", plaintext), "type", emailChangeType)
+	}
+	if mail.Notice {
 		h.dispatchMail(func() { h.mailEmailChange(projectID, account.Email, newEmail, link) })
 	}
 	return true
 }
 
+// mailEmailChange always tells the current address; the new one gets its link
+// only when it is free.
 func (h *AuthHandler) mailEmailChange(projectID, oldEmail, newEmail, link string) {
-	expires := strconv.Itoa(int(emailChangeTTL.Minutes()))
-	h.sendOTPMail(projectID, email.Message{ProjectID: projectID, To: newEmail, Template: email.TemplateEmailChange,
-		Data: map[string]string{"userEmail": newEmail, "linkUrl": link, "expiresMin": expires}})
+	if link != "" {
+		expires := strconv.Itoa(int(emailChangeTTL.Minutes()))
+		h.sendOTPMail(projectID, email.Message{ProjectID: projectID, To: newEmail, Template: email.TemplateEmailChange,
+			Data: map[string]string{"userEmail": newEmail, "linkUrl": link, "expiresMin": expires}})
+	}
 	h.sendOTPMail(projectID, email.Message{ProjectID: projectID, To: oldEmail, Template: email.TemplateEmailChangeNotice,
 		Data: map[string]string{"userEmail": oldEmail, "newEmail": newEmail}})
 }
@@ -83,12 +92,9 @@ type confirmEmailChangeRequest struct {
 }
 
 // ConfirmEmailChange spends the link mailed to the new address and moves the
-// account to it. The link proves the inbox; the request it answers needed a
-// recent sign-in, so no session is asked for here and none is handed out.
+// account to it. Only the account that asked may spend it, so a link sent to
+// someone else's inbox cannot be clicked onto the asker's account.
 func (h *AuthHandler) ConfirmEmailChange(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.userAPISettings(w, r); !ok {
-		return
-	}
 	var req confirmEmailChangeRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxOTPBody)).Decode(&req); err != nil || req.TokenHash == "" {
 		httpError(w, codeInvalidRequest, http.StatusBadRequest)
@@ -98,13 +104,16 @@ func (h *AuthHandler) ConfirmEmailChange(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	changed, err := db.ConfirmEmailChange(r.Context(), token.Hash(req.TokenHash))
+	changed, err := db.ConfirmEmailChange(r.Context(), middleware.ClaimsFromContext(r.Context()).UserID, token.Hash(req.TokenHash))
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		httpError(w, errTokenNotRedeemable.Error(), http.StatusBadRequest)
 		return
 	case errors.Is(err, store.ErrIdentityExists):
 		httpError(w, codeEmailExists, http.StatusConflict)
+		return
+	case errors.Is(err, store.ErrUserReferenced):
+		httpError(w, codeUserReferenced, http.StatusConflict)
 		return
 	case err != nil:
 		status, failure := linkFailure(err)

@@ -120,6 +120,9 @@ func (s *Store) MarkVerified(ctx context.Context, userID int64, keepPassword boo
 		"UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false", userID); err != nil {
 		return "", err
 	}
+	if _, err := tx.Exec(ctx, endChangesQuery, userID); err != nil {
+		return "", err
+	}
 	return address, tx.Commit(ctx)
 }
 
@@ -172,6 +175,7 @@ func (s *Store) ApplyRoleChange(ctx context.Context, change store.RoleChange) (d
 			[]any{change.UserID, change.Role, change.Stored}},
 		{`UPDATE auth.refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false`,
 			[]any{change.UserID}},
+		{endChangesQuery, []any{change.UserID}},
 		{`INSERT INTO auth.role_changes (user_id, old_role, new_role, old_allowed_roles, new_allowed_roles, actor)
 		  VALUES ($1, $2, $3, $4, $5, $6)`,
 			[]any{change.UserID, before.Role, change.Role, before.AllowedRoles, change.Allowed, change.Actor}},
@@ -289,6 +293,7 @@ func endSessionsAndLinks(ctx context.Context, tx pgx.Tx, userID int64) error {
 		"DELETE FROM auth.flow_states WHERE link_user_id = $1",
 		"DELETE FROM auth.auth_codes WHERE user_id = $1 AND link_provider IS NOT NULL",
 		"UPDATE auth.email_otps SET consumed_at = NOW() WHERE link_user_id = $1 AND consumed_at IS NULL",
+		endChangesQuery,
 	} {
 		if _, err := tx.Exec(ctx, statement, userID); err != nil {
 			return err

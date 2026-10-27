@@ -39,12 +39,12 @@ func managedUserDetail(profile store.Profile) domain.ManagedUserDetail {
 
 // managedTarget reads the account id and the settings, answering for either.
 func (h *AuthHandler) managedTarget(w http.ResponseWriter, r *http.Request) (int64, store.Store, bool) {
+	if _, ok := h.userAPISettings(w, r); !ok {
+		return 0, nil, false
+	}
 	userID, err := strconv.ParseInt(chi.URLParam(r, "userId"), 10, 64)
 	if err != nil || userID <= 0 {
 		httpError(w, "invalid_user_id", http.StatusBadRequest)
-		return 0, nil, false
-	}
-	if _, ok := h.userAPISettings(w, r); !ok {
 		return 0, nil, false
 	}
 	db, ok := h.storeFor(w, r)

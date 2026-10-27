@@ -197,10 +197,13 @@ func (h *AuthHandler) Routes(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireJWT(h.jwtService))
 			r.Route("/user/identities", h.IdentityRoutes)
-			r.With(requireEndUser).Get("/user", h.GetUser)
-			r.With(requireEndUser, h.limit(rateLimitToken)).Patch("/user", h.UpdateUser)
 		})
-		r.With(h.limit(rateLimitToken)).Post("/user/email/confirm", h.ConfirmEmailChange)
+		r.Group(func(r chi.Router) {
+			r.Use(h.requireUserAPI, middleware.RequireJWT(h.jwtService), requireEndUser)
+			r.Get("/user", h.GetUser)
+			r.With(h.limit(rateLimitToken)).Patch("/user", h.UpdateUser)
+			r.With(h.limit(rateLimitToken)).Post("/user/email/confirm", h.ConfirmEmailChange)
+		})
 
 		// API key management — protected by JWT. Mounting RequireJWT here at
 		// the route registration site (instead of inside apikey.go) makes the
