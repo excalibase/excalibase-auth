@@ -216,7 +216,7 @@ curl -X PUT http://localhost:24000/auth/my-org/my-project/users/1/role \
 
 ### Prerequisites
 
-- Go 1.26.9+
+- Go 1.26.10+
 - Docker (for tests and local development)
 
 ### Option 1: Docker Compose (Recommended)
