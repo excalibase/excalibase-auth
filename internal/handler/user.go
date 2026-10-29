@@ -335,7 +335,8 @@ func (h *AuthHandler) changePassword(r *http.Request, db store.Store, account st
 	user := userInfoOf(account)
 	resp, err := h.startSession(r, projectID, user, accountRoles{role: account.Role, allowed: account.AllowedRoles}, account.EmailVerified, session)
 	if err != nil {
-		return nil, statusError{http.StatusInternalServerError, errTokenGeneration}
+		status, failure := sessionFailure(err)
+		return nil, statusError{status, failure}
 	}
 	return resp, nil
 }

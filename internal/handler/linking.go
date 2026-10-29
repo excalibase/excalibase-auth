@@ -411,7 +411,8 @@ func (h *AuthHandler) accountSession(r *http.Request, db store.Store, projectID 
 	}
 	resp, err := h.startSession(r, projectID, user, roles, account.EmailVerified, session)
 	if err != nil {
-		return nil, http.StatusInternalServerError, errTokenGeneration
+		status, failure := sessionFailure(err)
+		return nil, status, failure
 	}
 	return resp, http.StatusOK, nil
 }

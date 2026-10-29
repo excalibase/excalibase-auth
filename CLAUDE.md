@@ -44,6 +44,7 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 - `internal/emailotp` — eight-digit sign-in codes and the HMAC they are stored as (`handler/email_otp.go` serves `/otp` and `/verify`).
 - `handler/linking.go` — a signed-in user links/unlinks Google, GitHub or another address (`/user/identities`); needs `auth_time` within 5 minutes, writes the link only when the app's PKCE verifier spends the code.
 - `handler/user.go`, `email_change.go`, `sign_out.go`, `user_admin_detail.go` — the signed-in account (`/user`, address change, sign-out scopes) and admin read/merge/delete of accounts, behind `/info`'s `userApiEnabled`; `link_notice.go` mails the account when a way in is added.
+- `internal/hooks` + `handler/auth_hooks.go` — the project's auth hooks (`authhooks`): Standard Webhooks signing, the public-address dialer (`internal/publicaddr`, a copy of the control plane's), 2 s / 64 KB limits, the claim rules for `custom_access_token`; every failure is `503 auth_hook_failed`.
 - `handler/guest.go` — guest accounts (`/guest`, `authguest`): no address, role `guest`, tenant-DB budgets, optional Turnstile, the daily sweep of idle guests; upgrades go through `linking.go` and `email_change.go`.
 - `internal/domain` — Domain types and DTOs.
 - `internal/config` — Env-based config.
@@ -72,6 +73,8 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 | `REQUEST_METRICS_ENABLED` | `false` (only `true` turns it on) | No. Per-project request counts and latency on an internal listener for Studio's request charts (EXC-656) |
 | `REQUEST_METRICS_PORT` / `REQUEST_METRICS_MAX_PROJECTS` | `9465` / `1000` | No |
 | `GUEST_INACTIVE_DAYS` | `30` (1 to 3650) | No. Idle guest accounts are deleted after this many days |
+| `AUTH_HOOKS_DENY_CIDRS` | — | No. Extra ranges auth hooks may never reach |
+| `AUTH_HOOKS_CA_FILE` | — | No. Extra PEM roots for verifying hook servers |
 
 ## Testing Strategy
 

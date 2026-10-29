@@ -194,6 +194,15 @@ Metadata never goes into the access token: the engine turns every claim into a p
 - A guest becomes a full account, keeping its id, by proving an address (`PATCH /user {email}` then `/user/email/confirm`, flag `authuser`) or by linking Google, GitHub or an address (`/user/identities/*`). It takes the address, proven, and the role `guest` becomes `user`; a role the project gave it stays. An address another proven account holds is refused (`409`). A guest has nothing to sign in again with, so for these routes a token issued in the last 5 minutes stands for a recent sign-in: the app refreshes first. A guest's address changes are also capped at 5 a day per client and half the project's 200 a day, so free guests cannot spend the mail full accounts need; an address another account linked is refused to a guest's provider link (`409`); a password before an address is `400 email_required`.
 - Guests that neither signed in nor refreshed for `GUEST_INACTIVE_DAYS` (30) are deleted once a day, per project, only while the flag is on; one an app table references is kept.
 
+### Auth hooks
+
+While the control plane's `authhooks` flag is on and the project switched a hook on, `/info` carries `authHooks` with the hook's HTTPS URL, and auth calls it with a POST signed in the [Standard Webhooks](https://www.standardwebhooks.com/) format (`webhook-id`, `webhook-timestamp`, `webhook-signature: v1,<base64 HMAC-SHA256 of id.timestamp.body>`) with the project's secret from the vault (`projects/{id}/auth/hooks`). A hook endpoint should refuse a timestamp more than 5 minutes off and an id it has seen.
+
+- `custom_access_token` `{type, projectId, userId, claims}` → `{claims}`, on every end-user access token (refresh included, before the refresh token rotates; never for api keys). New claims may be added: lower-case names (`^[a-z][a-z0-9_]{0,62}$`, not a claim auth sets), strings up to 1 KB, numbers, booleans or flat lists of up to 32 of those, at most 32 claims and 4 KB. `role` may change to one of the account's `allowed_roles`, never `service`/`anon`. Every other claim auth set must come back unchanged or not at all.
+- `before_user_created` `{type, projectId, method, provider?, user:{email, isGuest}}` → `{decision: "allow"|"deny"}`. `/register` asks on every attempt, before looking the address up, so a deny reads the same for a taken address; provider, email-code/link and guest sign-in ask only when they would make an account. A deny is `403 signup_denied` (a provider callback lands with `error=signup_denied`).
+- `send_email` `{type, projectId, email:{to, template, data}}` → any 2xx: the project's mail goes there instead of the relay, with no fallback. A failure is logged and the caller's answer stays the same.
+- Calls go only to public addresses (checked on every connect, so a name that re-resolves inside the platform is refused) outside `AUTH_HOOKS_DENY_CIDRS`, over TLS 1.2+ verified against the system roots plus `AUTH_HOOKS_CA_FILE`, with no proxy and no redirects; 2 s for the whole call, 64 KB of answer. Anything else, a bad answer, a missing secret, or `/info` unreadable while the last copy had hooks fails closed: `503 auth_hook_failed`, an `audit_log` row `hook_failed`, and a log line naming the project, the hook and the reason, never the URL, payload or answer.
+
 ### End-user roles
 
 Two callers may use `/users`, both for the project in the path only (`/users/{userId}` also needs `authuser`):
@@ -293,6 +302,8 @@ All configuration is via environment variables:
 | `REQUEST_METRICS_ENABLED` | `false` | `true` serves each project's request count, outcome and latency histogram on an internal listener for Studio's request charts. Off: no listener, nothing recorded |
 | `REQUEST_METRICS_PORT` | `9465` | That listener's port. It answers only `GET /metrics`; the chart admits only provisioning to it |
 | `REQUEST_METRICS_MAX_PROJECTS` | `1000` | Projects recorded per process; only projects whose vault record resolved are counted |
+| `AUTH_HOOKS_DENY_CIDRS` | — | Comma-separated ranges auth hooks may never reach, on top of every internal range (the platform's own public addresses) |
+| `AUTH_HOOKS_CA_FILE` | — | PEM bundle of extra roots hook servers may be verified against |
 | `GUEST_INACTIVE_DAYS` | `30` | Days a guest account may go without signing in or refreshing before the daily sweep deletes it (1 to 3650) |
 | `TENANT_DB_SSLMODE` | `verify-full` | `disable` (docker AIO only: password login, no TLS) or a TLS mode. `require`, `verify-ca` and `verify-full` all mean verify-full with the client certificate from the vault record (`sslcert`/`sslkey`/`sslrootcert`); a record without them is refused. `prefer`/`allow` and anything else fail startup |
 
