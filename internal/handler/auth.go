@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -548,13 +549,24 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 		return nil, 500, errRefreshTokenStore
 	}
 
-	var claims auth.Claims
-	// A refusal returns before the store commits, so the token survives it;
-	// the claims, hook included, are built here for that reason.
+	// With a custom_access_token hook the claims are built before the rotation,
+	// so no hook call holds the token's row lock and a pool connection.
+	preview, err := h.refreshPreview(r, db, projectID, hash)
+	if err != nil {
+		return nil, refreshStatus(err), err
+	}
+	claims := preview.claims
+	// A refusal returns before the store commits, so the token survives it.
 	account, session, err := db.RotateRefreshToken(ctx, hash, successorHash, func(account store.Account) error {
 		roles, err := h.refreshAllowed(ctx, projectID, account)
 		if err != nil {
 			return err
+		}
+		if preview.built {
+			if !sameAccount(preview.account, account) {
+				return refreshRefusal{status: http.StatusConflict, err: errAccountChanged}
+			}
+			return nil
 		}
 		claims, err = h.accessClaims(r, projectID, userInfoOf(account), roles, account.EmailVerified)
 		if err != nil {
@@ -583,6 +595,63 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 		return nil, 500, errTokenGeneration
 	}
 	return resp, 200, nil
+}
+
+var errAccountChanged = errors.New("account changed during refresh; retry")
+
+// refreshPreviewed is the claims built ahead of a rotation and the account they were built for.
+type refreshPreviewed struct {
+	built   bool
+	claims  auth.Claims
+	account store.Account
+}
+
+// refreshPreview builds the claims ahead of the rotation only while the
+// project has a custom_access_token hook; an unknown token is left to the rotation.
+func (h *AuthHandler) refreshPreview(r *http.Request, db store.Store, projectID, hash string) (refreshPreviewed, error) {
+	ctx := r.Context()
+	settings, err := h.hookSettings(ctx, projectID)
+	if err != nil {
+		return refreshPreviewed{}, h.hookFailure(ctx, projectID, hookCustomAccessToken, 0, "the hook settings are unreadable")
+	}
+	if settings.CustomAccessToken == "" {
+		return refreshPreviewed{}, nil
+	}
+	state, err := db.RefreshTokenState(ctx, hash)
+	if err != nil || state.Revoked {
+		return refreshPreviewed{}, nil
+	}
+	account, err := db.AccountByID(ctx, state.UserID)
+	if err != nil {
+		return refreshPreviewed{}, nil
+	}
+	roles, err := h.refreshAllowed(ctx, projectID, account)
+	if err != nil {
+		return refreshPreviewed{}, err
+	}
+	claims, err := h.accessClaims(r, projectID, userInfoOf(account), roles, account.EmailVerified)
+	if err != nil {
+		_, refusal := sessionFailure(err)
+		return refreshPreviewed{}, refusal
+	}
+	return refreshPreviewed{built: true, claims: claims, account: account}, nil
+}
+
+// refreshStatus is the status of a refusal met before the rotation.
+func refreshStatus(err error) int {
+	var refusal refreshRefusal
+	if errors.As(err, &refusal) {
+		return refusal.status
+	}
+	status, _ := sessionFailure(err)
+	return status
+}
+
+// sameAccount is whether nothing the token carries changed since the claims were built.
+func sameAccount(built, locked store.Account) bool {
+	return built.ID == locked.ID && built.Role == locked.Role && slices.Equal(built.AllowedRoles, locked.AllowedRoles) &&
+		built.Email == locked.Email && built.EmailVerified == locked.EmailVerified && built.IsGuest == locked.IsGuest &&
+		built.Enabled == locked.Enabled
 }
 
 // refreshAllowed is whether the account may go on with its session, and its roles.

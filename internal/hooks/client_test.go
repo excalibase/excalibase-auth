@@ -157,7 +157,7 @@ func TestNewClient_RefusesTheExtraDeniedRanges(t *testing.T) {
 }
 
 func TestValidateTarget(t *testing.T) {
-	good := []string{"https://hooks.example.com/auth", "https://hooks.example.com:8443/a?b=c", "https://203.0.113.10/hook"}
+	good := []string{"https://hooks.example.com/auth", "https://hooks.example.com:443/a?b=c", "https://203.0.113.10/hook"}
 	for _, raw := range good {
 		if err := ValidateTarget(raw); err != nil {
 			t.Errorf("ValidateTarget(%q) = %v", raw, err)
@@ -167,7 +167,7 @@ func TestValidateTarget(t *testing.T) {
 		"", "http://hooks.example.com/", "ftp://hooks.example.com/", "https://", "https:///path",
 		"https://user:pass@hooks.example.com/", "https://hooks.example.com/#frag",
 		"https://localhost/", "https://db.internal/", "https://10.0.0.5/", "https://169.254.169.254/latest",
-		"https://[::1]/", "https://[fd00:ec2::254]/", "https://nohost/",
+		"https://[::1]/", "https://[fd00:ec2::254]/", "https://nohost/", "https://hooks.example.com:8443/", "https://hooks.example.com:6443/", "https://127.1/", "https://0x7f000001/", "https://hooks.example.com%00.evil.com/",
 		"https://hooks.example.com/" + strings.Repeat("a", 2048),
 	}
 	for _, raw := range bad {

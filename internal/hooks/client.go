@@ -105,17 +105,20 @@ func (c *Client) Call(ctx context.Context, target, secret string, payload, out a
 	if err != nil {
 		return failed("the request could not be encoded")
 	}
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
 	req, err := c.signedRequest(ctx, target, secret, body)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	resp, err := c.http.Do(req.WithContext(ctx))
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return failed("the hook did not answer in time or could not be reached")
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, MaxAnswerBytes))
+		resp.Body.Close()
+	}()
 	return readAnswer(resp, out)
 }
 
@@ -166,6 +169,9 @@ func ValidateTarget(raw string) error {
 	if err != nil {
 		return err
 	}
+	if err := validatePort(parsed); err != nil {
+		return err
+	}
 	host := parsed.Hostname()
 	if err := publicaddr.ValidateHostSyntax(host); err != nil {
 		return err
@@ -173,7 +179,21 @@ func ValidateTarget(raw string) error {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		return publicaddr.ClassifyAddr(addr)
 	}
+	if numericTopLabel(host) {
+		return publicaddr.ErrInvalidHost
+	}
 	return nil
+}
+
+// numericTopLabel catches short and hex IPv4 forms such as 127.1 or 0x7f.1,
+// which some resolvers read as addresses; no real top-level domain is numeric.
+func numericTopLabel(host string) bool {
+	labels := strings.Split(strings.TrimSuffix(host, "."), ".")
+	top := strings.ToLower(labels[len(labels)-1])
+	if strings.HasPrefix(top, "0x") {
+		return true
+	}
+	return strings.Trim(top, "0123456789") == ""
 }
 
 func parseTarget(raw string) (*neturl.URL, error) {
@@ -185,4 +205,13 @@ func parseTarget(raw string) (*neturl.URL, error) {
 		return nil, publicaddr.ErrInvalidHost
 	}
 	return parsed, nil
+}
+
+// validatePort takes only the https port, so a hook cannot probe other
+// services on a public address.
+func validatePort(parsed *neturl.URL) error {
+	if port := parsed.Port(); port != "" && port != "443" {
+		return publicaddr.ErrInvalidHost
+	}
+	return nil
 }

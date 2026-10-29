@@ -10,6 +10,7 @@ import (
 
 	"github.com/excalibase/auth/internal/hooks"
 	"github.com/excalibase/auth/internal/pool"
+	"github.com/excalibase/auth/internal/store"
 	"github.com/excalibase/auth/internal/token"
 )
 
@@ -49,5 +50,31 @@ func TestCallHook_WithoutAClientFailsClosed(t *testing.T) {
 	err := h.callHook(context.Background(), "p1", hookCustomAccessToken, "https://hooks.example.com", 0, struct{}{}, nil)
 	if !errors.Is(err, errHookFailed) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSameAccount_AnyChangeTheTokenCarriesCounts(t *testing.T) {
+	base := store.Account{ID: 1, Role: "user", AllowedRoles: []string{"user"}, Email: "a@example.com", EmailVerified: true, Enabled: true}
+	if !sameAccount(base, base) {
+		t.Fatal("an unchanged account differs")
+	}
+	changes := map[string]func(*store.Account){
+		"role":     func(a *store.Account) { a.Role = "editor" },
+		"allowed":  func(a *store.Account) { a.AllowedRoles = []string{"user", "editor"} },
+		"email":    func(a *store.Account) { a.Email = "b@example.com" },
+		"verified": func(a *store.Account) { a.EmailVerified = false },
+		"guest":    func(a *store.Account) { a.IsGuest = true },
+		"enabled":  func(a *store.Account) { a.Enabled = false },
+		"id":       func(a *store.Account) { a.ID = 2 },
+	}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			changed.AllowedRoles = append([]string(nil), base.AllowedRoles...)
+			change(&changed)
+			if sameAccount(base, changed) {
+				t.Fatal("the change went unseen")
+			}
+		})
 	}
 }
