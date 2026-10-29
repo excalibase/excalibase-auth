@@ -14,7 +14,7 @@ func TestRequestMetrics_OffUnlessExactlyTrue(t *testing.T) {
 func TestRequestMetrics_DefaultsToItsOwnPortAndCap(t *testing.T) {
 	t.Setenv("REQUEST_METRICS_ENABLED", "true")
 	got := Load().RequestMetrics
-	if !got.Enabled || got.Port != "9465" || got.MaxProjects != 1000 {
+	if !got.Enabled || got.Port != "9465" || got.MaxProjects != 1000 || got.Address != "" {
 		t.Errorf("defaults: %+v", got)
 	}
 }
@@ -33,5 +33,12 @@ func TestRequestMetrics_ANonPositiveCapFallsBackToTheDefault(t *testing.T) {
 	t.Setenv("REQUEST_METRICS_MAX_PROJECTS", "0")
 	if got := Load().RequestMetrics.MaxProjects; got != 1000 {
 		t.Errorf("cap: got %d", got)
+	}
+}
+
+func TestRequestMetrics_AddressFromTheEnvironment(t *testing.T) {
+	t.Setenv("REQUEST_METRICS_ADDRESS", " auth-metrics ")
+	if got := Load().RequestMetrics.Address; got != "auth-metrics" {
+		t.Errorf("address: %q", got)
 	}
 }

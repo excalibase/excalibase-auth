@@ -74,7 +74,7 @@ func main() {
 
 	if recorder := requestMetricsRecorder(cfg.RequestMetrics, poolMgr.Serves); recorder != nil {
 		authHandler.WithRequestMetrics(recorder)
-		go serveRequestMetrics(newRequestMetricsServer(cfg.RequestMetrics.Port, recorder))
+		go serveRequestMetrics(newRequestMetricsServer(cfg.RequestMetrics, recorder))
 	}
 
 	// Transactional mail goes out through provisioning, which owns the provider

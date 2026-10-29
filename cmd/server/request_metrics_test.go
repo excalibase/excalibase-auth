@@ -12,7 +12,7 @@ import (
 )
 
 func TestRequestMetricsServer_ListensOnItsOwnPortAndAnswersOnlyTheScrape(t *testing.T) {
-	server := newRequestMetricsServer("9465", requestmetrics.NewRecorder(func(string) bool { return true }, 10))
+	server := newRequestMetricsServer(config.RequestMetrics{Port: "9465"}, requestmetrics.NewRecorder(func(string) bool { return true }, 10))
 	if server.Addr != ":9465" {
 		t.Errorf("addr: %s", server.Addr)
 	}
@@ -44,5 +44,17 @@ func TestRequestMetrics_FlagOffRoutesAreUntimed(t *testing.T) {
 	promhttp.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if strings.Contains(response.Body.String(), "excalibase_requests_seconds") {
 		t.Error("no per-project series on the default registry")
+	}
+}
+
+// EXC-673: a single host binds the listener to the platform-only network's
+// address, so tenant containers that share another network cannot reach it.
+func TestRequestMetricsServer_BindsTheConfiguredAddress(t *testing.T) {
+	recorder := requestmetrics.NewRecorder(func(string) bool { return true }, 10)
+	for address, want := range map[string]string{"auth-metrics": "auth-metrics:9465", "10.0.0.5": "10.0.0.5:9465", "::1": "[::1]:9465"} {
+		server := newRequestMetricsServer(config.RequestMetrics{Address: address, Port: "9465"}, recorder)
+		if server.Addr != want {
+			t.Errorf("address %q: addr %s, want %s", address, server.Addr, want)
+		}
 	}
 }

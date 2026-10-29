@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -19,10 +20,11 @@ func requestMetricsRecorder(settings config.RequestMetrics, serves func(projectI
 }
 
 // newRequestMetricsServer is the internal listener provisioning scrapes; the
-// chart admits only provisioning to this port and the edge never routes it.
-func newRequestMetricsServer(port string, recorder *requestmetrics.Recorder) *http.Server {
+// chart admits only provisioning to this port and the edge never routes it; a
+// single host binds it to the platform-only network's address alone.
+func newRequestMetricsServer(settings config.RequestMetrics, recorder *requestmetrics.Recorder) *http.Server {
 	return &http.Server{
-		Addr:              ":" + port,
+		Addr:              net.JoinHostPort(settings.Address, settings.Port),
 		Handler:           recorder.ServerMux(),
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
