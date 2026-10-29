@@ -79,5 +79,5 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 
 ## Docker
 
-- `Dockerfile` — Multi-stage build (golang:1.24-alpine -> alpine:3.20). Migrations are embedded in the binary.
+- `Dockerfile` — Multi-stage build (golang:1.26.10-alpine -> distroless static). Migrations are embedded in the binary.
 - `devbox/docker/docker-compose.yml` — Runs auth service + PostgreSQL together.
