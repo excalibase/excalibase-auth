@@ -77,6 +77,8 @@ type oauthFixture struct {
 	// backdate ages an account, its last sign-in and its refresh tokens.
 	backdate func(t *testing.T, id int64, age time.Duration)
 	handler  *AuthHandler
+	// ageSends moves an address's emailed sends back in time, straight in the database.
+	ageSends func(t *testing.T, email string, by time.Duration)
 }
 
 func (s *signInSettings) info(authURL string) map[string]any {
@@ -220,6 +222,12 @@ func newPostgresOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFix
 		}
 		return n
 	}
+	fx.ageSends = func(t *testing.T, email string, by time.Duration) {
+		if _, err := direct.Exec(ctx, "UPDATE auth.email_otps SET created_at = created_at - make_interval(secs => $2) WHERE lower(email) = lower($1)",
+			email, by.Seconds()); err != nil {
+			t.Fatalf("age the sends to %s: %v", email, err)
+		}
+	}
 	return fx
 }
 
@@ -261,6 +269,12 @@ func newMySQLOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFixtur
 			t.Fatalf("count %s: %v", table, err)
 		}
 		return n
+	}
+	fx.ageSends = func(t *testing.T, email string, by time.Duration) {
+		if _, err := root.Exec("UPDATE `auth`.`email_otps` SET created_at = created_at - INTERVAL ? MICROSECOND WHERE LOWER(email) = LOWER(?)",
+			by.Microseconds(), email); err != nil {
+			t.Fatalf("age the sends to %s: %v", email, err)
+		}
 	}
 	return fx
 }

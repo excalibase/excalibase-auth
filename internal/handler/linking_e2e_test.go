@@ -286,13 +286,13 @@ func linkAddressByCode(t *testing.T, fx *otpFixture) {
 	if providers := providersOf(fx.identities(t, accessTokenOf(owner))); fmt.Sprint(providers) != "[github email]" {
 		t.Fatalf("identities = %v", providers)
 	}
-	otpWait(t, nil)
+	ageOTPSends(t, fx, address)
 	if again := fx.signInWithCode(t, address); userIDOf(again) != userIDOf(owner) {
 		t.Fatalf("the linked address signed in to %v, want %v", userIDOf(again), userIDOf(owner))
 	}
 	other := fx.signIn(t, "google", person("link-mail-other"))
 	verifier = newVerifier(t)
-	otpWait(t, nil)
+	ageOTPSends(t, fx, address)
 	fx.call(http.MethodPost, identitiesPath+"/email", accessTokenOf(other), map[string]string{
 		"email": address, "type": "email", "code_challenge": oauth.S256(verifier), "code_challenge_method": "S256"})
 	if resp, body := fx.verifyCode(address, fx.linkCode(t, address), verifier); resp.StatusCode != http.StatusConflict || body["error"] != "identity_already_exists" {
