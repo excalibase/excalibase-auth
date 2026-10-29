@@ -56,6 +56,11 @@ func (h *AuthHandler) requestEmailChange(w http.ResponseWriter, r *http.Request,
 	}
 	change := store.EmailChange{UserID: account.ID, NewEmail: newEmail, TokenHash: digest, ExpiresAt: time.Now().Add(emailChangeTTL)}
 	if account.IsGuest {
+		// A guest with an address is a new full account to the project's sign-up policy.
+		if err := h.allowNewUser(r.Context(), projectKey(r), newUser{Method: methodGuestUpgrade, Provider: store.EmailProvider, Email: newEmail}); err != nil {
+			writeSessionFailure(w, err)
+			return false
+		}
 		change.GuestClient = otpSenderKey(h.clientIP(r))
 	}
 	mail, err := db.SaveEmailChange(r.Context(), change, h.emailChangeLimits)

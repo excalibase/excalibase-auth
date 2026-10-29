@@ -70,11 +70,11 @@ func (hs *hookServer) serve(w http.ResponseWriter, r *http.Request) {
 	case "/forbidden-user":
 		claims["userId"] = 999999.0
 		writeJSON(w, map[string]any{"claims": claims})
-	case "/deny":
+	case "/deny", "/deny-addresses":
 		user, _ := body["user"].(map[string]any)
 		address, _ := user["email"].(string)
 		decision := "deny"
-		if strings.HasSuffix(address, "@allowed.test") {
+		if strings.HasSuffix(address, "@allowed.test") || (r.URL.Path == "/deny-addresses" && user["isGuest"] == true) {
 			decision = "allow"
 		}
 		writeJSON(w, map[string]string{"decision": decision})
@@ -165,6 +165,7 @@ func runHookFlows(t *testing.T, fx *hooksFixture) {
 	t.Run("ADeniedPasswordSignUpLooksTheSameForTakenAddresses", func(t *testing.T) { hookDeniesPasswordSignUp(t, fx) })
 	t.Run("EveryWayToANewAccountAsksTheHook", func(t *testing.T) { hookDeniesOtherSignUps(t, fx) })
 	t.Run("SendEmailDeliversThroughTheHookNeverTheRelay", func(t *testing.T) { hookSendsMail(t, fx) })
+	t.Run("AGuestTakingAnAddressOrProviderAsksTheHook", func(t *testing.T) { hookGuardsGuestUpgrades(t, fx) })
 }
 
 func hookAddsClaims(t *testing.T, fx *hooksFixture) {
@@ -358,5 +359,35 @@ func hookSendsMail(t *testing.T, fx *hooksFixture) {
 		"code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "code_challenge_method": "S256"})
 	if resp.StatusCode != http.StatusOK || len(fx.sender.all()) != 0 {
 		t.Fatalf("failing mail hook: %d %s, relay = %d", resp.StatusCode, body, len(fx.sender.all()))
+	}
+}
+
+func hookGuardsGuestUpgrades(t *testing.T, fx *hooksFixture) {
+	on := true
+	fx.useHooks(func(h *pool.AuthHooks) { h.BeforeUserCreated = fx.hook.url("/deny-addresses") })
+	fx.settings.set(func(s *signInSettings) { s.guests = &on })
+	defer fx.settings.set(func(s *signInSettings) { s.guests, s.hooks = nil, &pool.AuthHooks{} })
+
+	guest := fx.signInAsGuest(t)
+	bearer := fx.staleGuestToken(t, int64(userIDOf(guest)), "guest")
+	resp, body := fx.call(http.MethodPatch, userPath, bearer, map[string]any{"email": mailbox("hook-guest-mail"), "emailRedirectTo": appCallback})
+	if resp.StatusCode != http.StatusForbidden || body["error"] != codeSignupDenied {
+		t.Fatalf("address change: %d %v", resp.StatusCode, body)
+	}
+	resp, linked := fx.link(t, bearer, "github", person("hook-guest-github"))
+	if resp.StatusCode != http.StatusForbidden || linked["error"] != codeSignupDenied {
+		t.Fatalf("provider link: %d %v", resp.StatusCode, linked)
+	}
+	if got := fx.getUser(t, accessTokenOf(guest)); got["isGuest"] != true {
+		t.Fatalf("the guest was upgraded: %v", got)
+	}
+	upgrades := 0
+	for _, call := range fx.hook.received("/deny-addresses") {
+		if call.body["method"] == methodGuestUpgrade {
+			upgrades++
+		}
+	}
+	if upgrades != 2 {
+		t.Fatalf("guest_upgrade asks = %d", upgrades)
 	}
 }

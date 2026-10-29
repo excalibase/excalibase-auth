@@ -46,3 +46,12 @@ func TestMessageID_IsFreshAndPrefixed(t *testing.T) {
 		t.Fatalf("ids %q and %q", first, second)
 	}
 }
+
+// The sample from the Standard Webhooks specification.
+func TestSignature_MatchesTheSpecificationSample(t *testing.T) {
+	got, err := signature("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", "msg_p5jXN8AQM9LWM0D4loKWxJek",
+		time.Unix(1614265330, 0), []byte(`{"test": 2432232314}`))
+	if err != nil || got != "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=" {
+		t.Fatalf("signature = %q, %v", got, err)
+	}
+}

@@ -22,6 +22,9 @@ const (
 	hookBeforeUserCreated = "before_user_created"
 	hookSendEmail         = "send_email"
 
+	// methodGuestUpgrade asks before_user_created about a guest taking an address.
+	methodGuestUpgrade = "guest_upgrade"
+
 	decisionAllow = "allow"
 	decisionDeny  = "deny"
 )
@@ -43,22 +46,18 @@ func (h *AuthHandler) WithHooks(client hookCaller) *AuthHandler {
 	return h
 }
 
-// hookSettings is the project's hooks, read no older than signInMaxAge while
-// the flag is on. Unreadable settings fail closed only when the last copy had
-// hooks, so a control plane with the flag off behaves as before.
+// hookSettings is the project's hooks, read no older than signInMaxAge.
+// Unreadable settings fail closed when the last copy had hooks, so a control
+// plane with the flag off behaves as before.
 func (h *AuthHandler) hookSettings(ctx context.Context, projectID string) (pool.AuthHooks, error) {
-	info, err := h.poolMgr.GetProjectInfo(ctx, projectID)
+	info, err := h.signInSettings(ctx, projectID)
 	if err != nil {
+		// With no copy at all the project's database and the relay are out of
+		// reach too (both come from the control plane), so nothing proceeds unchecked.
 		if cached, ok := h.poolMgr.CachedProjectInfo(projectID); ok && cached.AuthHooks != nil {
 			return pool.AuthHooks{}, errHookFailed
 		}
 		return pool.AuthHooks{}, nil
-	}
-	if info.AuthHooks == nil {
-		return pool.AuthHooks{}, nil
-	}
-	if info, err = h.signInSettings(ctx, projectID); err != nil {
-		return pool.AuthHooks{}, errHookFailed
 	}
 	if info.AuthHooks == nil {
 		return pool.AuthHooks{}, nil
@@ -193,7 +192,8 @@ type hookEmailBody struct {
 }
 
 // sendMail delivers through the project's send_email hook while it is on,
-// never falling back to the relay, and through the relay otherwise.
+// never falling back to the relay (a failure is logged and audited by
+// callHook), and through the relay otherwise.
 func (h *AuthHandler) sendMail(ctx context.Context, msg email.Message) error {
 	settings, err := h.hookSettings(ctx, msg.ProjectID)
 	if err != nil {
@@ -204,7 +204,14 @@ func (h *AuthHandler) sendMail(ctx context.Context, msg email.Message) error {
 	}
 	request := sendEmailHookRequest{Type: hookSendEmail, ProjectID: msg.ProjectID,
 		Email: hookEmailBody{To: msg.To, Template: msg.Template, Data: msg.Data}}
-	return h.callHook(ctx, msg.ProjectID, hookSendEmail, settings.SendEmail, 0, request, nil)
+	// After the answer, so the hook's latency tells nothing about the address.
+	detached := context.WithoutCancel(ctx)
+	h.dispatchMail(func() {
+		callCtx, cancel := context.WithTimeout(detached, otpMailTimeout)
+		defer cancel()
+		_ = h.callHook(callCtx, msg.ProjectID, hookSendEmail, settings.SendEmail, 0, request, nil)
+	})
+	return nil
 }
 
 // hookRefusalCode is the error code a provider callback redirects with.
@@ -213,4 +220,21 @@ func hookRefusalCode(err error) string {
 		return codeSignupDenied
 	}
 	return codeHookFailed
+}
+
+// guestUpgradeAllowed asks before_user_created before a guest takes an
+// address or a provider, so guests cannot route around the sign-up policy.
+func (h *AuthHandler) guestUpgradeAllowed(ctx context.Context, db store.Store, projectID string, userID int64, provider, address string) error {
+	settings, err := h.hookSettings(ctx, projectID)
+	if err != nil {
+		return h.hookFailure(ctx, projectID, hookBeforeUserCreated, userID, "the hook settings are unreadable")
+	}
+	if settings.BeforeUserCreated == "" {
+		return nil
+	}
+	account, err := db.AccountByID(ctx, userID)
+	if err != nil || !account.IsGuest {
+		return nil
+	}
+	return h.allowNewUser(ctx, projectID, newUser{Method: methodGuestUpgrade, Provider: provider, Email: address})
 }
