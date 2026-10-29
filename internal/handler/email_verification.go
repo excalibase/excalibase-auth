@@ -93,7 +93,7 @@ func (h *AuthHandler) sendVerification(ctx context.Context, db store.Store, proj
 			"expiresHour": strconv.Itoa(int(verificationTTL.Hours())),
 		},
 	}
-	if err := h.emailSender.Send(ctx, msg); err != nil {
+	if err := h.sendMail(ctx, msg); err != nil {
 		log.Printf("auth.verification.send_failed project=%s userId=%d err=%v", safeLog(projectID), userID, err)
 	}
 }

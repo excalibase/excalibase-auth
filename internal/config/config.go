@@ -38,6 +38,7 @@ type Config struct {
 	RequestMetrics          RequestMetrics
 	// GuestInactiveDays is how long a guest account may go unused before it is deleted.
 	GuestInactiveDays int
+	Hooks             Hooks
 }
 
 // RequestMetrics is the per-project request counting provisioning scrapes for
@@ -107,6 +108,7 @@ func Load() Config {
 		PasswordHashConcurrency: hashConcurrency(),
 		RequestMetrics:          loadRequestMetrics(),
 		GuestInactiveDays:       guestInactiveDays(),
+		Hooks:                   loadHooks(),
 	}
 }
 

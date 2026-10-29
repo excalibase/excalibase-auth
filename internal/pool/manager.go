@@ -58,6 +58,8 @@ type ProjectInfo struct {
 	GuestCaptchaEnabled bool  `json:"guestCaptchaEnabled,omitempty"`
 	// StableSubject makes a token's sub the account id instead of its address.
 	StableSubject bool `json:"stableSubject,omitempty"`
+	// AuthHooks is nil while the control plane's authhooks flag is off.
+	AuthHooks *AuthHooks `json:"authHooks,omitempty"`
 }
 
 type infoEntry struct {

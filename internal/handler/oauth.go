@@ -249,6 +249,9 @@ func (h *AuthHandler) signInIdentity(ctx context.Context, db store.Store, projec
 		if h.limits != nil && !h.limits.AllowSignup(projectID) {
 			return store.Account{}, 0, codeRateLimited
 		}
+		if err := h.allowNewUser(ctx, projectID, newUser{Method: "oauth", Provider: provider, Email: identity.Email}); err != nil {
+			return store.Account{}, 0, hookRefusalCode(err)
+		}
 		account, outcome, err = db.SignInWithIdentity(ctx, claim, true)
 	}
 	switch {

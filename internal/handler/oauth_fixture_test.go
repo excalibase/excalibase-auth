@@ -54,6 +54,9 @@ type signInSettings struct {
 	captchaSecretMissing bool
 	stableSubject        bool
 	requireVerification  bool
+	// hooks is the project's auth hooks; nil is the control plane's flag off.
+	hooks             *pool.AuthHooks
+	hookSecretMissing bool
 }
 
 func (s *signInSettings) set(change func(*signInSettings)) {
@@ -72,6 +75,8 @@ type oauthFixture struct {
 	passwordIsNull func(t *testing.T, email string) bool
 	// count reads a table's row count straight from the database.
 	count func(t *testing.T, table string) int
+	// countAudit reads how many audit rows have the event.
+	countAudit func(t *testing.T, event string) int
 	// disable switches an account off straight in the database.
 	disable func(t *testing.T, email string)
 	// backdate ages an account, its last sign-in and its refresh tokens.
@@ -102,6 +107,9 @@ func (s *signInSettings) info(authURL string) map[string]any {
 	if s.stableSubject {
 		info["stableSubject"] = true
 	}
+	if s.hooks != nil {
+		info["authHooks"] = *s.hooks
+	}
 	return info
 }
 
@@ -109,7 +117,7 @@ func (s *signInSettings) provisioning(record any, authURL *string) http.Handler 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		s.mu.Lock()
-		down, missing, captchaMissing := s.infoDown, s.secretMissing, s.captchaSecretMissing
+		down, missing, captchaMissing, hookSecretMissing := s.infoDown, s.secretMissing, s.captchaSecretMissing, s.hookSecretMissing
 		s.mu.Unlock()
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/info"):
@@ -118,6 +126,12 @@ func (s *signInSettings) provisioning(record any, authURL *string) http.Handler 
 				return
 			}
 			_ = json.NewEncoder(w).Encode(s.info(*authURL))
+		case strings.HasSuffix(r.URL.Path, "/auth/hooks"):
+			if hookSecretMissing {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"secret": hookSecret})
 		case strings.HasSuffix(r.URL.Path, "/auth/captcha"):
 			if captchaMissing {
 				w.WriteHeader(http.StatusNotFound)
@@ -220,6 +234,13 @@ func newPostgresOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFix
 		}
 		return n
 	}
+	fx.countAudit = func(t *testing.T, event string) int {
+		var n int
+		if err := direct.QueryRow(ctx, "SELECT count(*) FROM auth.audit_log WHERE event = $1", event).Scan(&n); err != nil {
+			t.Fatalf("count audit %s: %v", event, err)
+		}
+		return n
+	}
 	return fx
 }
 
@@ -259,6 +280,13 @@ func newMySQLOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFixtur
 		var n int
 		if err := root.QueryRow("SELECT count(*) FROM `auth`.`" + table + "`").Scan(&n); err != nil {
 			t.Fatalf("count %s: %v", table, err)
+		}
+		return n
+	}
+	fx.countAudit = func(t *testing.T, event string) int {
+		var n int
+		if err := root.QueryRow("SELECT count(*) FROM `auth`.`audit_log` WHERE event = ?", event).Scan(&n); err != nil {
+			t.Fatalf("count audit %s: %v", event, err)
 		}
 		return n
 	}

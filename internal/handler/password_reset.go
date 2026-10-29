@@ -122,7 +122,7 @@ func (h *AuthHandler) mailPasswordReset(ctx context.Context, db store.Store, pro
 			"expiresMin": strconv.Itoa(int(resetTTL.Minutes())),
 		},
 	}
-	if err := h.emailSender.Send(ctx, msg); err != nil {
+	if err := h.sendMail(ctx, msg); err != nil {
 		log.Printf("auth.reset.send_failed project=%s userId=%d err=%v", safeLog(projectID), userID, err)
 	}
 }

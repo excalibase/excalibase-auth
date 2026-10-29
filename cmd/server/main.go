@@ -15,6 +15,7 @@ import (
 	"github.com/excalibase/auth/internal/cors"
 	"github.com/excalibase/auth/internal/email"
 	"github.com/excalibase/auth/internal/handler"
+	"github.com/excalibase/auth/internal/hooks"
 	"github.com/excalibase/auth/internal/metrics"
 	custommw "github.com/excalibase/auth/internal/middleware"
 	"github.com/excalibase/auth/internal/migrate"
@@ -63,7 +64,8 @@ func main() {
 		WithTrustedProxies(cfg.RateLimit.TrustedProxyCIDRs).
 		WithHasher(hasher).
 		WithCORS(cfg.CORSOrigins, cors.NewProvisioningProvider(cfg.ProvisioningURL, tokens, cfg.ProjectCORSTTL)).
-		WithGuestInactivity(cfg.GuestInactiveDays)
+		WithGuestInactivity(cfg.GuestInactiveDays).
+		WithHooks(hookClient(cfg.Hooks))
 	// Each project's idle guests go once a day, and only while its guest flag is on.
 	authHandler.StartGuestSweeper(context.Background(), time.Hour)
 	if cfg.RateLimit.Enabled {
@@ -110,6 +112,15 @@ func main() {
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+// hookClient reaches projects' auth hooks only at public addresses outside cfg's ranges.
+func hookClient(cfg config.Hooks) *hooks.Client {
+	roots, err := hooks.RootsWith(cfg.CAFile)
+	if err != nil {
+		log.Fatalf("AUTH_HOOKS_CA_FILE: %v", err)
+	}
+	return hooks.NewClient(hooks.Options{Deny: cfg.DenyCIDRs, RootCAs: roots})
 }
 
 func newSigner(privateKeyPEM string, cfg config.Config) (*auth.JWTService, error) {
