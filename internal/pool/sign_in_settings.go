@@ -109,3 +109,30 @@ func (m *Manager) ProviderSecret(ctx context.Context, projectID, provider string
 	}
 	return entry.ClientSecret, nil
 }
+
+// AuthHooks is the URL of each auth hook the project switched on; sent only
+// while the control plane's authhooks flag is on (EXC-662).
+type AuthHooks struct {
+	CustomAccessToken string `json:"customAccessToken,omitempty"`
+	BeforeUserCreated string `json:"beforeUserCreated,omitempty"`
+	SendEmail         string `json:"sendEmail,omitempty"`
+}
+
+// ErrNoHookSecret means the vault holds no signing secret for the project's hooks.
+var ErrNoHookSecret = errors.New("auth hook secret is not set")
+
+// HookSecret reads the project's hook signing secret from the vault on every
+// call, so a rotated secret applies at once.
+func (m *Manager) HookSecret(ctx context.Context, projectID string) (string, error) {
+	var entry struct {
+		Secret string `json:"secret"`
+	}
+	url := fmt.Sprintf("%s/vault/secrets/projects/%s/auth/hooks", m.provisioningURL, neturl.PathEscape(projectID))
+	if err := m.getJSON(ctx, url, "hook secret", &entry); err != nil {
+		return "", err
+	}
+	if entry.Secret == "" {
+		return "", ErrNoHookSecret
+	}
+	return entry.Secret, nil
+}

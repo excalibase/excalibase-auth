@@ -96,6 +96,9 @@ type AuthHandler struct {
 	guestLimits        store.GuestLimits
 	captchaVerifyURL   string
 	guestInactiveAfter time.Duration
+
+	// Auth hooks (EXC-662): on for a project only when /info lists them.
+	hookClient hookCaller
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
@@ -297,6 +300,12 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("auth.register tenant=%s org=%s email=%s", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email))
+	// Asked on every attempt, before the account check, so neither its answer
+	// nor its latency tells whether the address has an account.
+	if err := h.allowNewUser(r.Context(), projectID, newUser{Method: "password", Email: req.Email}); err != nil {
+		writeSessionFailure(w, err)
+		return
+	}
 
 	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
@@ -336,7 +345,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.generateAuthResponse(r, projectID, user, accountRoles{role: role}, false)
 	if err != nil {
-		httpError(w, "failed to generate tokens", 500)
+		writeSessionFailure(w, err)
 		return
 	}
 	w.WriteHeader(201)
@@ -463,7 +472,8 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 
 	resp, err := h.generateAuthResponse(r, projectID, userInfoOf(user), roles, user.EmailVerified)
 	if err != nil {
-		return nil, 500, errTokenGeneration
+		status, failure := sessionFailure(err)
+		return nil, status, failure
 	}
 	return resp, 200, nil
 }
@@ -538,22 +548,18 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 		return nil, 500, errRefreshTokenStore
 	}
 
-	var roles accountRoles
-	// A refusal returns before the store commits, so the token survives it.
+	var claims auth.Claims
+	// A refusal returns before the store commits, so the token survives it;
+	// the claims, hook included, are built here for that reason.
 	account, session, err := db.RotateRefreshToken(ctx, hash, successorHash, func(account store.Account) error {
-		if !account.Enabled {
-			return refreshRefusal{status: 403, err: errAccountDisabled}
+		roles, err := h.refreshAllowed(ctx, projectID, account)
+		if err != nil {
+			return err
 		}
-		roles = accountRoles{role: account.Role, allowed: account.AllowedRoles}
-		if err := roles.validate(); err != nil {
-			return refreshRefusal{status: 403, err: err}
-		}
-		if account.IsGuest {
-			// A guest has no address to verify; its session lives with the flag.
-			return h.guestRefreshAllowed(ctx, projectID)
-		}
-		if !account.EmailVerified && h.settingsFor(ctx, projectID).requireEmailVerification {
-			return refreshRefusal{status: 403, err: errEmailNotVerified}
+		claims, err = h.accessClaims(r, projectID, userInfoOf(account), roles, account.EmailVerified)
+		if err != nil {
+			status, refusal := sessionFailure(err)
+			return refreshRefusal{status: status, err: refusal}
 		}
 		return nil
 	})
@@ -572,11 +578,45 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 		return nil, 500, errRefreshTokenStore
 	}
 
-	resp, err := h.sessionResponse(r, projectID, userInfoOf(account), roles, account.EmailVerified, successor, session.AuthTime)
+	resp, err := h.signSession(claims, userInfoOf(account), successor, session.AuthTime)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
 	return resp, 200, nil
+}
+
+// refreshAllowed is whether the account may go on with its session, and its roles.
+func (h *AuthHandler) refreshAllowed(ctx context.Context, projectID string, account store.Account) (accountRoles, error) {
+	roles := accountRoles{role: account.Role, allowed: account.AllowedRoles}
+	switch {
+	case !account.Enabled:
+		return roles, refreshRefusal{status: 403, err: errAccountDisabled}
+	case roles.validate() != nil:
+		return roles, refreshRefusal{status: 403, err: roles.validate()}
+	case account.IsGuest:
+		// A guest has no address to verify; its session lives with the flag.
+		return roles, h.guestRefreshAllowed(ctx, projectID)
+	case !account.EmailVerified && h.settingsFor(ctx, projectID).requireEmailVerification:
+		return roles, refreshRefusal{status: 403, err: errEmailNotVerified}
+	}
+	return roles, nil
+}
+
+// sessionFailure is the status and message for a session that could not start.
+func sessionFailure(err error) (int, error) {
+	switch {
+	case errors.Is(err, errHookFailed):
+		return http.StatusServiceUnavailable, errHookFailed
+	case errors.Is(err, errSignupDenied):
+		return http.StatusForbidden, errSignupDenied
+	}
+	return http.StatusInternalServerError, errTokenGeneration
+}
+
+// writeSessionFailure answers a session that could not start.
+func writeSessionFailure(w http.ResponseWriter, err error) {
+	status, message := sessionFailure(err)
+	httpError(w, message.Error(), status)
 }
 
 // refreshRefusal is a status the account itself earns during a rotation.
@@ -632,8 +672,13 @@ func (h *AuthHandler) generateAuthResponse(r *http.Request, projectID string, us
 	return h.startSession(r, projectID, user, roles, emailVerified, h.newRefreshSession())
 }
 
-// startSession stores the session's first refresh token and signs its access token.
+// startSession builds the access token's claims first, so a failed hook
+// stores nothing, then stores the session's first refresh token and signs.
 func (h *AuthHandler) startSession(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool, session store.RefreshSession) (*domain.AuthResponse, error) {
+	claims, err := h.accessClaims(r, projectID, user, roles, emailVerified)
+	if err != nil {
+		return nil, err
+	}
 	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		return nil, err
@@ -642,7 +687,7 @@ func (h *AuthHandler) startSession(r *http.Request, projectID string, user domai
 	if err != nil {
 		return nil, err
 	}
-	return h.sessionResponse(r, projectID, user, roles, emailVerified, refreshToken, session.AuthTime)
+	return h.signSession(claims, user, refreshToken, session.AuthTime)
 }
 
 // projectLabels are the display names a token carries next to projectId,
@@ -751,13 +796,19 @@ func apiKeyClaims(projectID string, labels projectLabels, keyID int64, keyType s
 	}, nil
 }
 
-// sessionResponse signs an end-user access token and pairs it with the
-// session's refresh token. authTime is when the user signed in, zero if unknown.
-func (h *AuthHandler) sessionResponse(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool, refreshToken string, authTime time.Time) (*domain.AuthResponse, error) {
+// accessClaims are an end-user access token's claims, after the project's
+// custom_access_token hook when it has one.
+func (h *AuthHandler) accessClaims(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool) (auth.Claims, error) {
 	claims, err := endUserClaims(projectID, h.labelsFor(r, projectID), user, roles, emailVerified)
 	if err != nil {
-		return nil, err
+		return claims, err
 	}
+	return h.withAccessHook(r.Context(), projectID, claims)
+}
+
+// signSession signs an end-user access token and pairs it with the session's
+// refresh token. authTime is when the user signed in, zero if unknown.
+func (h *AuthHandler) signSession(claims auth.Claims, user domain.UserInfo, refreshToken string, authTime time.Time) (*domain.AuthResponse, error) {
 	if !authTime.IsZero() {
 		claims.AuthTime = authTime.Unix()
 	}
