@@ -49,3 +49,25 @@ func TestWriteStoreFailureMapsTheStoreErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestAGuestIsFreshByAFreshTokenAndNoOneElseIs(t *testing.T) {
+	now := time.Now()
+	old, recent := now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix()
+	for _, c := range []struct {
+		name   string
+		claims *auth.Claims
+		guest  bool
+		want   bool
+	}{
+		{"a recent sign-in", &auth.Claims{AuthTime: recent, IssuedAt: old}, false, true},
+		{"a member's fresh token", &auth.Claims{AuthTime: old, IssuedAt: recent}, false, false},
+		{"a guest's fresh token", &auth.Claims{AuthTime: old, IssuedAt: recent}, true, true},
+		{"a guest's old token", &auth.Claims{AuthTime: old, IssuedAt: old}, true, false},
+		{"a guest's token from the future", &auth.Claims{IssuedAt: now.Add(time.Hour).Unix()}, true, false},
+		{"no token", nil, true, false},
+	} {
+		if got := freshEnough(c.claims, c.guest, now); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}

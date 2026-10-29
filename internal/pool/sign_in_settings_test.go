@@ -126,3 +126,46 @@ func TestAProviderWithoutAnAbsoluteCallbackIsOff(t *testing.T) {
 		}
 	}
 }
+
+func TestCaptchaSecretReadsTheProjectsVaultEntry(t *testing.T) {
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		switch r.URL.Path {
+		case "/vault/secrets/projects/p1/auth/captcha":
+			_, _ = w.Write([]byte(`{"secret_key":"ts-secret"}`))
+		case "/vault/secrets/projects/p2/auth/captcha":
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer srv.Close()
+	mgr := NewManager(srv.URL, token.Literal("pat"), time.Hour)
+	ctx := context.Background()
+	if secret, err := mgr.CaptchaSecret(ctx, "p1"); err != nil || secret != "ts-secret" || path != "/vault/secrets/projects/p1/auth/captcha" {
+		t.Fatalf("secret=%q err=%v path=%s", secret, err, path)
+	}
+	if _, err := mgr.CaptchaSecret(ctx, "p2"); !errors.Is(err, ErrNoCaptchaSecret) {
+		t.Fatalf("empty entry: %v", err)
+	}
+	if _, err := mgr.CaptchaSecret(ctx, "p3"); err == nil {
+		t.Fatal("a refused read returned a secret")
+	}
+}
+
+func TestGuestSwitchReadsAsOffWhileTheFlagIsOff(t *testing.T) {
+	on, off := true, false
+	for _, c := range []struct {
+		info          ProjectInfo
+		flag, enabled bool
+	}{
+		{ProjectInfo{}, false, false},
+		{ProjectInfo{GuestSignInEnabled: &off}, true, false},
+		{ProjectInfo{GuestSignInEnabled: &on}, true, true},
+	} {
+		if c.info.GuestsOn() != c.flag || c.info.GuestSignInOn() != c.enabled {
+			t.Errorf("%+v: on=%v enabled=%v", c.info, c.info.GuestsOn(), c.info.GuestSignInOn())
+		}
+	}
+}

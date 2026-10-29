@@ -27,7 +27,9 @@ const (
 // defaultEmailChangeLimits pace an account's changes to one a minute and five
 // a day; a project's 200 a day (two mails each) stay inside the relay's own
 // account-mail budget.
-var defaultEmailChangeLimits = store.EmailChangeLimits{MinInterval: time.Minute, PerAccountDay: 5, PerProjectDay: 200}
+// Guests, free to make, also get five a day per client and half the project's mails.
+var defaultEmailChangeLimits = store.EmailChangeLimits{MinInterval: time.Minute, PerAccountDay: 5, PerProjectDay: 200,
+	PerGuestClientDay: 5, GuestPerProjectDay: 100}
 
 // emailChangeTarget is the allowed page the link lands on, the site URL by default.
 func emailChangeTarget(w http.ResponseWriter, requested string, info pool.ProjectInfo) (string, bool) {
@@ -52,8 +54,11 @@ func (h *AuthHandler) requestEmailChange(w http.ResponseWriter, r *http.Request,
 		httpError(w, "internal error", http.StatusInternalServerError)
 		return false
 	}
-	mail, err := db.SaveEmailChange(r.Context(), store.EmailChange{UserID: account.ID, NewEmail: newEmail,
-		TokenHash: digest, ExpiresAt: time.Now().Add(emailChangeTTL)}, h.emailChangeLimits)
+	change := store.EmailChange{UserID: account.ID, NewEmail: newEmail, TokenHash: digest, ExpiresAt: time.Now().Add(emailChangeTTL)}
+	if account.IsGuest {
+		change.GuestClient = otpSenderKey(h.clientIP(r))
+	}
+	mail, err := db.SaveEmailChange(r.Context(), change, h.emailChangeLimits)
 	if errors.Is(err, store.ErrRateLimited) {
 		w.Header().Set("Retry-After", strconv.Itoa(int(h.emailChangeLimits.MinInterval.Seconds())+1))
 		httpError(w, codeRateLimited, http.StatusTooManyRequests)
@@ -82,6 +87,9 @@ func (h *AuthHandler) mailEmailChange(projectID, oldEmail, newEmail, link string
 		expires := strconv.Itoa(int(emailChangeTTL.Minutes()))
 		h.sendOTPMail(projectID, email.Message{ProjectID: projectID, To: newEmail, Template: email.TemplateEmailChange,
 			Data: map[string]string{"userEmail": newEmail, "linkUrl": link, "expiresMin": expires}})
+	}
+	if oldEmail == "" {
+		return
 	}
 	h.sendOTPMail(projectID, email.Message{ProjectID: projectID, To: oldEmail, Template: email.TemplateEmailChangeNotice,
 		Data: map[string]string{"userEmail": oldEmail, "newEmail": newEmail}})

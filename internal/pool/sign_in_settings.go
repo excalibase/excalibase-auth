@@ -52,6 +52,34 @@ func (info ProjectInfo) NewUsersAllowed() bool {
 	return info.AllowNewUsers == nil || *info.AllowNewUsers
 }
 
+// GuestsOn is whether the control plane's guest flag is on.
+func (info ProjectInfo) GuestsOn() bool {
+	return info.GuestSignInEnabled != nil
+}
+
+// GuestSignInOn is whether the project takes new guests.
+func (info ProjectInfo) GuestSignInOn() bool {
+	return info.GuestSignInEnabled != nil && *info.GuestSignInEnabled
+}
+
+// ErrNoCaptchaSecret means the vault holds no Turnstile secret for the project.
+var ErrNoCaptchaSecret = errors.New("captcha secret is not set")
+
+// CaptchaSecret reads the project's Turnstile secret from the vault on every call.
+func (m *Manager) CaptchaSecret(ctx context.Context, projectID string) (string, error) {
+	var entry struct {
+		SecretKey string `json:"secret_key"`
+	}
+	url := fmt.Sprintf("%s/vault/secrets/projects/%s/auth/captcha", m.provisioningURL, neturl.PathEscape(projectID))
+	if err := m.getJSON(ctx, url, "captcha secret", &entry); err != nil {
+		return "", err
+	}
+	if entry.SecretKey == "" {
+		return "", ErrNoCaptchaSecret
+	}
+	return entry.SecretKey, nil
+}
+
 // CachedProjectInfo is the last copy read, however old.
 func (m *Manager) CachedProjectInfo(projectID string) (ProjectInfo, bool) {
 	m.mu.RLock()

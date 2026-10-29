@@ -44,10 +44,11 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 - `internal/emailotp` — eight-digit sign-in codes and the HMAC they are stored as (`handler/email_otp.go` serves `/otp` and `/verify`).
 - `handler/linking.go` — a signed-in user links/unlinks Google, GitHub or another address (`/user/identities`); needs `auth_time` within 5 minutes, writes the link only when the app's PKCE verifier spends the code.
 - `handler/user.go`, `email_change.go`, `sign_out.go`, `user_admin_detail.go` — the signed-in account (`/user`, address change, sign-out scopes) and admin read/merge/delete of accounts, behind `/info`'s `userApiEnabled`; `link_notice.go` mails the account when a way in is added.
+- `handler/guest.go` — guest accounts (`/guest`, `authguest`): no address, role `guest`, tenant-DB budgets, optional Turnstile, the daily sweep of idle guests; upgrades go through `linking.go` and `email_change.go`.
 - `internal/domain` — Domain types and DTOs.
 - `internal/config` — Env-based config.
 
-**Database schema** (per tenant, `auth` schema): `users` (password NULL for provider-made accounts), `refresh_tokens`, `identities`, `flow_states`, `auth_codes`, `email_otps` (+ `email_otp_lock`), `audit_log`, `email_change_tokens`, `users.user_metadata`/`app_metadata` (never in the token), and the link/key tables. Managed by golang-migrate migrations in `internal/migrate/migrations/`.
+**Database schema** (per tenant, `auth` schema): `users` (password NULL for provider-made accounts), `refresh_tokens`, `identities`, `flow_states`, `auth_codes`, `email_otps` (+ `email_otp_lock`), `audit_log`, `email_change_tokens`, `users.user_metadata`/`app_metadata` (never in the token), `users.is_guest` with `guest_sign_ups` and `guest_lock`, and the link/key tables. Managed by golang-migrate migrations in `internal/migrate/migrations/`.
 
 ## Environment Variables
 
@@ -70,6 +71,7 @@ The Makefile defaults to `go` from PATH. Override with `make GO=/path/to/go buil
 | `PROJECT_CORS_TTL_SECONDS` | `30` | No |
 | `REQUEST_METRICS_ENABLED` | `false` (only `true` turns it on) | No. Per-project request counts and latency on an internal listener for Studio's request charts (EXC-656) |
 | `REQUEST_METRICS_PORT` / `REQUEST_METRICS_MAX_PROJECTS` | `9465` / `1000` | No |
+| `GUEST_INACTIVE_DAYS` | `30` (1 to 3650) | No. Idle guest accounts are deleted after this many days |
 
 ## Testing Strategy
 

@@ -79,6 +79,20 @@ func recentlySignedIn(claims *auth.Claims, now time.Time) bool {
 	return age > -time.Minute && age <= reauthWindow
 }
 
+// freshEnough is a recent sign-in or, for a guest, which has nothing to sign
+// in again with, a token issued within the window: refreshing proves the
+// session's own long-lived credential.
+func freshEnough(claims *auth.Claims, guest bool, now time.Time) bool {
+	if recentlySignedIn(claims, now) {
+		return true
+	}
+	if !guest || claims == nil || claims.IssuedAt == 0 {
+		return false
+	}
+	age := now.Sub(time.Unix(claims.IssuedAt, 0))
+	return age > -time.Minute && age <= reauthWindow
+}
+
 func freshEndUser(w http.ResponseWriter, r *http.Request) (*auth.Claims, bool) {
 	claims := middleware.ClaimsFromContext(r.Context())
 	if !recentlySignedIn(claims, time.Now()) {
@@ -86,6 +100,33 @@ func freshEndUser(w http.ResponseWriter, r *http.Request) (*auth.Claims, bool) {
 		return nil, false
 	}
 	return claims, true
+}
+
+// freshLinker is freshEndUser that defers a guest's token to linkableFresh,
+// which reads the account.
+func freshLinker(w http.ResponseWriter, r *http.Request) (*auth.Claims, bool) {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims != nil && claims.IsGuest != nil && *claims.IsGuest {
+		return claims, true
+	}
+	return freshEndUser(w, r)
+}
+
+// linkableFresh is linkable for an account that signed in recently, or is a
+// guest whose token is fresh.
+func linkableFresh(w http.ResponseWriter, r *http.Request, db store.Store, claims *auth.Claims) bool {
+	if !recentlySignedIn(claims, time.Now()) {
+		account, err := db.AccountByID(r.Context(), claims.UserID)
+		if err != nil {
+			writeStoreFailure(w, err, errUserNotFound.Error())
+			return false
+		}
+		if !freshEnough(claims, account.IsGuest, time.Now()) {
+			httpError(w, codeReauthRequired, http.StatusForbidden)
+			return false
+		}
+	}
+	return linkable(w, r, db, claims.UserID)
 }
 
 // linkingSettings reads the settings fresh: 503 when unreadable, 404 when the
@@ -152,7 +193,7 @@ func (h *AuthHandler) StartProviderLink(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	claims, ok := freshEndUser(w, r)
+	claims, ok := freshLinker(w, r)
 	if !ok {
 		return
 	}
@@ -171,7 +212,7 @@ func (h *AuthHandler) StartProviderLink(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	db, ok := h.storeFor(w, r)
-	if !ok || !linkable(w, r, db, claims.UserID) {
+	if !ok || !linkableFresh(w, r, db, claims) {
 		return
 	}
 	ticket, _, err := token.New()
@@ -235,7 +276,7 @@ func (h *AuthHandler) StartAddressLink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	claims, ok := freshEndUser(w, r)
+	claims, ok := freshLinker(w, r)
 	if !ok {
 		return
 	}
@@ -250,7 +291,7 @@ func (h *AuthHandler) StartAddressLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	db, ok := h.storeFor(w, r)
-	if !ok || !linkable(w, r, db, claims.UserID) {
+	if !ok || !linkableFresh(w, r, db, claims) {
 		return
 	}
 	projectID := projectKey(r)
@@ -309,17 +350,23 @@ func linkFailure(err error) (int, error) {
 }
 
 func (h *AuthHandler) commitLink(ctx context.Context, db store.Store, projectID string, userID int64, claim store.IdentityClaim, clientIP string) (int, error) {
-	replaced, err := db.LinkIdentity(ctx, userID, claim)
+	result, err := db.LinkIdentity(ctx, userID, claim)
 	if status, failure := linkFailure(err); failure != nil {
 		if status == http.StatusInternalServerError {
 			log.Printf("auth.link.failed project=%s userId=%d provider=%s", safeLog(projectID), userID, claim.Provider)
 		}
 		return status, failure
 	}
-	for _, squatter := range replaced {
+	for _, squatter := range result.Deleted {
 		h.recordAudit(ctx, db, projectID, store.AuditEvent{UserID: squatter, Event: "takeover", Method: claim.Provider, IP: clientIP})
 	}
 	h.recordAudit(ctx, db, projectID, store.AuditEvent{UserID: userID, Event: "identity_linked", Method: claim.Provider, IP: clientIP})
+	if result.Upgraded {
+		// The address was just proven by whoever holds the session; there is
+		// no earlier owner to warn.
+		h.recordAudit(ctx, db, projectID, store.AuditEvent{UserID: userID, Event: "guest_upgraded", Method: claim.Provider, IP: clientIP})
+		return http.StatusOK, nil
+	}
 	h.noticeLinked(ctx, db, projectID, userID, claim.Provider, claim.Email)
 	return http.StatusOK, nil
 }
@@ -357,7 +404,7 @@ func (h *AuthHandler) accountSession(r *http.Request, db store.Store, projectID 
 		return nil, http.StatusForbidden, err
 	}
 	_ = db.TouchLastLogin(r.Context(), account.ID)
-	user := domain.UserInfo{ID: account.ID, Email: account.Email, FullName: account.FullName}
+	user := userInfoOf(account)
 	session := h.newRefreshSession()
 	if !signedIn {
 		session.AuthTime = time.Time{}

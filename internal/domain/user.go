@@ -29,6 +29,7 @@ type ManagedUser struct {
 	AllowedRoles  []string `json:"allowedRoles"`
 	Enabled       bool     `json:"enabled"`
 	EmailVerified bool     `json:"emailVerified"`
+	IsGuest       bool     `json:"isGuest"`
 }
 
 // SetRoleRequest is the body of PUT /users/{userId}/role. A nil AllowedRoles
@@ -44,6 +45,7 @@ type AccountUser struct {
 	Email         string          `json:"email"`
 	FullName      string          `json:"fullName"`
 	EmailVerified bool            `json:"emailVerified"`
+	IsGuest       bool            `json:"isGuest"`
 	HasPassword   bool            `json:"hasPassword"`
 	UserMetadata  json.RawMessage `json:"userMetadata"`
 	AppMetadata   json.RawMessage `json:"appMetadata"`

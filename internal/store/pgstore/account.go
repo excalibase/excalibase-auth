@@ -23,10 +23,8 @@ func scanProfile(row pgx.Row) (store.Profile, error) {
 		profile   store.Profile
 		user, app []byte
 	)
-	account := &profile.Account
-	if err := row.Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
-		&account.AllowedRoles, &account.Enabled, &account.EmailVerified, &user, &app,
-		&profile.CreatedAt, &profile.LastLoginAt); err != nil {
+	fields := append(accountFields(&profile.Account), &user, &app, &profile.CreatedAt, &profile.LastLoginAt)
+	if err := row.Scan(fields...); err != nil {
 		return store.Profile{}, notFound(err)
 	}
 	profile.UserMetadata, profile.AppMetadata = store.MetadataObject(user), store.MetadataObject(app)

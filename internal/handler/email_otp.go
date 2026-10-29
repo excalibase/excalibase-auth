@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/excalibase/auth/internal/domain"
 	"github.com/excalibase/auth/internal/email"
 	"github.com/excalibase/auth/internal/emailotp"
 	"github.com/excalibase/auth/internal/oauth"
@@ -273,8 +272,7 @@ func (h *AuthHandler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = db.TouchLastLogin(r.Context(), account.ID)
 	h.audit(r.Context(), db, projectID, store.AuditEvent{UserID: account.ID, Method: otp.Kind, IP: h.clientIP(r)}, outcome)
-	user := domain.UserInfo{ID: account.ID, Email: account.Email, FullName: account.FullName}
-	resp, err := h.generateAuthResponse(r, projectID, user, accountRoles{role: account.Role, allowed: account.AllowedRoles}, true)
+	resp, err := h.generateAuthResponse(r, projectID, userInfoOf(account), accountRoles{role: account.Role, allowed: account.AllowedRoles}, true)
 	if err != nil {
 		httpError(w, errTokenGeneration.Error(), http.StatusInternalServerError)
 		return

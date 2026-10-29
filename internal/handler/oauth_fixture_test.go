@@ -48,6 +48,12 @@ type signInSettings struct {
 	userAPI       bool
 	infoDown      bool
 	secretMissing bool
+	// guests is the project's guest switch; nil is the control plane's flag off.
+	guests               *bool
+	guestCaptcha         bool
+	captchaSecretMissing bool
+	stableSubject        bool
+	requireVerification  bool
 }
 
 func (s *signInSettings) set(change func(*signInSettings)) {
@@ -68,6 +74,9 @@ type oauthFixture struct {
 	count func(t *testing.T, table string) int
 	// disable switches an account off straight in the database.
 	disable func(t *testing.T, email string)
+	// backdate ages an account, its last sign-in and its refresh tokens.
+	backdate func(t *testing.T, id int64, age time.Duration)
+	handler  *AuthHandler
 }
 
 func (s *signInSettings) info(authURL string) map[string]any {
@@ -80,18 +89,27 @@ func (s *signInSettings) info(authURL string) map[string]any {
 			"callbackUrl": authURL + oauthProject + "/callback/" + name,
 		})
 	}
-	return map[string]any{
+	info := map[string]any{
 		"projectId": "test-project", "orgSlug": "test-org", "siteUrl": "https://app.test",
 		"redirectUrls": s.redirectURLs, "allowNewUsers": s.allowNewUsers, "oauthProviders": providers,
 		"emailOtpEnabled": s.emailOTP, "userApiEnabled": s.userAPI,
+		"requireEmailVerification": s.requireVerification,
 	}
+	if s.guests != nil {
+		info["guestSignInEnabled"] = *s.guests
+		info["guestCaptchaEnabled"] = s.guestCaptcha
+	}
+	if s.stableSubject {
+		info["stableSubject"] = true
+	}
+	return info
 }
 
 func (s *signInSettings) provisioning(record any, authURL *string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		s.mu.Lock()
-		down, missing := s.infoDown, s.secretMissing
+		down, missing, captchaMissing := s.infoDown, s.secretMissing, s.captchaSecretMissing
 		s.mu.Unlock()
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/info"):
@@ -100,6 +118,12 @@ func (s *signInSettings) provisioning(record any, authURL *string) http.Handler 
 				return
 			}
 			_ = json.NewEncoder(w).Encode(s.info(*authURL))
+		case strings.HasSuffix(r.URL.Path, "/auth/captcha"):
+			if captchaMissing {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"secret_key": turnstileSecret})
 		case strings.Contains(r.URL.Path, "/auth/providers/"):
 			if missing {
 				w.WriteHeader(http.StatusNotFound)
@@ -144,7 +168,7 @@ func newOAuthFixture(t *testing.T, record any, configure func(*pool.Manager), tu
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	authURL = srv.URL
-	return &oauthFixture{integrationFixture: &integrationFixture{srv: srv, signingKey: priv, jwtSvc: jwtSvc}, idp: idp, settings: settings}
+	return &oauthFixture{integrationFixture: &integrationFixture{srv: srv, signingKey: priv, jwtSvc: jwtSvc}, idp: idp, settings: settings, handler: h}
 }
 
 func newPostgresOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFixture {
@@ -179,6 +203,16 @@ func newPostgresOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFix
 			t.Fatalf("disable %s: %v", email, err)
 		}
 	}
+	fx.backdate = func(t *testing.T, id int64, age time.Duration) {
+		for _, statement := range []string{
+			"UPDATE auth.users SET created_at = NOW() - make_interval(secs => $2), last_login_at = NOW() - make_interval(secs => $2) WHERE id = $1",
+			"UPDATE auth.refresh_tokens SET created_at = NOW() - make_interval(secs => $2) WHERE user_id = $1",
+		} {
+			if _, err := direct.Exec(ctx, statement, id, age.Seconds()); err != nil {
+				t.Fatalf("backdate %d: %v", id, err)
+			}
+		}
+	}
 	fx.count = func(t *testing.T, table string) int {
 		var n int
 		if err := direct.QueryRow(ctx, "SELECT count(*) FROM auth."+table).Scan(&n); err != nil {
@@ -208,6 +242,17 @@ func newMySQLOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFixtur
 	fx.disable = func(t *testing.T, email string) {
 		if _, err := root.Exec("UPDATE `auth`.`users` SET enabled = FALSE WHERE email = ?", email); err != nil {
 			t.Fatalf("disable %s: %v", email, err)
+		}
+	}
+	fx.backdate = func(t *testing.T, id int64, age time.Duration) {
+		seconds := int64(age.Seconds())
+		if _, err := root.Exec("UPDATE `auth`.`users` SET created_at = UTC_TIMESTAMP(6) - INTERVAL ? SECOND, "+
+			"last_login_at = UTC_TIMESTAMP(6) - INTERVAL ? SECOND WHERE id = ?", seconds, seconds, id); err != nil {
+			t.Fatalf("backdate %d: %v", id, err)
+		}
+		if _, err := root.Exec("UPDATE `auth`.`refresh_tokens` SET created_at = UTC_TIMESTAMP(6) - INTERVAL ? SECOND "+
+			"WHERE user_id = ?", seconds, id); err != nil {
+			t.Fatalf("backdate %d: %v", id, err)
 		}
 	}
 	fx.count = func(t *testing.T, table string) int {

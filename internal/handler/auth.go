@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,6 +91,11 @@ type AuthHandler struct {
 
 	// Account self-service (EXC-662): on for a project only when /info says so.
 	emailChangeLimits store.EmailChangeLimits
+
+	// Guest accounts (EXC-662): on for a project only when /info says so.
+	guestLimits        store.GuestLimits
+	captchaVerifyURL   string
+	guestInactiveAfter time.Duration
 }
 
 func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshExp int) *AuthHandler {
@@ -99,16 +105,19 @@ func NewAuthHandler(poolMgr *pool.Manager, jwtService *auth.JWTService, refreshE
 		refreshExp: refreshExp,
 		// Default to dropping mail so a deployment without an email path still
 		// registers users rather than failing closed on an unset dependency.
-		emailSender:       email.NoopSender{},
-		resendThrottle:    throttle.New(resendVerificationLimit, resendVerificationWindow),
-		forgotThrottle:    throttle.New(forgotPasswordLimit, forgotPasswordWindow),
-		hasher:            auth.NewHasher(auth.DefaultHashSlots, auth.DefaultHashWait),
-		oauthProviders:    defaultOAuthProviders(),
-		oauthHTTP:         &http.Client{Timeout: providerTimeout},
-		signInMaxAge:      defaultSignInMaxAge,
-		otpLimits:         defaultOTPLimits,
-		emailChangeLimits: defaultEmailChangeLimits,
-		dispatchMail:      func(send func()) { go send() },
+		emailSender:        email.NoopSender{},
+		resendThrottle:     throttle.New(resendVerificationLimit, resendVerificationWindow),
+		forgotThrottle:     throttle.New(forgotPasswordLimit, forgotPasswordWindow),
+		hasher:             auth.NewHasher(auth.DefaultHashSlots, auth.DefaultHashWait),
+		oauthProviders:     defaultOAuthProviders(),
+		oauthHTTP:          &http.Client{Timeout: providerTimeout},
+		signInMaxAge:       defaultSignInMaxAge,
+		otpLimits:          defaultOTPLimits,
+		emailChangeLimits:  defaultEmailChangeLimits,
+		guestLimits:        defaultGuestLimits,
+		captchaVerifyURL:   turnstileVerifyURL,
+		guestInactiveAfter: DefaultGuestInactiveDays * 24 * time.Hour,
+		dispatchMail:       func(send func()) { go send() },
 	}
 	if jwtService != nil {
 		key, err := jwtService.DerivedKey(otpKeyPurpose)
@@ -168,6 +177,8 @@ func (h *AuthHandler) Routes(r chi.Router) {
 		r.Use(middleware.TenantContext)
 		r.Get("/.well-known/jwks.json", h.JWKS)
 		r.With(h.limit(rateLimitRegister)).Post("/register", h.Register)
+		// Guest accounts (EXC-662); a project without them answers 404.
+		r.With(h.limit(rateLimitGuest)).Post("/guest", h.SignInAsGuest)
 		r.With(h.limit(rateLimitLogin)).Post("/login", h.Login)
 		r.Post("/validate", h.Validate)
 		// /refresh is the legacy alias of grant_type=refresh_token, so it
@@ -229,6 +240,7 @@ type rateLimitRoute func(*middleware.RateLimits, http.Handler) http.Handler
 
 var (
 	rateLimitRegister rateLimitRoute = (*middleware.RateLimits).Register
+	rateLimitGuest    rateLimitRoute = (*middleware.RateLimits).Guest
 	rateLimitLogin    rateLimitRoute = (*middleware.RateLimits).Login
 	rateLimitToken    rateLimitRoute = (*middleware.RateLimits).Token
 	rateLimitOTP      rateLimitRoute = (*middleware.RateLimits).OTP
@@ -449,8 +461,7 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 
 	_ = db.TouchLastLogin(r.Context(), user.ID)
 
-	userInfo := domain.UserInfo{ID: user.ID, Email: user.Email, FullName: user.FullName}
-	resp, err := h.generateAuthResponse(r, projectID, userInfo, roles, user.EmailVerified)
+	resp, err := h.generateAuthResponse(r, projectID, userInfoOf(user), roles, user.EmailVerified)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -484,9 +495,12 @@ func (h *AuthHandler) Validate(w http.ResponseWriter, r *http.Request) {
 
 	result := map[string]interface{}{
 		"valid":     true,
-		"email":     claims.Sub,
+		"sub":       claims.Sub,
 		"projectId": claims.ProjectID,
 		"role":      claims.Role,
+	}
+	if claims.Email != "" {
+		result["email"] = claims.Email
 	}
 	if claims.UserID != 0 {
 		result["userId"] = claims.UserID
@@ -527,9 +541,16 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 	var roles accountRoles
 	// A refusal returns before the store commits, so the token survives it.
 	account, session, err := db.RotateRefreshToken(ctx, hash, successorHash, func(account store.Account) error {
+		if !account.Enabled {
+			return refreshRefusal{status: 403, err: errAccountDisabled}
+		}
 		roles = accountRoles{role: account.Role, allowed: account.AllowedRoles}
 		if err := roles.validate(); err != nil {
 			return refreshRefusal{status: 403, err: err}
+		}
+		if account.IsGuest {
+			// A guest has no address to verify; its session lives with the flag.
+			return h.guestRefreshAllowed(ctx, projectID)
 		}
 		if !account.EmailVerified && h.settingsFor(ctx, projectID).requireEmailVerification {
 			return refreshRefusal{status: 403, err: errEmailNotVerified}
@@ -551,8 +572,7 @@ func (h *AuthHandler) exchangeRefreshToken(r *http.Request, projectID, refreshTo
 		return nil, 500, errRefreshTokenStore
 	}
 
-	user := domain.UserInfo{ID: account.ID, Email: account.Email, FullName: account.FullName}
-	resp, err := h.sessionResponse(r, projectID, user, roles, account.EmailVerified, successor, session.AuthTime)
+	resp, err := h.sessionResponse(r, projectID, userInfoOf(account), roles, account.EmailVerified, successor, session.AuthTime)
 	if err != nil {
 		return nil, 500, errTokenGeneration
 	}
@@ -625,23 +645,30 @@ func (h *AuthHandler) startSession(r *http.Request, projectID string, user domai
 	return h.sessionResponse(r, projectID, user, roles, emailVerified, refreshToken, session.AuthTime)
 }
 
-// projectLabels are the display names a token carries next to projectId.
+// projectLabels are the display names a token carries next to projectId,
+// and whether its subject is the account id (EXC-662).
 type projectLabels struct {
-	orgSlug     string
-	projectName string
-	orgName     string
+	orgSlug       string
+	projectName   string
+	orgName       string
+	stableSubject bool
 }
 
 // labelsFor looks up display names from provisioning (cached per projectId).
-// Best-effort: an unreachable provisioning falls back to projectId/orgSlug so
-// sign-in never blocks on a metadata lookup.
+// Best-effort: an unreachable provisioning serves the last copy read, else
+// projectId/orgSlug, so sign-in never blocks on a metadata lookup.
 func (h *AuthHandler) labelsFor(r *http.Request, projectID string) projectLabels {
 	labels := projectLabels{orgSlug: chi.URLParam(r, "orgSlug"), projectName: projectID}
 	labels.orgName = labels.orgSlug
 	info, err := h.poolMgr.GetProjectInfo(r.Context(), projectID)
 	if err != nil {
-		return labels
+		cached, ok := h.poolMgr.CachedProjectInfo(projectID)
+		if !ok {
+			return labels
+		}
+		info = cached
 	}
+	labels.stableSubject = info.StableSubject
 	if info.ProjectName != "" {
 		labels.projectName = info.ProjectName
 	}
@@ -673,8 +700,18 @@ func endUserClaims(projectID string, labels projectLabels, user domain.UserInfo,
 	if err != nil {
 		return auth.Claims{}, err
 	}
+	subject := user.Email
+	var isGuest *bool
+	// Guests exist only while the flag is on, and have no address to name.
+	if labels.stableSubject || user.IsGuest {
+		subject = strconv.FormatInt(user.ID, 10)
+		guest := user.IsGuest
+		isGuest = &guest
+	}
 	return auth.Claims{
-		Sub:          user.Email,
+		Sub:          subject,
+		Email:        user.Email,
+		IsGuest:      isGuest,
 		UserID:       user.ID,
 		ProjectID:    projectID,
 		OrgSlug:      labels.orgSlug,

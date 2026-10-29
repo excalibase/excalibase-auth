@@ -31,6 +31,8 @@ const (
 	// A password change ends every pending address change, so the two are
 	// never asked for at once.
 	codeOneSensitiveChange = "password_and_email_separately"
+	// codeAddressRequired refuses a password on a guest: it could never sign in with one.
+	codeAddressRequired = "email_required"
 )
 
 // updateUserRequest is PATCH /user. App metadata is not a field: only the
@@ -79,7 +81,7 @@ func (h *AuthHandler) requireUserAPI(next http.Handler) http.Handler {
 
 func accountUser(profile store.Profile) domain.AccountUser {
 	return domain.AccountUser{ID: profile.ID, Email: profile.Email, FullName: profile.FullName,
-		EmailVerified: profile.EmailVerified, HasPassword: store.HasUsablePassword(profile.PasswordHash),
+		EmailVerified: profile.EmailVerified, IsGuest: profile.IsGuest, HasPassword: store.HasUsablePassword(profile.PasswordHash),
 		UserMetadata: profile.UserMetadata, AppMetadata: profile.AppMetadata, CreatedAt: profile.CreatedAt}
 }
 
@@ -211,11 +213,15 @@ func (h *AuthHandler) mayChangeSensitive(w http.ResponseWriter, r *http.Request,
 	if !update.sensitive() {
 		return true
 	}
+	if update.request.Password != nil && account.IsGuest {
+		httpError(w, codeAddressRequired, http.StatusBadRequest)
+		return false
+	}
 	if update.email != "" && store.AddressKey(update.email) == store.AddressKey(account.Email) {
 		httpError(w, codeSameEmail, http.StatusBadRequest)
 		return false
 	}
-	recent := recentlySignedIn(claims, time.Now())
+	recent := freshEnough(claims, account.IsGuest, time.Now())
 	if update.email != "" && !recent {
 		httpError(w, codeReauthRequired, http.StatusForbidden)
 		return false
@@ -326,7 +332,7 @@ func (h *AuthHandler) changePassword(r *http.Request, db store.Store, account st
 	if signedIn := middleware.ClaimsFromContext(r.Context()).AuthTime; signedIn != 0 {
 		session.AuthTime = time.Unix(signedIn, 0)
 	}
-	user := domain.UserInfo{ID: account.ID, Email: account.Email, FullName: account.FullName}
+	user := userInfoOf(account)
 	resp, err := h.startSession(r, projectID, user, accountRoles{role: account.Role, allowed: account.AllowedRoles}, account.EmailVerified, session)
 	if err != nil {
 		return nil, statusError{http.StatusInternalServerError, errTokenGeneration}

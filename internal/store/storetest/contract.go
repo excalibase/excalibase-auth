@@ -32,6 +32,8 @@ type Fixture struct {
 	SetEmail func(t *testing.T, id int64, email string)
 	// Reference makes an app table row reference the account.
 	Reference func(t *testing.T, id int64)
+	// Backdate makes the account, its last sign-in and its refresh tokens age old.
+	Backdate func(t *testing.T, id int64, age time.Duration)
 }
 
 var sequence atomic.Int64
@@ -78,6 +80,7 @@ func Run(t *testing.T, fx Fixture) {
 	t.Run("email sign-in", func(t *testing.T) { runEmailSignIn(t, fx) })
 	t.Run("identity linking", func(t *testing.T) { runLinking(t, fx) })
 	t.Run("account self-service", func(t *testing.T) { runAccount(t, fx) })
+	t.Run("guest accounts", func(t *testing.T) { runGuests(t, fx) })
 }
 
 func runUsers(t *testing.T, fx Fixture) {

@@ -72,6 +72,17 @@ func TestIntegration_MySQLStoreKeepsTheStoreContract(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		Backdate: func(t *testing.T, id int64, age time.Duration) {
+			seconds := int64(age.Seconds())
+			if _, err := root.Exec("UPDATE `auth`.`users` SET created_at = UTC_TIMESTAMP(6) - INTERVAL ? SECOND, "+
+				"last_login_at = UTC_TIMESTAMP(6) - INTERVAL ? SECOND WHERE id = ?", seconds, seconds, id); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := root.Exec("UPDATE `auth`.`refresh_tokens` SET created_at = UTC_TIMESTAMP(6) - INTERVAL ? SECOND "+
+				"WHERE user_id = ?", seconds, id); err != nil {
+				t.Fatal(err)
+			}
+		},
 		Count: func(t *testing.T, table string) int {
 			var n int
 			if err := root.QueryRow("SELECT COUNT(*) FROM `auth`.`" + table + "`").Scan(&n); err != nil {

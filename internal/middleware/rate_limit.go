@@ -110,6 +110,18 @@ func (rl *RateLimits) Register(next http.Handler) http.Handler {
 	})
 }
 
+// Guest throttles POST /guest per client IP only: the project-wide cap is
+// counted in the project's database, so guests leave /register's budget alone.
+func (rl *RateLimits) Guest(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if decision := rl.registerIP.Allow(rl.clientIP(r)); decision.Blocked() {
+			reject(w, routeRegister, decision)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // AllowSignup spends one of the project's sign-ups, the budget POST /register
 // draws on, for an account made elsewhere.
 func (rl *RateLimits) AllowSignup(projectID string) bool {

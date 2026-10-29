@@ -20,20 +20,18 @@ const profileQuery = "SELECT " + accountColumns + `, user_metadata, app_metadata
 func scanProfile(row rowScanner) (store.Profile, error) {
 	var (
 		profile      store.Profile
-		allowed      sql.NullString
+		read         accountRow
 		user, app    []byte
 		lastLoggedIn sql.NullTime
 	)
-	account := &profile.Account
-	if err := row.Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
-		&allowed, &account.Enabled, &account.EmailVerified, &user, &app, &profile.CreatedAt, &lastLoggedIn); err != nil {
+	if err := row.Scan(append(read.fields(), &user, &app, &profile.CreatedAt, &lastLoggedIn)...); err != nil {
 		return store.Profile{}, notFound(err)
 	}
-	roles, err := decodeRoles(allowed)
+	account, err := read.decoded()
 	if err != nil {
 		return store.Profile{}, err
 	}
-	account.AllowedRoles = roles
+	profile.Account = account
 	if lastLoggedIn.Valid {
 		profile.LastLoginAt = &lastLoggedIn.Time
 	}

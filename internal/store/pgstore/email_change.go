@@ -33,6 +33,22 @@ func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, l
 	if recent || today >= limits.PerAccountDay {
 		return none, store.ErrRateLimited
 	}
+	if change.GuestClient != "" {
+		// Guests' requests are counted one at a time, under the guest sign-up lock.
+		var locked, fromClient, guests int
+		if err := tx.QueryRow(ctx, "SELECT id FROM auth.guest_lock WHERE id = 1 FOR UPDATE").Scan(&locked); err != nil {
+			return none, err
+		}
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FILTER (WHERE guest_client = $1), count(*) FILTER (WHERE mailed)
+			 FROM auth.email_change_tokens WHERE guest_client IS NOT NULL AND created_at > NOW() - INTERVAL '1 day'`,
+			change.GuestClient).Scan(&fromClient, &guests); err != nil {
+			return none, err
+		}
+		if fromClient >= limits.PerGuestClientDay || guests >= limits.GuestPerProjectDay {
+			return none, store.ErrRateLimited
+		}
+	}
 	mail, err := changeMail(ctx, tx, change, limits.PerProjectDay)
 	if err != nil {
 		return none, err
@@ -44,9 +60,9 @@ func (s *Store) SaveEmailChange(ctx context.Context, change store.EmailChange, l
 		return none, err
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO auth.email_change_tokens (user_id, new_email, token_hash, mailed, expires_at)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		change.UserID, change.NewEmail, change.TokenHash, mail.Notice, change.ExpiresAt); err != nil {
+		`INSERT INTO auth.email_change_tokens (user_id, new_email, token_hash, mailed, expires_at, guest_client)
+		 VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''))`,
+		change.UserID, change.NewEmail, change.TokenHash, mail.Notice, change.ExpiresAt, change.GuestClient); err != nil {
 		return none, err
 	}
 	return mail, tx.Commit(ctx)
@@ -102,6 +118,9 @@ func (s *Store) ConfirmEmailChange(ctx context.Context, userID int64, tokenHash 
 	if _, err := tx.Exec(ctx,
 		"UPDATE auth.users SET email = $2, email_verified = true, email_verified_at = NOW(), updated_at = NOW() WHERE id = $1",
 		changed.UserID, changed.NewEmail); err != nil {
+		return store.ChangedEmail{}, err
+	}
+	if err := upgradeGuest(ctx, tx, changed.UserID, changed.NewEmail); err != nil {
 		return store.ChangedEmail{}, err
 	}
 	// Links mailed to the old address must not act on the account any more.

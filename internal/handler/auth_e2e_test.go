@@ -691,10 +691,12 @@ func TestIntegration_TokenGrant_APIKey(t *testing.T) {
 	if validateResp["valid"] != true {
 		t.Fatalf("api_key JWT should validate: %v", validateResp)
 	}
-	// validateResp["email"] is sourced from the JWT's "sub" claim, which we set
-	// to "apikey:<keyID>" for api-key tokens.
-	if sub, _ := validateResp["email"].(string); !strings.HasPrefix(sub, "apikey:") {
+	// An api-key token names its key in sub and has no address.
+	if sub, _ := validateResp["sub"].(string); !strings.HasPrefix(sub, "apikey:") {
 		t.Errorf("expected sub to start with 'apikey:', got %q", sub)
+	}
+	if _, ok := validateResp["email"]; ok {
+		t.Errorf("an api-key token validated with an address: %v", validateResp)
 	}
 
 	// 5. Revoking the key (set revoked_at) makes future exchanges fail.

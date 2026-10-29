@@ -198,15 +198,12 @@ func (s *Store) RecordAudit(ctx context.Context, event store.AuditEvent) error {
 // the exact one asked for.
 func scanAddressAccount(rows *sql.Rows) (store.Account, bool, error) {
 	var (
-		account store.Account
-		allowed sql.NullString
-		exact   bool
+		read  accountRow
+		exact bool
 	)
-	if err := rows.Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
-		&allowed, &account.Enabled, &account.EmailVerified, &exact); err != nil {
+	if err := rows.Scan(append(read.fields(), &exact)...); err != nil {
 		return store.Account{}, false, err
 	}
-	var err error
-	account.AllowedRoles, err = decodeRoles(allowed)
+	account, err := read.decoded()
 	return account, exact, err
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -61,7 +62,10 @@ func main() {
 	authHandler := handler.NewAuthHandler(poolMgr, jwtService, cfg.RefreshExpiration).
 		WithTrustedProxies(cfg.RateLimit.TrustedProxyCIDRs).
 		WithHasher(hasher).
-		WithCORS(cfg.CORSOrigins, cors.NewProvisioningProvider(cfg.ProvisioningURL, tokens, cfg.ProjectCORSTTL))
+		WithCORS(cfg.CORSOrigins, cors.NewProvisioningProvider(cfg.ProvisioningURL, tokens, cfg.ProjectCORSTTL)).
+		WithGuestInactivity(cfg.GuestInactiveDays)
+	// Each project's idle guests go once a day, and only while its guest flag is on.
+	authHandler.StartGuestSweeper(context.Background(), time.Hour)
 	if cfg.RateLimit.Enabled {
 		authHandler.WithRateLimits(custommw.NewRateLimits(custommw.RateLimitConfigFrom(cfg.RateLimit)))
 	} else {

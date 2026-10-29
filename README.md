@@ -43,6 +43,7 @@ All endpoints are scoped under `/auth/{orgSlug}/{projectName}/`:
 |--------|------|-------------|
 | `POST` | `/auth/{orgSlug}/{projectName}/register` | Register a new user |
 | `POST` | `/auth/{orgSlug}/{projectName}/login` | Authenticate and receive tokens |
+| `POST` | `/auth/{orgSlug}/{projectName}/guest` | Start a session for a new guest account, with no address (optional Turnstile token) |
 | `POST` | `/auth/{orgSlug}/{projectName}/validate` | Validate a JWT and return claims |
 | `POST` | `/auth/{orgSlug}/{projectName}/refresh` | Exchange refresh token for new token pair |
 | `POST` | `/auth/{orgSlug}/{projectName}/logout` | Revoke a refresh token; `?scope=others` or `?scope=global` (with the access token) ends the user's other or all sessions |
@@ -111,6 +112,7 @@ curl -X POST http://localhost:24000/auth/my-org/my-project/validate \
 ```json
 {
   "valid": true,
+  "sub": "1",
   "email": "alice@example.com",
   "userId": 1,
   "projectId": "my-org/my-project",
@@ -118,7 +120,7 @@ curl -X POST http://localhost:24000/auth/my-org/my-project/validate \
 }
 ```
 
-`userId` is absent for api-key tokens.
+`userId` and `email` are absent for api-key tokens, `email` also for a guest.
 
 ### Refresh
 
@@ -181,6 +183,16 @@ Answering only while the control plane's `authuser` flag is on (`userApiEnabled`
 - `POST /logout?scope=others|global` with the access token: `others` needs the body's `refreshToken` to be a live session of the same user and keeps it.
 
 Metadata never goes into the access token: the engine turns every claim into a permission variable.
+
+### Guest accounts
+
+`POST /guest {"captchaToken"?}` makes an account with no address and no password, role `guest` (`allowed_roles: ["guest"]`), and answers a session whose `user` carries `isGuest: true`. It answers only while the control plane's `authguest` flag is on and the project switched guests on (`guestSignInEnabled` on `/info`; `404 method_not_enabled` otherwise, `503` when the settings cannot be read, `403 signup_disabled` while the project takes no new accounts). The `guest` role has no grants: until the project gives it permissions, a guest reaches nothing (ADR 0036). `anon` stays the role of the publishable key, which has no account.
+
+- Abuse limits, counted in the project's database: 30 sign-ups an hour per client (an IPv4 address or an IPv6 /64) and 1000 a day per project (`429 rate_limited`), plus the per-IP `/register` budget; guests leave `/register`'s per-project budget to real sign-ups.
+- With `guestCaptchaEnabled` the request needs a Cloudflare Turnstile token, checked with the project's secret from the vault (`projects/{id}/auth/captcha`): `400 captcha_required` / `captcha_failed`, `503 captcha_unavailable` when the secret or Turnstile cannot be reached.
+- A guest's session refreshes while the flag is on, whatever the project's switch (the switch only stops new guests); with the flag off a refresh answers `403 method_not_enabled`. Email verification never applies to a guest.
+- A guest becomes a full account, keeping its id, by proving an address (`PATCH /user {email}` then `/user/email/confirm`, flag `authuser`) or by linking Google, GitHub or an address (`/user/identities/*`). It takes the address, proven, and the role `guest` becomes `user`; a role the project gave it stays. An address another proven account holds is refused (`409`). A guest has nothing to sign in again with, so for these routes a token issued in the last 5 minutes stands for a recent sign-in: the app refreshes first. A guest's address changes are also capped at 5 a day per client and half the project's 200 a day, so free guests cannot spend the mail full accounts need; an address another account linked is refused to a guest's provider link (`409`); a password before an address is `400 email_required`.
+- Guests that neither signed in nor refreshed for `GUEST_INACTIVE_DAYS` (30) are deleted once a day, per project, only while the flag is on; one an app table references is kept.
 
 ### End-user roles
 
@@ -281,6 +293,7 @@ All configuration is via environment variables:
 | `REQUEST_METRICS_ENABLED` | `false` | `true` serves each project's request count, outcome and latency histogram on an internal listener for Studio's request charts. Off: no listener, nothing recorded |
 | `REQUEST_METRICS_PORT` | `9465` | That listener's port. It answers only `GET /metrics`; the chart admits only provisioning to it |
 | `REQUEST_METRICS_MAX_PROJECTS` | `1000` | Projects recorded per process; only projects whose vault record resolved are counted |
+| `GUEST_INACTIVE_DAYS` | `30` | Days a guest account may go without signing in or refreshing before the daily sweep deletes it (1 to 3650) |
 | `TENANT_DB_SSLMODE` | `verify-full` | `disable` (docker AIO only: password login, no TLS) or a TLS mode. `require`, `verify-ca` and `verify-full` all mean verify-full with the client certificate from the vault record (`sslcert`/`sslkey`/`sslrootcert`); a record without them is refused. `prefer`/`allow` and anything else fail startup |
 
 ### CORS
@@ -400,7 +413,9 @@ Tokens are signed with ECDSA P-256 (ES256). The private key is fetched from the 
 
 ```json
 {
-  "sub": "alice@example.com",
+  "sub": "1",
+  "email": "alice@example.com",
+  "is_guest": false,
   "userId": 1,
   "projectId": "my-org/my-project",
   "orgSlug": "my-org",
@@ -423,9 +438,12 @@ may act as and always contains `role`.
 
 | Token | `role` / `allowed_roles` | `scope` | `userId` | `sub` |
 |-------|--------------------------|---------|----------|-------|
-| password login, registration, refresh | `users.role` / `users.allowed_roles` (or `[role]` when unset) | `authenticated` | the account id | email |
+| password login, registration, refresh | `users.role` / `users.allowed_roles` (or `[role]` when unset) | `authenticated` | the account id | the account id, or its address while `stableSubject` is off |
+| guest | `guest` / `["guest"]` until changed | `authenticated` | the account id | the account id |
 | publishable api key | `anon` / `["anon"]` | `public` | absent | `apikey:<id>` |
 | secret api key | `service` / `["service"]` | `service` | absent | `apikey:<id>` |
+
+`email` is the account's address, absent when it has none. While the control plane sends `stableSubject` (flag `authguest`), `sub` is the account id, which an address change does not move, and `is_guest` says whether the account is a guest; with it off `sub` is the address and `is_guest` is absent.
 
 An account's roles are read from `users.role` and `users.allowed_roles` at every login and refresh.
 Every name must match `^[a-z][a-z0-9_]{0,62}$` and must not be reserved: `anon`, `service`, the platform

@@ -76,12 +76,17 @@ func (s *Store) AccountByEmail(ctx context.Context, email string) (store.Account
 }
 
 // accountColumns reads an account; a provider-made account has no password.
-const accountColumns = "id, COALESCE(email, ''), COALESCE(password, ''), full_name, role, allowed_roles, enabled, email_verified"
+const accountColumns = "id, COALESCE(email, ''), COALESCE(password, ''), full_name, role, allowed_roles, enabled, email_verified, is_guest"
+
+// accountFields are the scan targets of accountColumns, in order.
+func accountFields(account *store.Account) []any {
+	return []any{&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
+		&account.AllowedRoles, &account.Enabled, &account.EmailVerified, &account.IsGuest}
+}
 
 func scanAccount(row pgx.Row) (store.Account, error) {
 	var account store.Account
-	err := row.Scan(&account.ID, &account.Email, &account.PasswordHash, &account.FullName, &account.Role,
-		&account.AllowedRoles, &account.Enabled, &account.EmailVerified)
+	err := row.Scan(accountFields(&account)...)
 	return account, notFound(err)
 }
 
@@ -111,7 +116,7 @@ func (s *Store) MarkVerified(ctx context.Context, userID int64, keepPassword boo
 	if err := tx.QueryRow(ctx,
 		`UPDATE auth.users SET email_verified = true, email_verified_at = NOW(), updated_at = NOW(),
 		        password = CASE WHEN $2 THEN password ELSE $3 END
-		 WHERE id = $1 RETURNING email`,
+		 WHERE id = $1 RETURNING COALESCE(email, '')`,
 		userID, keepPassword, replacement,
 	).Scan(&address); err != nil {
 		return "", notFound(err)
@@ -128,8 +133,7 @@ func (s *Store) MarkVerified(ctx context.Context, userID int64, keepPassword boo
 
 func (s *Store) ListUsers(ctx context.Context, limit, offset int) ([]domain.ManagedUser, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, email, role, allowed_roles, enabled, email_verified
-		 FROM auth.users ORDER BY id LIMIT $1 OFFSET $2`, limit, offset)
+		"SELECT "+managedUserColumns+" FROM auth.users ORDER BY id LIMIT $1 OFFSET $2", limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -145,9 +149,11 @@ func (s *Store) ListUsers(ctx context.Context, limit, offset int) ([]domain.Mana
 	return users, rows.Err()
 }
 
+const managedUserColumns = "id, COALESCE(email, ''), role, allowed_roles, enabled, email_verified, is_guest"
+
 func scanManagedUser(row pgx.Row) (domain.ManagedUser, error) {
 	var user domain.ManagedUser
-	err := row.Scan(&user.ID, &user.Email, &user.Role, &user.AllowedRoles, &user.Enabled, &user.EmailVerified)
+	err := row.Scan(&user.ID, &user.Email, &user.Role, &user.AllowedRoles, &user.Enabled, &user.EmailVerified, &user.IsGuest)
 	if user.AllowedRoles == nil {
 		user.AllowedRoles = []string{user.Role}
 	}
@@ -162,8 +168,7 @@ func (s *Store) ApplyRoleChange(ctx context.Context, change store.RoleChange) (d
 	defer tx.Rollback(ctx)
 
 	before, err := scanManagedUser(tx.QueryRow(ctx,
-		`SELECT id, email, role, allowed_roles, enabled, email_verified
-		 FROM auth.users WHERE id = $1 FOR UPDATE`, change.UserID))
+		"SELECT "+managedUserColumns+" FROM auth.users WHERE id = $1 FOR UPDATE", change.UserID))
 	if err != nil {
 		return domain.ManagedUser{}, notFound(err)
 	}
@@ -235,12 +240,11 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 	if signedIn != nil {
 		session.AuthTime = *signedIn
 	}
-	var account store.Account
-	if err := tx.QueryRow(ctx,
-		"SELECT id, email, full_name, role, allowed_roles, email_verified FROM users WHERE id = $1", userID,
-	).Scan(&account.ID, &account.Email, &account.FullName, &account.Role, &account.AllowedRoles, &account.EmailVerified); err != nil {
+	account, err := scanAccount(tx.QueryRow(ctx, "SELECT "+accountColumns+" FROM auth.users WHERE id = $1", userID))
+	if err != nil {
 		return store.Account{}, store.RefreshSession{}, store.ErrNoAccount
 	}
+	account.PasswordHash = ""
 	if err := accept(account); err != nil {
 		return store.Account{}, store.RefreshSession{}, err
 	}

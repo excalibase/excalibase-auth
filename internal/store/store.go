@@ -67,6 +67,9 @@ type Account struct {
 	AllowedRoles  []string // nil means only Role
 	Enabled       bool
 	EmailVerified bool
+	// IsGuest marks an account made with no address; it has the guest role
+	// until it proves an address or links a provider.
+	IsGuest bool
 }
 
 // RefreshSession is one login: every token rotated from it shares the family
@@ -269,6 +272,24 @@ type OTPLookup struct {
 	CodeChallenge string
 }
 
+// LinkResult is what a link changed besides adding the identity.
+type LinkResult struct {
+	// Deleted are the unproven accounts that answered to the linked address.
+	Deleted []int64
+	// Upgraded is true when the account was a guest and is now a full account.
+	Upgraded bool
+}
+
+// GuestRole is the role a guest account starts with; it has no grants
+// until the project gives it some.
+const GuestRole = "guest"
+
+// GuestLimits bound guest sign-ups, counted from rows every replica shares.
+type GuestLimits struct {
+	PerClientHour int
+	PerProjectDay int
+}
+
 // AuditEvent is one row of the project's sign-in trail.
 type AuditEvent struct {
 	UserID int64 // zero when no account is known
@@ -351,7 +372,9 @@ type Store interface {
 	// when any account holds the identity, or, for an address, when another
 	// proven account answers to it; the unproven ones answering to it are
 	// deleted and their ids returned.
-	LinkIdentity(ctx context.Context, userID int64, claim IdentityClaim) (deleted []int64, err error)
+	// A guest is upgraded by the link: it takes the identity's address,
+	// proven, and leaves the guest role.
+	LinkIdentity(ctx context.Context, userID int64, claim IdentityClaim) (LinkResult, error)
 	ListIdentities(ctx context.Context, userID int64) ([]Identity, error)
 	// UnlinkIdentity removes one of the account's identities unless no other
 	// identity nor a password would be left: ErrLastSignInMethod.
@@ -383,6 +406,16 @@ type Store interface {
 	// DeleteUser removes the account and everything of it in the auth tables;
 	// ErrUserReferenced when an app table still references it.
 	DeleteUser(ctx context.Context, userID int64) error
+
+	// CreateGuest makes an account with no address, no password and the guest
+	// role, counting the sign-up against the client's and the project's
+	// budgets: ErrRateLimited past either, and then nothing is written.
+	CreateGuest(ctx context.Context, client string, limits GuestLimits) (Account, error)
+	// ClaimGuestCleanup is true for one caller per interval across replicas.
+	ClaimGuestCleanup(ctx context.Context, every time.Duration) (bool, error)
+	// DeleteInactiveGuests removes up to max guests with no sign-in nor
+	// refresh since cutoff; one an app table references is skipped.
+	DeleteInactiveGuests(ctx context.Context, cutoff time.Time, max int) (int, error)
 
 	CreateAPIKey(ctx context.Context, hash, prefix, keyType, name string) (int64, time.Time, error)
 	ListAPIKeys(ctx context.Context) ([]APIKeyListing, error)
