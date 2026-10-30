@@ -79,6 +79,10 @@ type RefreshSession struct {
 	Expiry   time.Time
 	// AuthTime is when the owner signed in; zero for sessions older than it.
 	AuthTime time.Time
+	// AAL is the session's assurance level (AAL1 when zero); AMR the methods
+	// that reached it, first factor first.
+	AAL int
+	AMR []string
 }
 
 // RefreshState is what a presented refresh token's row says about it.
@@ -416,6 +420,39 @@ type Store interface {
 	// DeleteInactiveGuests removes up to max guests with no sign-in nor
 	// refresh since cutoff; one an app table references is skipped.
 	DeleteInactiveGuests(ctx context.Context, cutoff time.Time, max int) (int, error)
+
+	// ElevateRefreshToken spends the account's live token and stores its
+	// successor in the same session at AAL2 with method added to its AMR.
+	// ErrNotFound unless the token is live and the account's.
+	ElevateRefreshToken(ctx context.Context, userID int64, presented, successor, method string) (Account, RefreshSession, error)
+
+	// CreateFactor stores an unverified factor and drops the account's stale
+	// unverified ones. ErrTooManyFactors or ErrFactorNameTaken.
+	CreateFactor(ctx context.Context, factor NewFactor, limits MFALimits) (Factor, error)
+	ListFactors(ctx context.Context, userID int64) (FactorListing, error)
+	// HasVerifiedFactor is whether the account has turned MFA on.
+	HasVerifiedFactor(ctx context.Context, userID int64) (bool, error)
+	// CreateChallenge opens a challenge for one of the account's factors;
+	// ErrNotFound for a factor that is not the account's.
+	CreateChallenge(ctx context.Context, userID int64, factorID, challengeID, ip string, expiresAt time.Time) error
+	// VerifyFactor checks a code under the factor's lock: past the failure
+	// budget ErrTooManyAttempts and nothing is checked; a code check refuses
+	// counts a failure and answers ErrInvalidCode. A match spends the step and
+	// the challenge and verifies the factor. ErrNotFound for another account's
+	// factor; ErrInvalidChallenge for a challenge that is not live and the factor's.
+	VerifyFactor(ctx context.Context, attempt FactorAttempt, limits MFALimits, check FactorCheck) (VerifiedFactor, error)
+	// DeleteFactor removes one of the account's factors; with no verified
+	// factor left the recovery codes go too. ErrNotFound otherwise.
+	DeleteFactor(ctx context.Context, userID int64, factorID string) error
+	// ReplaceRecoveryCodes stores a new set of code hashes, ending the old set.
+	ReplaceRecoveryCodes(ctx context.Context, userID int64, hashes []string) error
+	// RedeemRecoveryCode spends an unspent code of an account that has a
+	// verified factor, under the account's failure budget: ErrTooManyAttempts,
+	// or ErrInvalidCode after counting the failure.
+	RedeemRecoveryCode(ctx context.Context, userID int64, hash string, limits MFALimits) error
+	// ResetMFA removes every factor and recovery code of the account and ends
+	// its sessions; ErrNotFound for an unknown account.
+	ResetMFA(ctx context.Context, userID int64) error
 
 	CreateAPIKey(ctx context.Context, hash, prefix, keyType, name string) (int64, time.Time, error)
 	ListAPIKeys(ctx context.Context) ([]APIKeyListing, error)

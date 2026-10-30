@@ -104,6 +104,10 @@ type Claims struct {
 	Email string `json:"email,omitempty"`
 	// IsGuest is emitted only when set: true for a guest account.
 	IsGuest *bool `json:"is_guest,omitempty"`
+	// AAL is the session's assurance level ("aal1" or "aal2") and AMR the
+	// methods that reached it; both are emitted only while MFA is on.
+	AAL string   `json:"aal,omitempty"`
+	AMR []string `json:"amr,omitempty"`
 	// IssuedAt and ExpiresAt are read back by Verify (unix seconds).
 	IssuedAt  int64 `json:"-"`
 	ExpiresAt int64 `json:"-"`
@@ -194,6 +198,12 @@ func (s *JWTService) Sign(claims Claims) (string, error) {
 	}
 	if claims.IsGuest != nil {
 		mc["is_guest"] = *claims.IsGuest
+	}
+	if claims.AAL != "" {
+		mc["aal"] = claims.AAL
+		if len(claims.AMR) > 0 {
+			mc["amr"] = claims.AMR
+		}
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodES256, mc).SignedString(s.privateKey)
 }
@@ -326,7 +336,10 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	if guest, ok := mapClaims["is_guest"].(bool); ok {
 		isGuest = &guest
 	}
+	aal, _ := mapClaims["aal"].(string)
 	return &Claims{
+		AAL:           aal,
+		AMR:           stringsClaim(mapClaims["amr"]),
 		Email:         email,
 		IsGuest:       isGuest,
 		AuthTime:      int64(authTime),

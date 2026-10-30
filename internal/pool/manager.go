@@ -58,6 +58,9 @@ type ProjectInfo struct {
 	GuestCaptchaEnabled bool  `json:"guestCaptchaEnabled,omitempty"`
 	// StableSubject makes a token's sub the account id instead of its address.
 	StableSubject bool `json:"stableSubject,omitempty"`
+	// MFAEnabled turns on TOTP second factors and the aal/amr claims; sent
+	// only while the control plane's authmfa flag is on.
+	MFAEnabled bool `json:"mfaEnabled,omitempty"`
 }
 
 type infoEntry struct {

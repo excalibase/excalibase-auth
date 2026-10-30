@@ -84,7 +84,7 @@ func (h *AuthHandler) SignInAsGuest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.recordAudit(r.Context(), db, projectID, store.AuditEvent{UserID: account.ID, Event: "sign_up", Method: "guest", IP: clientIP})
-	resp, err := h.generateAuthResponse(r, projectID, userInfoOf(account), accountRoles{role: account.Role, allowed: account.AllowedRoles}, false)
+	resp, err := h.generateAuthResponse(r, projectID, userInfoOf(account), accountRoles{role: account.Role, allowed: account.AllowedRoles}, false, methodGuest)
 	if err != nil {
 		httpError(w, errTokenGeneration.Error(), http.StatusInternalServerError)
 		return

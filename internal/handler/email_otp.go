@@ -272,7 +272,7 @@ func (h *AuthHandler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = db.TouchLastLogin(r.Context(), account.ID)
 	h.audit(r.Context(), db, projectID, store.AuditEvent{UserID: account.ID, Method: otp.Kind, IP: h.clientIP(r)}, outcome)
-	resp, err := h.generateAuthResponse(r, projectID, userInfoOf(account), accountRoles{role: account.Role, allowed: account.AllowedRoles}, true)
+	resp, err := h.generateAuthResponse(r, projectID, userInfoOf(account), accountRoles{role: account.Role, allowed: account.AllowedRoles}, true, otpMethod(otp.Kind))
 	if err != nil {
 		httpError(w, errTokenGeneration.Error(), http.StatusInternalServerError)
 		return

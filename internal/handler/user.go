@@ -123,7 +123,8 @@ func (h *AuthHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	claims := middleware.ClaimsFromContext(r.Context())
 	account, ok := h.userAccount(w, r, db, claims.UserID)
-	if !ok || !h.mayChangeSensitive(w, r, db, update, claims, account) {
+	if !ok || (update.sensitive() && !h.enrolledNeedsAAL2(w, r, info, db, claims)) ||
+		!h.mayChangeSensitive(w, r, db, update, claims, account) {
 		return
 	}
 	result, ok := h.applyUserUpdate(w, r, db, update, account, redirectTo)
@@ -327,10 +328,11 @@ func (h *AuthHandler) changePassword(r *http.Request, db store.Store, account st
 	projectID := projectKey(r)
 	h.recordAudit(r.Context(), db, projectID, store.AuditEvent{UserID: account.ID, Event: "password_changed", IP: h.clientIP(r)})
 	log.Printf("auth.user.password_changed project=%s userId=%d", safeLog(projectID), account.ID)
-	session := h.newRefreshSession()
+	caller := middleware.ClaimsFromContext(r.Context())
+	session := carriedSession(h.newRefreshSession(methodPassword), caller)
 	session.AuthTime = time.Time{}
-	if signedIn := middleware.ClaimsFromContext(r.Context()).AuthTime; signedIn != 0 {
-		session.AuthTime = time.Unix(signedIn, 0)
+	if caller.AuthTime != 0 {
+		session.AuthTime = time.Unix(caller.AuthTime, 0)
 	}
 	user := userInfoOf(account)
 	resp, err := h.startSession(r, projectID, user, accountRoles{role: account.Role, allowed: account.AllowedRoles}, account.EmailVerified, session)

@@ -37,6 +37,7 @@ func (h *AuthHandler) UserRoutes(r chi.Router) {
 	r.Get("/{userId}", h.GetManagedUser)
 	r.With(h.limit(rateLimitToken)).Patch("/{userId}", h.UpdateManagedUser)
 	r.With(h.limit(rateLimitToken)).Delete("/{userId}", h.DeleteManagedUser)
+	r.With(h.limit(rateLimitToken)).Delete("/{userId}/factors", h.ResetUserMFA)
 }
 
 // requireUserManager admits only callers allowed to manage the project's

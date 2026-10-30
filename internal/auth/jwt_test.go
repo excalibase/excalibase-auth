@@ -418,3 +418,31 @@ func TestSignVerify_EmailAndGuestClaimsRoundTripAndAreOmittedWhenUnset(t *testin
 		t.Fatalf("verify = %+v", claims)
 	}
 }
+
+func TestSignVerify_AssuranceClaimsRoundTripAndAreOmittedWhenUnset(t *testing.T) {
+	svc, _ := NewJWTService(testKeyPEM(t), "excalibase", 3600)
+	signed, err := svc.Sign(Claims{Sub: "7", UserID: 7, ProjectID: "p", Role: "user", AAL: "aal2", AMR: []string{"password", "totp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := parseUnverified(t, signed)
+	if raw["aal"] != "aal2" {
+		t.Fatalf("aal = %v", raw["aal"])
+	}
+	if methods, _ := raw["amr"].([]interface{}); len(methods) != 2 || methods[0] != "password" || methods[1] != "totp" {
+		t.Fatalf("amr = %v", raw["amr"])
+	}
+	claims, err := svc.Verify(signed)
+	if err != nil || claims.AAL != "aal2" || len(claims.AMR) != 2 || claims.AMR[1] != "totp" {
+		t.Fatalf("verify = %+v %v", claims, err)
+	}
+
+	signed, _ = svc.Sign(Claims{Sub: "8", UserID: 8, ProjectID: "p", Role: "user", AMR: []string{"password"}})
+	raw = parseUnverified(t, signed)
+	if _, ok := raw["aal"]; ok {
+		t.Fatalf("aal emitted while unset: %v", raw)
+	}
+	if _, ok := raw["amr"]; ok {
+		t.Fatalf("amr emitted without a level: %v", raw)
+	}
+}
