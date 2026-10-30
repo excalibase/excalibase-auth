@@ -43,7 +43,10 @@ type Config struct {
 // RequestMetrics is the per-project request counting provisioning scrapes for
 // Studio's charts (EXC-656), served on its own internal port only when enabled.
 type RequestMetrics struct {
-	Enabled     bool
+	Enabled bool
+	// Address is the one address the listener binds; empty is every
+	// interface. A single host names the platform-only network (EXC-673).
+	Address     string
 	Port        string
 	MaxProjects int
 }
@@ -57,6 +60,7 @@ func loadRequestMetrics() RequestMetrics {
 	}
 	return RequestMetrics{
 		Enabled:     os.Getenv("REQUEST_METRICS_ENABLED") == "true",
+		Address:     strings.TrimSpace(os.Getenv("REQUEST_METRICS_ADDRESS")),
 		Port:        envOr("REQUEST_METRICS_PORT", "9465"),
 		MaxProjects: maxProjects,
 	}
