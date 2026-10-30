@@ -16,12 +16,15 @@ var errRefreshTokenStore = errors.New("failed to store refresh token")
 // newRefreshSession starts one login: every token rotated from it shares the
 // family, the expiry and the sign-in time, so rotation can neither outlive the
 // login, hide a replay nor make the sign-in look recent.
-func (h *AuthHandler) newRefreshSession() store.RefreshSession {
+// method is how the user signed in: the session's first AMR entry, at AAL1.
+func (h *AuthHandler) newRefreshSession(method string) store.RefreshSession {
 	now := time.Now()
 	return store.RefreshSession{
 		FamilyID: uuid.New(),
 		Expiry:   now.Add(time.Duration(h.refreshExp) * time.Second),
 		AuthTime: now,
+		AAL:      store.AAL1,
+		AMR:      []string{method},
 	}
 }
 

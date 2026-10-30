@@ -427,3 +427,38 @@ func TestMigrate_GuestAccountColumnsComeAndGo(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrate_MFATablesAndSessionLevelComeAndGo(t *testing.T) {
+	connStr, cleanup := setupTestDB(t)
+	defer cleanup()
+	if err := Run(context.Background(), poolFor(t, connStr)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mfaTables := []string{"mfa_factors", "mfa_challenges", "mfa_recovery_codes", "mfa_failures"}
+	for _, table := range mfaTables {
+		if !tableExists(t, connStr, "auth", table) {
+			t.Errorf("auth.%s missing after migration", table)
+		}
+	}
+	for _, column := range []string{"aal", "amr"} {
+		if !columnExists(t, connStr, "refresh_tokens", column) {
+			t.Errorf("auth.refresh_tokens.%s missing after migration", column)
+		}
+	}
+	m, err := newMigrate(poolFor(t, connStr))
+	if err != nil {
+		t.Fatalf("newMigrate: %v", err)
+	}
+	defer m.Close()
+	if err := m.Migrate(13); err != nil {
+		t.Fatalf("migrate down to 13: %v", err)
+	}
+	for _, table := range mfaTables {
+		if tableExists(t, connStr, "auth", table) {
+			t.Errorf("auth.%s left after the down migration", table)
+		}
+	}
+	if columnExists(t, connStr, "refresh_tokens", "aal") {
+		t.Error("auth.refresh_tokens.aal left after the down migration")
+	}
+}

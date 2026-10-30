@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"github.com/excalibase/auth/internal/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -188,7 +189,7 @@ func TestAuthResponses_ExpMatchesAdvertisedTTL(t *testing.T) {
 		context.WithValue(context.Background(), chi.RouteCtxKey, rctx),
 	)
 
-	password, err := h.sessionResponse(req, "test-project", domain.UserInfo{ID: 42, Email: "alice@example.com"}, accountRoles{role: "user"}, false, "refresh", time.Time{})
+	password, err := h.sessionResponse(req, "test-project", domain.UserInfo{ID: 42, Email: "alice@example.com"}, accountRoles{role: "user"}, false, "refresh", store.RefreshSession{})
 	if err != nil {
 		t.Fatalf("sessionResponse: %v", err)
 	}

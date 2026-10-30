@@ -336,11 +336,12 @@ func (s *Store) ApplyRoleChange(ctx context.Context, change store.RoleChange) (d
 	return after, nil
 }
 
-const insertRefreshToken = `INSERT INTO refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, created_at, revoked)
-	VALUES (?, ?, ?, ?, ?, NOW(6), FALSE)`
+const insertRefreshToken = `INSERT INTO refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, aal, amr, created_at, revoked)
+	VALUES (?, ?, ?, ?, ?, ?, ?, NOW(6), FALSE)`
 
 func (s *Store) InsertRefreshToken(ctx context.Context, hash string, userID int64, session store.RefreshSession) error {
-	_, err := s.db.ExecContext(ctx, insertRefreshToken, hash, session.FamilyID.String(), userID, session.Expiry, authTime(session))
+	_, err := s.db.ExecContext(ctx, insertRefreshToken, hash, session.FamilyID.String(), userID, session.Expiry, authTime(session),
+		store.LevelOf(session.AAL), store.JoinAMR(session.AMR))
 	return err
 }
 
@@ -355,6 +356,25 @@ func authTime(session store.RefreshSession) any {
 // RotateRefreshToken locks the live row before revoking it: a concurrent
 // rotation waits, then reads it revoked, so exactly one succeeds.
 func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor string, accept func(store.Account) error) (store.Account, store.RefreshSession, error) {
+	return s.rotate(ctx, presented, successor, func(account store.Account, _ *store.RefreshSession) error {
+		return accept(account)
+	})
+}
+
+func (s *Store) ElevateRefreshToken(ctx context.Context, userID int64, presented, successor, method string) (store.Account, store.RefreshSession, error) {
+	return s.rotate(ctx, presented, successor, func(account store.Account, session *store.RefreshSession) error {
+		if account.ID != userID {
+			return store.ErrNotFound
+		}
+		session.AAL = store.AAL2
+		session.AMR = store.WithMethod(session.AMR, method)
+		return nil
+	})
+}
+
+// rotate spends the live token and stores its successor in the session that
+// shape leaves; shape's error rolls everything back.
+func (s *Store) rotate(ctx context.Context, presented, successor string, shape func(store.Account, *store.RefreshSession) error) (store.Account, store.RefreshSession, error) {
 	var (
 		account store.Account
 		session store.RefreshSession
@@ -364,15 +384,17 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 			userID   int64
 			family   string
 			signedIn sql.NullTime
+			amr      string
 		)
 		if err := tx.QueryRowContext(ctx,
-			`SELECT user_id, family_id, expiry_date, last_auth_at FROM refresh_tokens
+			`SELECT user_id, family_id, expiry_date, last_auth_at, aal, amr FROM refresh_tokens
 			 WHERE token_hash = ? AND revoked = FALSE AND expiry_date > NOW(6) FOR UPDATE`,
 			presented,
-		).Scan(&userID, &family, &session.Expiry, &signedIn); err != nil {
+		).Scan(&userID, &family, &session.Expiry, &signedIn, &session.AAL, &amr); err != nil {
 			return notFound(err)
 		}
 		session.AuthTime = signedIn.Time
+		session.AMR = store.SplitAMR(amr)
 		familyID, err := uuid.Parse(family)
 		if err != nil {
 			return err
@@ -389,10 +411,11 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 		if account, err = s.rotatingAccount(ctx, tx, userID); err != nil {
 			return err
 		}
-		if err := accept(account); err != nil {
+		if err := shape(account, &session); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, insertRefreshToken, successor, session.FamilyID.String(), userID, session.Expiry, authTime(session))
+		_, err = tx.ExecContext(ctx, insertRefreshToken, successor, session.FamilyID.String(), userID, session.Expiry, authTime(session),
+			store.LevelOf(session.AAL), store.JoinAMR(session.AMR))
 		return err
 	})
 	if err != nil {

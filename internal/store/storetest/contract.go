@@ -81,6 +81,7 @@ func Run(t *testing.T, fx Fixture) {
 	t.Run("identity linking", func(t *testing.T) { runLinking(t, fx) })
 	t.Run("account self-service", func(t *testing.T) { runAccount(t, fx) })
 	t.Run("guest accounts", func(t *testing.T) { runGuests(t, fx) })
+	t.Run("multi-factor", func(t *testing.T) { runMFA(t, fx) })
 }
 
 func runUsers(t *testing.T, fx Fixture) {

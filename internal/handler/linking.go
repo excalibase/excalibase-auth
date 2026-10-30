@@ -212,7 +212,7 @@ func (h *AuthHandler) StartProviderLink(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	db, ok := h.storeFor(w, r)
-	if !ok || !linkableFresh(w, r, db, claims) {
+	if !ok || !linkableFresh(w, r, db, claims) || !h.enrolledNeedsAAL2(w, r, info, db, claims) {
 		return
 	}
 	ticket, _, err := token.New()
@@ -291,7 +291,7 @@ func (h *AuthHandler) StartAddressLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	db, ok := h.storeFor(w, r)
-	if !ok || !linkableFresh(w, r, db, claims) {
+	if !ok || !linkableFresh(w, r, db, claims) || !h.enrolledNeedsAAL2(w, r, info, db, claims) {
 		return
 	}
 	projectID := projectKey(r)
@@ -405,7 +405,7 @@ func (h *AuthHandler) accountSession(r *http.Request, db store.Store, projectID 
 	}
 	_ = db.TouchLastLogin(r.Context(), account.ID)
 	user := userInfoOf(account)
-	session := h.newRefreshSession()
+	session := h.newRefreshSession(methodOAuth)
 	if !signedIn {
 		session.AuthTime = time.Time{}
 	}
@@ -419,7 +419,8 @@ func (h *AuthHandler) accountSession(r *http.Request, db store.Store, projectID 
 // UnlinkIdentity removes one of the caller's identities unless it is the last
 // way the account signs in.
 func (h *AuthHandler) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.linkingSettings(w, r); !ok {
+	info, ok := h.linkingSettings(w, r)
+	if !ok {
 		return
 	}
 	claims, ok := freshEndUser(w, r)
@@ -432,7 +433,7 @@ func (h *AuthHandler) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db, ok := h.storeFor(w, r)
-	if !ok {
+	if !ok || !h.enrolledNeedsAAL2(w, r, info, db, claims) {
 		return
 	}
 	removed, err := db.UnlinkIdentity(r.Context(), claims.UserID, identityID)

@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -167,5 +168,46 @@ func TestGuestSwitchReadsAsOffWhileTheFlagIsOff(t *testing.T) {
 		if c.info.GuestsOn() != c.flag || c.info.GuestSignInOn() != c.enabled {
 			t.Errorf("%+v: on=%v enabled=%v", c.info, c.info.GuestsOn(), c.info.GuestSignInOn())
 		}
+	}
+}
+
+func TestMFAKeyReadsTheProjectsVaultEntryAndRefusesABadOne(t *testing.T) {
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		switch r.URL.Path {
+		case "/vault/secrets/projects/p1/auth/mfa":
+			_, _ = w.Write([]byte(`{"key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}`))
+		case "/vault/secrets/projects/short/auth/mfa":
+			_, _ = w.Write([]byte(`{"key":"c2hvcnQ="}`))
+		case "/vault/secrets/projects/garbled/auth/mfa":
+			_, _ = w.Write([]byte(`{"key":"%%%"}`))
+		default:
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer srv.Close()
+	mgr := NewManager(srv.URL, token.Literal("pat"), time.Hour)
+	ctx := context.Background()
+	if key, err := mgr.MFAKey(ctx, "p1"); err != nil || string(key) != "0123456789abcdef0123456789abcdef" || path != "/vault/secrets/projects/p1/auth/mfa" {
+		t.Fatalf("key len=%d err=%v path=%s", len(key), err, path)
+	}
+	for _, project := range []string{"short", "garbled"} {
+		if _, err := mgr.MFAKey(ctx, project); !errors.Is(err, ErrNoMFAKey) {
+			t.Fatalf("%s key: %v", project, err)
+		}
+	}
+	if _, err := mgr.MFAKey(ctx, "p3"); err == nil {
+		t.Fatal("a refused read returned a key")
+	}
+}
+
+func TestMFAIsOnOnlyWhenTheControlPlaneSaysSo(t *testing.T) {
+	var info ProjectInfo
+	if err := json.Unmarshal([]byte(`{"projectId":"p"}`), &info); err != nil || info.MFAEnabled {
+		t.Fatalf("absent: %+v %v", info, err)
+	}
+	if err := json.Unmarshal([]byte(`{"mfaEnabled":true}`), &info); err != nil || !info.MFAEnabled {
+		t.Fatalf("on: %+v %v", info, err)
 	}
 }

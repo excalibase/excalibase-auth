@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	neturl "net/url"
@@ -109,3 +110,25 @@ func (m *Manager) ProviderSecret(ctx context.Context, projectID, provider string
 	}
 	return entry.ClientSecret, nil
 }
+
+// ErrNoMFAKey means the vault holds no usable MFA key for the project.
+var ErrNoMFAKey = errors.New("mfa key is not set")
+
+// MFAKey reads the project's 32-byte MFA key from the vault on every call, so
+// nothing but the vault keeps it.
+func (m *Manager) MFAKey(ctx context.Context, projectID string) ([]byte, error) {
+	var entry struct {
+		Key string `json:"key"`
+	}
+	url := fmt.Sprintf("%s/vault/secrets/projects/%s/auth/mfa", m.provisioningURL, neturl.PathEscape(projectID))
+	if err := m.getJSON(ctx, url, "mfa key", &entry); err != nil {
+		return nil, err
+	}
+	key, err := base64.StdEncoding.DecodeString(entry.Key)
+	if err != nil || len(key) != mfaKeySize {
+		return nil, ErrNoMFAKey
+	}
+	return key, nil
+}
+
+const mfaKeySize = 32
