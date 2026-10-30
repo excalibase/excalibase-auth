@@ -199,13 +199,14 @@ func (s *Store) ApplyRoleChange(ctx context.Context, change store.RoleChange) (d
 }
 
 func (s *Store) InsertRefreshToken(ctx context.Context, hash string, userID int64, session store.RefreshSession) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, created_at, revoked)
-		 VALUES ($1, $2, $3, $4, $5, NOW(), false)`,
-		hash, session.FamilyID, userID, session.Expiry, authTime(session),
+	_, err := s.pool.Exec(ctx, insertRefreshToken,
+		hash, session.FamilyID, userID, session.Expiry, authTime(session), store.LevelOf(session.AAL), store.JoinAMR(session.AMR),
 	)
 	return err
 }
+
+const insertRefreshToken = `INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, aal, amr, created_at, revoked)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), false)`
 
 // authTime is the session's sign-in time, NULL when it predates the column.
 func authTime(session store.RefreshSession) *time.Time {
@@ -218,6 +219,25 @@ func authTime(session store.RefreshSession) *time.Time {
 // RotateRefreshToken revokes the live token in one statement, so of two
 // concurrent uses exactly one gets a row back.
 func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor string, accept func(store.Account) error) (store.Account, store.RefreshSession, error) {
+	return s.rotate(ctx, presented, successor, func(account store.Account, _ *store.RefreshSession) error {
+		return accept(account)
+	})
+}
+
+func (s *Store) ElevateRefreshToken(ctx context.Context, userID int64, presented, successor, method string) (store.Account, store.RefreshSession, error) {
+	return s.rotate(ctx, presented, successor, func(account store.Account, session *store.RefreshSession) error {
+		if account.ID != userID {
+			return store.ErrNotFound
+		}
+		session.AAL = store.AAL2
+		session.AMR = store.WithMethod(session.AMR, method)
+		return nil
+	})
+}
+
+// rotate spends the live token and stores its successor in the session that
+// shape leaves; shape's error rolls everything back.
+func (s *Store) rotate(ctx context.Context, presented, successor string, shape func(store.Account, *store.RefreshSession) error) (store.Account, store.RefreshSession, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return store.Account{}, store.RefreshSession{}, fmt.Errorf("%w: %w", store.ErrUnavailable, err)
@@ -228,31 +248,30 @@ func (s *Store) RotateRefreshToken(ctx context.Context, presented, successor str
 		userID   int64
 		session  store.RefreshSession
 		signedIn *time.Time
+		amr      string
 	)
 	if err := tx.QueryRow(ctx,
 		`UPDATE auth.refresh_tokens SET revoked = true
 		 WHERE token_hash = $1 AND revoked = false AND expiry_date > NOW()
-		 RETURNING user_id, family_id, expiry_date, last_auth_at`,
+		 RETURNING user_id, family_id, expiry_date, last_auth_at, aal, amr`,
 		presented,
-	).Scan(&userID, &session.FamilyID, &session.Expiry, &signedIn); err != nil {
+	).Scan(&userID, &session.FamilyID, &session.Expiry, &signedIn, &session.AAL, &amr); err != nil {
 		return store.Account{}, store.RefreshSession{}, notFound(err)
 	}
 	if signedIn != nil {
 		session.AuthTime = *signedIn
 	}
+	session.AMR = store.SplitAMR(amr)
 	account, err := scanAccount(tx.QueryRow(ctx, "SELECT "+accountColumns+" FROM auth.users WHERE id = $1", userID))
 	if err != nil {
 		return store.Account{}, store.RefreshSession{}, store.ErrNoAccount
 	}
 	account.PasswordHash = ""
-	if err := accept(account); err != nil {
+	if err := shape(account, &session); err != nil {
 		return store.Account{}, store.RefreshSession{}, err
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO auth.refresh_tokens (token_hash, family_id, user_id, expiry_date, last_auth_at, created_at, revoked)
-		 VALUES ($1, $2, $3, $4, $5, NOW(), false)`,
-		successor, session.FamilyID, userID, session.Expiry, signedIn,
-	); err != nil {
+	if _, err := tx.Exec(ctx, insertRefreshToken, successor, session.FamilyID, userID, session.Expiry, signedIn,
+		store.LevelOf(session.AAL), store.JoinAMR(session.AMR)); err != nil {
 		return store.Account{}, store.RefreshSession{}, err
 	}
 	return account, session, tx.Commit(ctx)

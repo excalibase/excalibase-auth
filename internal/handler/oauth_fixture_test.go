@@ -39,6 +39,9 @@ const (
 )
 
 // signInSettings is what the fake control plane answers on /info; tests change it.
+// testMFAKey is the project's MFA key as the vault holds it: 32 bytes, base64.
+const testMFAKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
 type signInSettings struct {
 	mu            sync.Mutex
 	providers     []string
@@ -57,6 +60,8 @@ type signInSettings struct {
 	// hooks is the project's auth hooks; nil is the control plane's flag off.
 	hooks             *pool.AuthHooks
 	hookSecretMissing bool
+	mfa               bool
+	mfaKeyMissing     bool
 }
 
 func (s *signInSettings) set(change func(*signInSettings)) {
@@ -112,6 +117,9 @@ func (s *signInSettings) info(authURL string) map[string]any {
 	if s.hooks != nil {
 		info["authHooks"] = *s.hooks
 	}
+	if s.mfa {
+		info["mfaEnabled"] = true
+	}
 	return info
 }
 
@@ -119,7 +127,7 @@ func (s *signInSettings) provisioning(record any, authURL *string) http.Handler 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		s.mu.Lock()
-		down, missing, captchaMissing, hookSecretMissing := s.infoDown, s.secretMissing, s.captchaSecretMissing, s.hookSecretMissing
+		down, missing, captchaMissing, hookSecretMissing, mfaKeyMissing := s.infoDown, s.secretMissing, s.captchaSecretMissing, s.hookSecretMissing, s.mfaKeyMissing
 		s.mu.Unlock()
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/info"):
@@ -134,6 +142,12 @@ func (s *signInSettings) provisioning(record any, authURL *string) http.Handler 
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"secret": hookSecret})
+		case strings.HasSuffix(r.URL.Path, "/auth/mfa"):
+			if mfaKeyMissing {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"key": testMFAKey})
 		case strings.HasSuffix(r.URL.Path, "/auth/captcha"):
 			if captchaMissing {
 				w.WriteHeader(http.StatusNotFound)

@@ -60,6 +60,9 @@ type ProjectInfo struct {
 	StableSubject bool `json:"stableSubject,omitempty"`
 	// AuthHooks is nil while the control plane's authhooks flag is off.
 	AuthHooks *AuthHooks `json:"authHooks,omitempty"`
+	// MFAEnabled turns on TOTP second factors and the aal/amr claims; sent
+	// only while the control plane's authmfa flag is on.
+	MFAEnabled bool `json:"mfaEnabled,omitempty"`
 }
 
 type infoEntry struct {

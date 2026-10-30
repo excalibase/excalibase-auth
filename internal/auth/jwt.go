@@ -107,6 +107,10 @@ type Claims struct {
 	// Custom are the claims a custom_access_token hook added; Sign never lets
 	// one replace a claim of its own.
 	Custom map[string]any `json:"-"`
+	// AAL is the session's assurance level ("aal1" or "aal2") and AMR the
+	// methods that reached it; both are emitted only while MFA is on.
+	AAL string   `json:"aal,omitempty"`
+	AMR []string `json:"amr,omitempty"`
 	// IssuedAt and ExpiresAt are read back by Verify (unix seconds).
 	IssuedAt  int64 `json:"-"`
 	ExpiresAt int64 `json:"-"`
@@ -213,6 +217,12 @@ func (s *JWTService) claimsMap(claims Claims) jwt.MapClaims {
 	}
 	if claims.IsGuest != nil {
 		mc["is_guest"] = *claims.IsGuest
+	}
+	if claims.AAL != "" {
+		mc["aal"] = claims.AAL
+		if len(claims.AMR) > 0 {
+			mc["amr"] = claims.AMR
+		}
 	}
 	return mc
 }
@@ -345,7 +355,10 @@ func (s *JWTService) Verify(tokenString string) (*Claims, error) {
 	if guest, ok := mapClaims["is_guest"].(bool); ok {
 		isGuest = &guest
 	}
+	aal, _ := mapClaims["aal"].(string)
 	return &Claims{
+		AAL:           aal,
+		AMR:           stringsClaim(mapClaims["amr"]),
 		Email:         email,
 		IsGuest:       isGuest,
 		AuthTime:      int64(authTime),

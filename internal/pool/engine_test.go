@@ -16,7 +16,7 @@ func mysqlRecord(t *testing.T) credentialRecord {
 	t.Helper()
 	return credentialRecord{
 		Engine: "mysql",
-		Host: "moco-p1-mysql-primary.p1.svc", Port: "3306", Database: "auth",
+		Host:   "moco-p1-mysql-primary.p1.svc", Port: "3306", Database: "auth",
 		Username: "auth_admin", Password: "pw", SSLRootCert: newTestPKI(t).caPEM,
 	}
 }
