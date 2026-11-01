@@ -13,8 +13,8 @@ import (
 const factorColumns = "id, user_id, factor_type, friendly_name, status, created_at, updated_at"
 
 // lockFactorQuery reads a factor under its lock, with whether it is stale and
-// whether the account has another verified factor.
-const lockFactorQuery = `SELECT ` + factorColumns + `, secret_enc, last_used_step,
+// whether the account has another verified factor; its first columns are factorColumns.
+const lockFactorQuery = `SELECT id, user_id, factor_type, friendly_name, status, created_at, updated_at, secret_enc, last_used_step,
         status = 'unverified' AND created_at < NOW(6) - INTERVAL ? MICROSECOND,
         EXISTS (SELECT 1 FROM mfa_factors o WHERE o.user_id = ? AND o.status = 'verified' AND o.id <> ?)
  FROM mfa_factors WHERE id = ? AND user_id = ? FOR UPDATE`
