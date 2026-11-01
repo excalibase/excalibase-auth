@@ -24,7 +24,6 @@ func withCapturedMail(sender *stubSender) func(*AuthHandler) {
 	return func(h *AuthHandler) {
 		h.SetEmail(sender, "")
 		h.dispatchMail = func(send func()) { send() }
-		h.otpLimits.MinInterval = testOTPInterval
 		h.otpLimits.PerIPDay = 1000
 		h.emailChangeLimits.MinInterval = testChangeInterval
 	}
@@ -195,7 +194,7 @@ func otpCodeSignUpThenIn(t *testing.T, fx *otpFixture) {
 	if resp, _ := fx.verifyCode(address, code, verifier); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("a code was spent twice: %d", resp.StatusCode)
 	}
-	otpWait(t, fx)
+	ageOTPSends(t, fx, address)
 	if again := fx.signInWithCode(t, address); userIDOf(again) != userIDOf(first) {
 		t.Fatalf("second sign-in reached %v, want %v", userIDOf(again), userIDOf(first))
 	}
@@ -230,7 +229,7 @@ func otpMagicLink(t *testing.T, fx *otpFixture) {
 	if resp, _ := fx.verify(map[string]any{"type": "magiclink", "token_hash": tokenHash, "code_verifier": verifier}); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("a link refused once was redeemed after: %d", resp.StatusCode)
 	}
-	otpWait(t, fx)
+	ageOTPSends(t, fx, address)
 	tokenHash, verifier = send()
 	resp, body := fx.verify(map[string]any{"type": "magiclink", "token_hash": tokenHash, "code_verifier": verifier})
 	if resp.StatusCode != http.StatusOK || jwtPayload(t, body["accessToken"].(string))["sub"] != address {
@@ -238,15 +237,16 @@ func otpMagicLink(t *testing.T, fx *otpFixture) {
 	}
 }
 
-// otpWait lets the address's minimum interval pass.
-func otpWait(t *testing.T, _ *otpFixture) {
+// ageOTPSends lets the address's minimum interval pass by moving its earlier
+// sends back, so the suite keeps the real interval and never races a clock.
+func ageOTPSends(t *testing.T, fx *otpFixture, address string) {
 	t.Helper()
-	time.Sleep(testOTPInterval + 50*time.Millisecond)
+	fx.ageSends(t, address, defaultOTPLimits.MinInterval)
 }
 
 const (
-	testOTPInterval    = 200 * time.Millisecond
 	testChangeInterval = 50 * time.Millisecond
+	slowRunnerPause    = 300 * time.Millisecond
 )
 
 func otpAttempts(t *testing.T, fx *otpFixture) {
@@ -262,7 +262,7 @@ func otpAttempts(t *testing.T, fx *otpFixture) {
 	if resp, _ := fx.verifyCode(address, code, verifier); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("the right code after five wrong ones: %d", resp.StatusCode)
 	}
-	otpWait(t, fx)
+	ageOTPSends(t, fx, address)
 	verifier = fx.sendCode(t, address)
 	if resp, _ := fx.verifyCode(address, fx.lastCode(t), newVerifier(t)); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("a right code with another browser's verifier: %d", resp.StatusCode)
@@ -283,7 +283,7 @@ func atoi(digits string) int {
 func otpNoEnumeration(t *testing.T, fx *otpFixture) {
 	known := mailbox("known")
 	fx.signInWithCode(t, known)
-	otpWait(t, fx)
+	ageOTPSends(t, fx, known)
 	ask := func(address string) (int, string) {
 		resp, body := fx.requestOTP(map[string]any{"email": address, "type": "email", "create_user": false,
 			"code_challenge": oauth.S256(newVerifier(t)), "code_challenge_method": "S256"})
@@ -302,10 +302,12 @@ func otpNoEnumeration(t *testing.T, fx *otpFixture) {
 	if knownStatus != http.StatusOK || knownStatus != unknownStatus || knownBody != unknownBody {
 		t.Fatalf("known %d %s, unknown %d %s", knownStatus, knownBody, unknownStatus, unknownBody)
 	}
+	// Longer than the old 200ms test interval: a slow runner pauses this long between requests.
+	time.Sleep(slowRunnerPause)
 	knownStatus, _ = ask(known)
 	unknownStatus, _ = ask(mailbox("nobody"))
 	if knownStatus != http.StatusTooManyRequests || unknownStatus != knownStatus {
-		t.Fatalf("a second send at once: known %d, unknown %d", knownStatus, unknownStatus)
+		t.Fatalf("a second send soon after: known %d, unknown %d", knownStatus, unknownStatus)
 	}
 }
 
