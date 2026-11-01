@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"github.com/excalibase/auth/internal/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -193,7 +194,7 @@ func TestAuthResponses_ExpMatchesAdvertisedTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("accessClaims: %v", err)
 	}
-	password, err := h.signSession(claims, user, "refresh", time.Time{})
+	password, err := h.signSession(req, "test-project", claims, user, "refresh", store.RefreshSession{})
 	if err != nil {
 		t.Fatalf("signSession: %v", err)
 	}

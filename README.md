@@ -44,6 +44,10 @@ All endpoints are scoped under `/auth/{orgSlug}/{projectName}/`:
 | `POST` | `/auth/{orgSlug}/{projectName}/register` | Register a new user |
 | `POST` | `/auth/{orgSlug}/{projectName}/login` | Authenticate and receive tokens |
 | `POST` | `/auth/{orgSlug}/{projectName}/guest` | Start a session for a new guest account, with no address (optional Turnstile token) |
+| `GET`/`POST` | `/auth/{orgSlug}/{projectName}/factors` | List, or enrol, the signed-in user's TOTP factors (flag `authmfa`) |
+| `POST` | `/auth/{orgSlug}/{projectName}/factors/{factorId}/challenge`, `/verify` | Open a challenge, then answer it with a code: the session moves to `aal2` |
+| `POST` | `/auth/{orgSlug}/{projectName}/factors/recovery`, `/recovery-codes` | Spend a recovery code for `aal2`; replace the set (needs `aal2`) |
+| `DELETE` | `/auth/{orgSlug}/{projectName}/factors/{factorId}` | Remove a factor (needs `aal2` once one is verified) |
 | `POST` | `/auth/{orgSlug}/{projectName}/validate` | Validate a JWT and return claims |
 | `POST` | `/auth/{orgSlug}/{projectName}/refresh` | Exchange refresh token for new token pair |
 | `POST` | `/auth/{orgSlug}/{projectName}/logout` | Revoke a refresh token; `?scope=others` or `?scope=global` (with the access token) ends the user's other or all sessions |
@@ -202,6 +206,18 @@ While the control plane's `authhooks` flag is on and the project switched a hook
 - `before_user_created` `{type, projectId, method, provider?, user:{email, isGuest}}` → `{decision: "allow"|"deny"}`. `/register` asks on every attempt, before looking the address up, so a deny reads the same for a taken address; provider, email-code/link and guest sign-in ask only when they would make an account. A deny is `403 signup_denied` (a provider callback lands with `error=signup_denied`).
 - `send_email` `{type, projectId, email:{to, template, data}}` → any 2xx: the project's mail goes there instead of the relay, with no fallback. A failure is logged and the caller's answer stays the same.
 - Calls go only to public addresses (checked on every connect, so a name that re-resolves inside the platform is refused) outside `AUTH_HOOKS_DENY_CIDRS`, over TLS 1.2+ verified against the system roots plus `AUTH_HOOKS_CA_FILE`, with no proxy and no redirects; 2 s for the whole call, 64 KB of answer. Anything else, a bad answer, a missing secret, or `/info` unreadable while the last copy had hooks fails closed: `503 auth_hook_failed`, an `audit_log` row `hook_failed`, and a log line naming the project, the hook and the reason, never the URL, payload or answer.
+
+### Multi-factor authentication (TOTP)
+
+The `/factors` routes answer only while the control plane's `authmfa` flag is on and the project switched MFA on (`mfaEnabled` on `/info`; `404 method_not_enabled` otherwise, `503` when the settings cannot be read). They take the signed-in user's access token; a guest is refused (`403 email_required`).
+
+- `POST /factors {"factorType":"totp","friendlyName"?,"issuer"?}` answers `201` with the factor (`status: unverified`) and, once, its `totp.secret` (base32) and `totp.uri` (`otpauth://`, for a QR code). At most 10 factors; an unverified one is dropped after a day.
+- `POST /factors/{id}/challenge` opens a challenge for 5 minutes; `POST /factors/{id}/verify {"challengeId","code","refreshToken"}` checks the six-digit code (one 30-second step of skew either way) and spends the presented refresh token into an `aal2` successor in the same session. The account's first verified factor also answers 10 `recoveryCodes`, shown once. A step is never accepted twice (`last_used_step`). Wrong codes: `400 invalid_code`; after 5 within 5 minutes per factor the factor answers `429 too_many_attempts` even to the right code, counted in the project's database so every replica shares the budget.
+- `POST /factors/recovery {"code","refreshToken"}` spends one recovery code (stored as an HMAC under the project's key, single use, 5 failures per 5 minutes per account) for an `aal2` session with `amr` ending in `recovery`. `POST /factors/recovery-codes` replaces the set and needs `aal2`.
+- Once the account has a verified factor, enrolling another, removing one, regenerating codes, changing the password or address and linking or unlinking an identity need an `aal2` session (`403 insufficient_aal`). Removing the last verified factor removes the recovery codes.
+- Factor secrets are sealed with AES-256-GCM under a key derived from the project's vault key (`projects/{id}/auth/mfa`, field `key`, read on every use) and bound to the account and factor ids, because developers can read the `auth` schema. A missing key answers `503 mfa_unavailable`.
+- `DELETE /users/{userId}/factors` (user-admin or secret-key token) removes every factor and code of an end user who lost them and ends the account's sessions.
+- While MFA is on every end-user token carries `aal` (`aal1`/`aal2`) and `amr` (methods, first factor first: `password`, `oauth`, `magiclink`, `email_otp`, `guest`, then `totp` or `recovery`). A refresh keeps the session's level; a password change keeps the caller's. The engine surfaces `aal` as `x-excalibase-aal`, so a permission can require `aal2`.
 
 ### End-user roles
 

@@ -166,6 +166,30 @@ func runHookFlows(t *testing.T, fx *hooksFixture) {
 	t.Run("EveryWayToANewAccountAsksTheHook", func(t *testing.T) { hookDeniesOtherSignUps(t, fx) })
 	t.Run("SendEmailDeliversThroughTheHookNeverTheRelay", func(t *testing.T) { hookSendsMail(t, fx) })
 	t.Run("AGuestTakingAnAddressOrProviderAsksTheHook", func(t *testing.T) { hookGuardsGuestUpgrades(t, fx) })
+	t.Run("AStepUpToAal2KeepsTheHookClaims", func(t *testing.T) { hookClaimsAfterStepUp(t, fx) })
+}
+
+func hookClaimsAfterStepUp(t *testing.T, fx *hooksFixture) {
+	steadyStep(t)
+	fx.settings.set(func(s *signInSettings) { s.mfa = true })
+	defer fx.settings.set(func(s *signInSettings) { s.mfa = false })
+	fx.useHooks(func(h *pool.AuthHooks) { h.CustomAccessToken = fx.hook.url("/claims") })
+	defer fx.useHooks(func(*pool.AuthHooks) {})
+	session, _ := fx.passwordAccount(t, "hook-step-up")
+	factor := fx.enroll(t, accessTokenOf(session), "Phone")
+	resp, elevated := fx.verifyAt(t, session, factor, -1)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("verify: %d %v", resp.StatusCode, elevated)
+	}
+	assertLevel(t, elevated, "aal2", "password", "totp")
+	if claims := jwtPayload(t, accessTokenOf(elevated)); claims["tenant_id"] != "acme" {
+		t.Fatalf("step-up lost the hook claims: %v", claims)
+	}
+	resp, refreshed := fx.refreshWith(refreshTokenOf(elevated))
+	if resp.StatusCode != http.StatusOK || jwtPayload(t, accessTokenOf(refreshed))["tenant_id"] != "acme" {
+		t.Fatalf("refresh: %d %v", resp.StatusCode, refreshed)
+	}
+	assertLevel(t, refreshed, "aal2", "password", "totp")
 }
 
 func hookAddsClaims(t *testing.T, fx *hooksFixture) {
