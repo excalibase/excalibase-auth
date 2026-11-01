@@ -12,6 +12,13 @@ import (
 
 const factorColumns = "id, user_id, factor_type, friendly_name, status, created_at, updated_at"
 
+// lockFactorQuery reads a factor under its lock, with whether it is stale and
+// whether the account has another verified factor.
+const lockFactorQuery = `SELECT ` + factorColumns + `, secret_enc, last_used_step,
+        status = 'unverified' AND created_at < NOW(6) - INTERVAL ? MICROSECOND,
+        EXISTS (SELECT 1 FROM mfa_factors o WHERE o.user_id = ? AND o.status = 'verified' AND o.id <> ?)
+ FROM mfa_factors WHERE id = ? AND user_id = ? FOR UPDATE`
+
 func scanFactor(row rowScanner, extra ...any) (store.Factor, error) {
 	var factor store.Factor
 	fields := append([]any{&factor.ID, &factor.UserID, &factor.FactorType, &factor.FriendlyName, &factor.Status,
@@ -155,11 +162,7 @@ func lockFactor(ctx context.Context, tx *sql.Tx, attempt store.FactorAttempt, li
 		stale          bool
 		othersVerified bool
 	)
-	factor, err := scanFactor(tx.QueryRowContext(ctx,
-		`SELECT `+factorColumns+`, secret_enc, last_used_step,
-		        status = 'unverified' AND created_at < NOW(6) - INTERVAL ? MICROSECOND,
-		        EXISTS (SELECT 1 FROM mfa_factors o WHERE o.user_id = ? AND o.status = 'verified' AND o.id <> ?)
-		 FROM mfa_factors WHERE id = ? AND user_id = ? FOR UPDATE`,
+	factor, err := scanFactor(tx.QueryRowContext(ctx, lockFactorQuery,
 		limits.StaleUnverified.Microseconds(), attempt.UserID, attempt.FactorID, attempt.FactorID, attempt.UserID),
 		&secret.SecretSealed, &lastStep, &stale, &othersVerified)
 	switch {
