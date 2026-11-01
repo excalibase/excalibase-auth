@@ -104,6 +104,9 @@ type Claims struct {
 	Email string `json:"email,omitempty"`
 	// IsGuest is emitted only when set: true for a guest account.
 	IsGuest *bool `json:"is_guest,omitempty"`
+	// Custom are the claims a custom_access_token hook added; Sign never lets
+	// one replace a claim of its own.
+	Custom map[string]any `json:"-"`
 	// IssuedAt and ExpiresAt are read back by Verify (unix seconds).
 	IssuedAt  int64 `json:"-"`
 	ExpiresAt int64 `json:"-"`
@@ -158,6 +161,27 @@ func (s *JWTService) AudienceFor(projectID string) string {
 
 func (s *JWTService) Sign(claims Claims) (string, error) {
 	now := time.Now()
+	mc := s.claimsMap(claims)
+	mc["iat"] = now.Unix()
+	mc["exp"] = now.Add(time.Duration(s.expSeconds) * time.Second).Unix()
+	if claims.AuthTime != 0 {
+		mc["auth_time"] = claims.AuthTime
+	}
+	for name, value := range claims.Custom {
+		if _, own := mc[name]; !own {
+			mc[name] = value
+		}
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodES256, mc).SignedString(s.privateKey)
+}
+
+// PublicClaims are the claims Sign writes, without the times it stamps: what a
+// custom_access_token hook is shown.
+func (s *JWTService) PublicClaims(claims Claims) map[string]any {
+	return s.claimsMap(claims)
+}
+
+func (s *JWTService) claimsMap(claims Claims) jwt.MapClaims {
 	mc := jwt.MapClaims{
 		"sub":           claims.Sub,
 		"projectId":     claims.ProjectID,
@@ -167,8 +191,6 @@ func (s *JWTService) Sign(claims Claims) (string, error) {
 		"role":          claims.Role,
 		"allowed_roles": allowedRolesClaim(claims.AllowedRoles),
 		"iss":           s.issuer,
-		"iat":           now.Unix(),
-		"exp":           now.Add(time.Duration(s.expSeconds) * time.Second).Unix(),
 		// Array form so verifiers that expect the multi-valued `aud` shape
 		// (RFC 7519 §4.1.3) need no special-casing.
 		"aud":            []string{s.AudienceFor(claims.ProjectID)},
@@ -186,16 +208,13 @@ func (s *JWTService) Sign(claims Claims) (string, error) {
 	if claims.KeyID != 0 {
 		mc["keyId"] = claims.KeyID
 	}
-	if claims.AuthTime != 0 {
-		mc["auth_time"] = claims.AuthTime
-	}
 	if claims.Email != "" {
 		mc["email"] = claims.Email
 	}
 	if claims.IsGuest != nil {
 		mc["is_guest"] = *claims.IsGuest
 	}
-	return jwt.NewWithClaims(jwt.SigningMethodES256, mc).SignedString(s.privateKey)
+	return mc
 }
 
 // allowedRolesClaim keeps the claim an array even when no roles are set.

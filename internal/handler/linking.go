@@ -350,6 +350,9 @@ func linkFailure(err error) (int, error) {
 }
 
 func (h *AuthHandler) commitLink(ctx context.Context, db store.Store, projectID string, userID int64, claim store.IdentityClaim, clientIP string) (int, error) {
+	if err := h.guestUpgradeAllowed(ctx, db, projectID, userID, claim.Provider, claim.Email); err != nil {
+		return sessionFailure(err)
+	}
 	result, err := db.LinkIdentity(ctx, userID, claim)
 	if status, failure := linkFailure(err); failure != nil {
 		if status == http.StatusInternalServerError {
@@ -411,7 +414,8 @@ func (h *AuthHandler) accountSession(r *http.Request, db store.Store, projectID 
 	}
 	resp, err := h.startSession(r, projectID, user, roles, account.EmailVerified, session)
 	if err != nil {
-		return nil, http.StatusInternalServerError, errTokenGeneration
+		status, failure := sessionFailure(err)
+		return nil, status, failure
 	}
 	return resp, http.StatusOK, nil
 }

@@ -72,6 +72,10 @@ func (h *AuthHandler) SignInAsGuest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if err := h.allowNewUser(r.Context(), projectID, newUser{Method: "guest", IsGuest: true}); err != nil {
+		writeSessionFailure(w, err)
+		return
+	}
 	clientIP := h.clientIP(r)
 	account, err := db.CreateGuest(r.Context(), otpSenderKey(clientIP), h.guestLimits)
 	switch {
@@ -86,7 +90,7 @@ func (h *AuthHandler) SignInAsGuest(w http.ResponseWriter, r *http.Request) {
 	h.recordAudit(r.Context(), db, projectID, store.AuditEvent{UserID: account.ID, Event: "sign_up", Method: "guest", IP: clientIP})
 	resp, err := h.generateAuthResponse(r, projectID, userInfoOf(account), accountRoles{role: account.Role, allowed: account.AllowedRoles}, false)
 	if err != nil {
-		httpError(w, errTokenGeneration.Error(), http.StatusInternalServerError)
+		writeSessionFailure(w, err)
 		return
 	}
 	writeJSON(w, resp)

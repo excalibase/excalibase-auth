@@ -233,7 +233,7 @@ func (h *AuthHandler) mayMail(ctx context.Context, db store.Store, address strin
 func (h *AuthHandler) sendOTPMail(projectID string, msg email.Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), otpMailTimeout)
 	defer cancel()
-	if err := h.emailSender.Send(ctx, msg); err != nil {
+	if err := h.sendMail(ctx, msg); err != nil {
 		log.Printf("auth.otp.send_failed project=%s template=%s err=%v", safeLog(projectID), msg.Template, err)
 	}
 }
@@ -274,7 +274,7 @@ func (h *AuthHandler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	h.audit(r.Context(), db, projectID, store.AuditEvent{UserID: account.ID, Method: otp.Kind, IP: h.clientIP(r)}, outcome)
 	resp, err := h.generateAuthResponse(r, projectID, userInfoOf(account), accountRoles{role: account.Role, allowed: account.AllowedRoles}, true)
 	if err != nil {
-		httpError(w, errTokenGeneration.Error(), http.StatusInternalServerError)
+		writeSessionFailure(w, err)
 		return
 	}
 	writeJSON(w, resp)
@@ -321,6 +321,10 @@ func (h *AuthHandler) signInByEmail(ctx context.Context, db store.Store, project
 	if errors.Is(err, store.ErrSignupsDisabled) && otp.CreateUser && signupsOpen {
 		if h.limits != nil && !h.limits.AllowSignup(projectID) {
 			return store.Account{}, 0, http.StatusTooManyRequests, errors.New(codeRateLimited)
+		}
+		if err := h.allowNewUser(ctx, projectID, newUser{Method: "email", Email: otp.Email}); err != nil {
+			status, refusal := sessionFailure(err)
+			return store.Account{}, 0, status, refusal
 		}
 		account, outcome, err = db.SignInWithEmail(ctx, otp.Email, name, true)
 	}
