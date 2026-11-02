@@ -446,10 +446,13 @@ type Store interface {
 	DeleteFactor(ctx context.Context, userID int64, factorID string) error
 	// ReplaceRecoveryCodes stores a new set of code hashes, ending the old set.
 	ReplaceRecoveryCodes(ctx context.Context, userID int64, hashes []string) error
+	// AddRecoveryCodesIfNone stores the set only when the account has a
+	// verified factor and no unspent code; added reports whether it did.
+	AddRecoveryCodesIfNone(ctx context.Context, userID int64, hashes []string) (added bool, err error)
 	// RedeemRecoveryCode spends an unspent code of an account that has a
-	// verified factor, under the account's failure budget: ErrTooManyAttempts,
+	// verified factor, under the session's failure budget: ErrTooManyAttempts,
 	// or ErrInvalidCode after counting the failure.
-	RedeemRecoveryCode(ctx context.Context, userID int64, hash string, limits MFALimits) error
+	RedeemRecoveryCode(ctx context.Context, userID int64, familyID uuid.UUID, hash string, limits MFALimits) error
 	// ResetMFA removes every factor and recovery code of the account and ends
 	// its sessions; ErrNotFound for an unknown account.
 	ResetMFA(ctx context.Context, userID int64) error

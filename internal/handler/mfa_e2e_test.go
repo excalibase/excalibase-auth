@@ -47,6 +47,9 @@ func runMFAFlows(t *testing.T, fx *otpFixture) {
 	t.Run("AnAal1SessionCannotChangeHowAnEnrolledAccountSignsIn", func(t *testing.T) { mfaNeedsAal2(t, fx) })
 	t.Run("ARecoveryCodeGivesAal2Once", func(t *testing.T) { mfaRecovery(t, fx) })
 	t.Run("WrongCodesLockAFactorEvenForTheRightCode", func(t *testing.T) { mfaBruteForce(t, fx) })
+	t.Run("ASessionThatSpentItsBudgetDoesNotLockTheOwnersOtherSessions", func(t *testing.T) { mfaLockIsPerSession(t, fx) })
+	t.Run("ASetNeverShownIsHandedOutAtTheNextStepUp", func(t *testing.T) { mfaCodesHandedOutLater(t, fx) })
+	t.Run("SpendingTheLastRecoveryCodeHandsOutANewSet", func(t *testing.T) { mfaLastCodeRenews(t, fx) })
 	t.Run("ARefreshTokenOfAnotherAccountIsRefused", func(t *testing.T) { mfaOtherSession(t, fx) })
 	t.Run("UnenrollingAtAal2RemovesTheFactorAndItsCodes", func(t *testing.T) { mfaUnenroll(t, fx) })
 	t.Run("AMissingProjectKeyFailsClosed", func(t *testing.T) { mfaKeyMissing(t, fx) })
@@ -329,6 +332,20 @@ func mfaRecovery(t *testing.T, fx *otpFixture) {
 func mfaBruteForce(t *testing.T, fx *otpFixture) {
 	_, address, factor := fx.enrolled(t, "mfa-brute")
 	session := fx.passwordLogin(t, address)
+	fx.burnFactorWindow(t, session, factor)
+	locked := fx.countAudit(t, "mfa_too_many_attempts")
+	resp, body := fx.verifyAt(t, session, factor, 0)
+	if resp.StatusCode != http.StatusTooManyRequests || errorOf(body) != codeTooManyAttempts {
+		t.Fatalf("right code past the budget: %d %v", resp.StatusCode, body)
+	}
+	if got := fx.countAudit(t, "mfa_too_many_attempts"); got != locked+1 {
+		t.Fatalf("a refused locked attempt was not audited: %d -> %d", locked, got)
+	}
+}
+
+// burnFactorWindow spends the session's wrong-code window on the factor.
+func (fx *otpFixture) burnFactorWindow(t *testing.T, session map[string]any, factor enrolment) {
+	t.Helper()
 	bearer := accessTokenOf(session)
 	for attempt := range 5 {
 		resp, body := fx.call(http.MethodPost, factorsPath+"/"+factor.id+"/verify", bearer, map[string]string{
@@ -337,9 +354,67 @@ func mfaBruteForce(t *testing.T, fx *otpFixture) {
 			t.Fatalf("wrong code %d: %d %v", attempt, resp.StatusCode, body)
 		}
 	}
-	resp, body := fx.verifyAt(t, session, factor, 0)
-	if resp.StatusCode != http.StatusTooManyRequests || errorOf(body) != codeTooManyAttempts {
-		t.Fatalf("right code past the budget: %d %v", resp.StatusCode, body)
+}
+
+func mfaLockIsPerSession(t *testing.T, fx *otpFixture) {
+	steadyStep(t)
+	elevated, address, factor := fx.enrolled(t, "mfa-per-session")
+	attacker := fx.passwordLogin(t, address)
+	fx.burnFactorWindow(t, attacker, factor)
+	if resp, body := fx.call(http.MethodPost, factorsPath+"/recovery", accessTokenOf(attacker),
+		map[string]string{"code": "aaaaa-aaaaa", "refreshToken": refreshTokenOf(attacker)}); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("wrong recovery code: %d %v", resp.StatusCode, body)
+	}
+	owner := fx.passwordLogin(t, address)
+	if resp, body := fx.verifyAt(t, owner, factor, 0); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the owner's session was locked by another: %d %v", resp.StatusCode, body)
+	}
+	code, _ := asSlice(elevated["recoveryCodes"])[0].(string)
+	another := fx.passwordLogin(t, address)
+	if resp, body := fx.call(http.MethodPost, factorsPath+"/recovery", accessTokenOf(another),
+		map[string]string{"code": code, "refreshToken": refreshTokenOf(another)}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the owner's recovery was locked by another session: %d %v", resp.StatusCode, body)
+	}
+}
+
+// mfaCodesHandedOutLater: the first verify spent its session but its answer
+// was lost (another tab refreshed first), so the account holds no codes.
+func mfaCodesHandedOutLater(t *testing.T, fx *otpFixture) {
+	steadyStep(t)
+	elevated, address, factor := fx.enrolled(t, "mfa-codes-later")
+	fx.dropRecoveryCodes(t, int64(userIDOf(elevated)))
+	resp, body := fx.verifyAt(t, fx.passwordLogin(t, address), factor, 0)
+	if resp.StatusCode != http.StatusOK || len(asSlice(body["recoveryCodes"])) != mfa.RecoveryCodeCount || body["recoveryCodesMissing"] != nil {
+		t.Fatalf("the step-up after a lost set: %d %v", resp.StatusCode, body)
+	}
+	_, listing := fx.call(http.MethodGet, factorsPath, accessTokenOf(body), nil)
+	if listing["recoveryCodesRemaining"] != float64(mfa.RecoveryCodeCount) {
+		t.Fatalf("remaining = %v", listing["recoveryCodesRemaining"])
+	}
+	if resp, again := fx.verifyAt(t, fx.passwordLogin(t, address), factor, 1); resp.StatusCode != http.StatusOK || again["recoveryCodes"] != nil {
+		t.Fatalf("a set handed out over an unspent one: %d %v", resp.StatusCode, again)
+	}
+}
+
+func mfaLastCodeRenews(t *testing.T, fx *otpFixture) {
+	elevated, address, _ := fx.enrolled(t, "mfa-last-code")
+	codes := asSlice(elevated["recoveryCodes"])
+	var last map[string]any
+	for index, code := range codes {
+		weak := fx.passwordLogin(t, address)
+		text, _ := code.(string)
+		resp, body := fx.call(http.MethodPost, factorsPath+"/recovery", accessTokenOf(weak),
+			map[string]string{"code": text, "refreshToken": refreshTokenOf(weak)})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("recovery %d: %d %v", index, resp.StatusCode, body)
+		}
+		if index < len(codes)-1 && body["recoveryCodes"] != nil {
+			t.Fatalf("a new set while %d codes are unspent", len(codes)-1-index)
+		}
+		last = body
+	}
+	if len(asSlice(last["recoveryCodes"])) != mfa.RecoveryCodeCount {
+		t.Fatalf("spending the last code handed out no set: %v", last)
 	}
 }
 
@@ -401,11 +476,21 @@ func mfaAdminReset(t *testing.T, fx *otpFixture) {
 	if resp, body := fx.call(http.MethodDelete, path, service, nil); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("reset: %d %v", resp.StatusCode, body)
 	}
+	if methods := fx.auditMethods(t, "mfa_reset"); len(methods) == 0 || methods[len(methods)-1] != "service-key" {
+		t.Fatalf("a secret-key reset audited as %v", methods)
+	}
 	if resp, _ := fx.refreshWith(refreshTokenOf(elevated)); resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("a session survived the reset: %d", resp.StatusCode)
 	}
 	if resp, _ := fx.call(http.MethodDelete, oauthProject+"/users/999999999/factors", service, nil); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown user: %d", resp.StatusCode)
+	}
+	studio := signUserAdmin(t, fx.signingKey, validUserAdmin("test-project"))
+	if resp, body := fx.call(http.MethodDelete, path, studio, nil); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("studio reset: %d %v", resp.StatusCode, body)
+	}
+	if methods := fx.auditMethods(t, "mfa_reset"); methods[len(methods)-1] != "studio" {
+		t.Fatalf("a Studio reset audited as %v", methods)
 	}
 }
 

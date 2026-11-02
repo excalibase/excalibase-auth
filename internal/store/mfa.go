@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Factor statuses: a factor counts for aal2 only once a code proved it.
@@ -70,6 +72,8 @@ type FactorAttempt struct {
 	UserID      int64
 	FactorID    string
 	ChallengeID string
+	// FamilyID is the session answering; wrong codes are budgeted per session.
+	FamilyID uuid.UUID
 	// CallerAAL2 is whether the session answering passed a second factor already.
 	CallerAAL2 bool
 }
@@ -82,12 +86,17 @@ type FactorCheck func(FactorSecret) (step int64, ok bool, err error)
 type MFALimits struct {
 	MaxFactors int
 	// MaxFailures wrong codes within FailureWindow lock a factor, or the
-	// account's recovery codes, until the oldest ages out.
+	// recovery codes, for the session that made them until the oldest ages out.
 	MaxFailures   int
 	FailureWindow time.Duration
-	// MaxDailyFailures caps wrong codes across all of an account's factors
-	// and recovery codes in a day, so more factors give no more guesses.
+	// MaxDailyFailures caps one session's wrong codes across all factors and
+	// recovery codes in a day, so more factors give no more guesses; another
+	// session of the account keeps its own budget.
 	MaxDailyFailures int
+	// MaxAccountDailyFailures caps wrong TOTP codes across every aal1 session
+	// of the account in a day. Recovery codes (50 bits) and aal2 callers are
+	// not held to it, so a password holder cannot lock the owner out of aal2.
+	MaxAccountDailyFailures int
 	// StaleUnverified is how long an unverified factor is kept.
 	StaleUnverified time.Duration
 }

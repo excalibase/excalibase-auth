@@ -15,7 +15,7 @@ import (
 )
 
 var roomyMFALimits = store.MFALimits{MaxFactors: 10, MaxFailures: 5, FailureWindow: 5 * time.Minute,
-	MaxDailyFailures: 1000, StaleUnverified: 24 * time.Hour}
+	MaxDailyFailures: 1000, MaxAccountDailyFailures: 1000, StaleUnverified: 24 * time.Hour}
 
 func runMFA(t *testing.T, fx Fixture) {
 	t.Run("a factor is stored unverified and listed only for its account", func(t *testing.T) { factorRoundTrip(t, fx.Store) })
@@ -26,12 +26,15 @@ func runMFA(t *testing.T, fx Fixture) {
 	t.Run("wrong codes are budgeted per factor across callers", func(t *testing.T) { factorFailureBudget(t, fx.Store) })
 	t.Run("of concurrent checks of one step only one is accepted", func(t *testing.T) { factorStepRace(t, fx.Store) })
 	t.Run("removing the last verified factor removes the recovery codes", func(t *testing.T) { factorDelete(t, fx) })
-	t.Run("a recovery code is spent once and budgeted per account", func(t *testing.T) { recoveryCodes(t, fx.Store) })
+	t.Run("a recovery code is spent once and budgeted per session", func(t *testing.T) { recoveryCodes(t, fx.Store) })
+	t.Run("recovery codes are added only to an account that has none unspent", func(t *testing.T) { recoveryCodesIfNone(t, fx.Store) })
 	t.Run("elevation keeps the session and raises its level", func(t *testing.T) { elevateSession(t, fx.Store) })
 	t.Run("a reset removes factors and codes and ends sessions", func(t *testing.T) { resetMFA(t, fx) })
 	t.Run("a factor planted before MFA was on cannot lift an aal1 session", func(t *testing.T) { plantedFactor(t, fx.Store) })
 	t.Run("a stale unverified factor cannot be verified", func(t *testing.T) { staleFactorRefused(t, fx.Store) })
-	t.Run("wrong codes are capped per account per day across factors", func(t *testing.T) { dailyFailureCap(t, fx.Store) })
+	t.Run("wrong codes are capped per session per day across factors", func(t *testing.T) { dailyFailureCap(t, fx.Store) })
+	t.Run("a session that spent its budget leaves the account's other sessions theirs", func(t *testing.T) { sessionFailureBudget(t, fx.Store) })
+	t.Run("aal1 codes are capped per account, recovery codes and aal2 callers are not", func(t *testing.T) { accountFailureCeiling(t, fx.Store) })
 }
 
 func plantedFactor(t *testing.T, db store.Store) {
@@ -77,8 +80,9 @@ func dailyFailureCap(t *testing.T, db store.Store) {
 	limits.MaxDailyFailures = 3
 	phone := verifyNew(t, db, owner, "Phone", 1).Factor
 	tablet := verifyNew(t, db, owner, "Tablet", 1).Factor
+	family := uuid.New()
 	try := func(factorID string, check store.FactorCheck) error {
-		_, err := db.VerifyFactor(ctx, store.FactorAttempt{UserID: owner, FactorID: factorID, CallerAAL2: true,
+		_, err := db.VerifyFactor(ctx, store.FactorAttempt{UserID: owner, FactorID: factorID, CallerAAL2: true, FamilyID: family,
 			ChallengeID: challengeFor(t, db, owner, factorID)}, limits, check)
 		return err
 	}
@@ -90,8 +94,119 @@ func dailyFailureCap(t *testing.T, db store.Store) {
 	if err := try(tablet.ID, matchStep(9)); !errors.Is(err, store.ErrTooManyAttempts) {
 		t.Fatalf("past the day's cap: %v", err)
 	}
-	if err := db.RedeemRecoveryCode(ctx, owner, recoveryHash(1), limits); !errors.Is(err, store.ErrTooManyAttempts) {
+	if err := db.RedeemRecoveryCode(ctx, owner, family, recoveryHash(1), limits); !errors.Is(err, store.ErrTooManyAttempts) {
 		t.Fatalf("recovery past the day's cap: %v", err)
+	}
+}
+
+// sessionFailureBudget: whoever holds the password and burns a session's
+// budget does not lock the owner's other sessions out of aal2.
+func sessionFailureBudget(t *testing.T, db store.Store) {
+	ctx := context.Background()
+	owner, _ := newUser(t, db, "mfa-session-budget")
+	phone := verifyNew(t, db, owner, "Phone", 1).Factor
+	codes := []string{recoveryHash(1), recoveryHash(2)}
+	if err := db.ReplaceRecoveryCodes(ctx, owner, codes); err != nil {
+		t.Fatal(err)
+	}
+	limits := roomyMFALimits
+	limits.MaxFailures = 2
+	limits.MaxDailyFailures = 3
+	attacker, mine := uuid.New(), uuid.New()
+	try := func(family uuid.UUID, check store.FactorCheck) error {
+		_, err := db.VerifyFactor(ctx, store.FactorAttempt{UserID: owner, FactorID: phone.ID, FamilyID: family,
+			ChallengeID: challengeFor(t, db, owner, phone.ID)}, limits, check)
+		return err
+	}
+	for range 2 {
+		if err := try(attacker, wrongCode); !errors.Is(err, store.ErrInvalidCode) {
+			t.Fatalf("wrong code: %v", err)
+		}
+	}
+	if err := try(attacker, matchStep(2)); !errors.Is(err, store.ErrTooManyAttempts) {
+		t.Fatalf("the attacker's session past its window: %v", err)
+	}
+	if err := db.RedeemRecoveryCode(ctx, owner, attacker, recoveryHash(9), limits); !errors.Is(err, store.ErrInvalidCode) {
+		t.Fatalf("wrong recovery code: %v", err)
+	}
+	if err := db.RedeemRecoveryCode(ctx, owner, attacker, codes[0], limits); !errors.Is(err, store.ErrTooManyAttempts) {
+		t.Fatalf("the attacker's session past its day: %v", err)
+	}
+	if err := try(mine, matchStep(3)); err != nil {
+		t.Fatalf("the owner's session was locked by another: %v", err)
+	}
+	if err := db.RedeemRecoveryCode(ctx, owner, mine, codes[1], limits); err != nil {
+		t.Fatalf("the owner's recovery was locked by another session: %v", err)
+	}
+}
+
+// accountFailureCeiling bounds guesses at a six-digit code across every aal1
+// session; a recovery code is 50 bits and an aal2 caller already passed.
+func accountFailureCeiling(t *testing.T, db store.Store) {
+	ctx := context.Background()
+	owner, _ := newUser(t, db, "mfa-account-ceiling")
+	phone := verifyNew(t, db, owner, "Phone", 1).Factor
+	code := recoveryHash(1)
+	if err := db.ReplaceRecoveryCodes(ctx, owner, []string{code}); err != nil {
+		t.Fatal(err)
+	}
+	limits := roomyMFALimits
+	limits.MaxAccountDailyFailures = 2
+	try := func(aal2 bool, check store.FactorCheck) error {
+		_, err := db.VerifyFactor(ctx, store.FactorAttempt{UserID: owner, FactorID: phone.ID, FamilyID: uuid.New(), CallerAAL2: aal2,
+			ChallengeID: challengeFor(t, db, owner, phone.ID)}, limits, check)
+		return err
+	}
+	for range 2 {
+		if err := try(false, wrongCode); !errors.Is(err, store.ErrInvalidCode) {
+			t.Fatalf("wrong code: %v", err)
+		}
+	}
+	if err := try(false, matchStep(2)); !errors.Is(err, store.ErrTooManyAttempts) {
+		t.Fatalf("a fresh aal1 session past the account's ceiling: %v", err)
+	}
+	if err := try(true, matchStep(3)); err != nil {
+		t.Fatalf("an aal2 caller under the account's ceiling: %v", err)
+	}
+	if err := db.RedeemRecoveryCode(ctx, owner, uuid.New(), code, limits); err != nil {
+		t.Fatalf("a recovery code under the account's ceiling: %v", err)
+	}
+}
+
+func recoveryCodesIfNone(t *testing.T, db store.Store) {
+	ctx := context.Background()
+	owner, _ := newUser(t, db, "mfa-codes-if-none")
+	verifyNew(t, db, owner, "Phone", 1)
+	first := []string{recoveryHash(1), recoveryHash(2)}
+	if added, err := db.AddRecoveryCodesIfNone(ctx, owner, first); err != nil || !added {
+		t.Fatalf("an account with no codes: %v %v", added, err)
+	}
+	if added, err := db.AddRecoveryCodesIfNone(ctx, owner, []string{recoveryHash(3)}); err != nil || added {
+		t.Fatalf("codes added over unspent ones: %v %v", added, err)
+	}
+	if listing, _ := db.ListFactors(ctx, owner); listing.RecoveryCodesRemaining != 2 {
+		t.Fatalf("remaining = %d", listing.RecoveryCodesRemaining)
+	}
+	for _, code := range first {
+		if err := db.RedeemRecoveryCode(ctx, owner, uuid.New(), code, roomyMFALimits); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if added, err := db.AddRecoveryCodesIfNone(ctx, owner, []string{recoveryHash(4)}); err != nil || !added {
+		t.Fatalf("after the last code was spent: %v %v", added, err)
+	}
+	if listing, _ := db.ListFactors(ctx, owner); listing.RecoveryCodesRemaining != 1 {
+		t.Fatalf("remaining after a new set = %d", listing.RecoveryCodesRemaining)
+	}
+	// A step-up racing a reset must not leave a set behind the wipe.
+	if err := db.ResetMFA(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := db.AddRecoveryCodesIfNone(ctx, owner, []string{recoveryHash(5)}); err != nil || added {
+		t.Fatalf("codes added with no verified factor: %v %v", added, err)
+	}
+	if listing, _ := db.ListFactors(ctx, owner); listing.RecoveryCodesRemaining != 0 {
+		t.Fatalf("remaining after a reset = %d", listing.RecoveryCodesRemaining)
 	}
 }
 
@@ -380,14 +495,14 @@ func recoveryCodes(t *testing.T, db store.Store) {
 	if err := db.ReplaceRecoveryCodes(ctx, owner, []string{first, second}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.RedeemRecoveryCode(ctx, owner, first, roomyMFALimits); !errors.Is(err, store.ErrInvalidCode) {
+	if err := db.RedeemRecoveryCode(ctx, owner, uuid.Nil, first, roomyMFALimits); !errors.Is(err, store.ErrInvalidCode) {
 		t.Fatalf("a code spent with no verified factor: %v", err)
 	}
 	verifyNew(t, db, owner, "Phone", 1)
-	if err := db.RedeemRecoveryCode(ctx, owner, first, roomyMFALimits); err != nil {
+	if err := db.RedeemRecoveryCode(ctx, owner, uuid.Nil, first, roomyMFALimits); err != nil {
 		t.Fatalf("redeem: %v", err)
 	}
-	if err := db.RedeemRecoveryCode(ctx, owner, first, roomyMFALimits); !errors.Is(err, store.ErrInvalidCode) {
+	if err := db.RedeemRecoveryCode(ctx, owner, uuid.Nil, first, roomyMFALimits); !errors.Is(err, store.ErrInvalidCode) {
 		t.Fatalf("spent twice: %v", err)
 	}
 	if listing, _ := db.ListFactors(ctx, owner); listing.RecoveryCodesRemaining != 1 {
@@ -395,20 +510,20 @@ func recoveryCodes(t *testing.T, db store.Store) {
 	}
 	other, _ := newUser(t, db, "mfa-recovery-other")
 	verifyNew(t, db, other, "Phone", 1)
-	if err := db.RedeemRecoveryCode(ctx, other, second, roomyMFALimits); !errors.Is(err, store.ErrInvalidCode) {
+	if err := db.RedeemRecoveryCode(ctx, other, uuid.Nil, second, roomyMFALimits); !errors.Is(err, store.ErrInvalidCode) {
 		t.Fatalf("another account spent the code: %v", err)
 	}
 	fresh := recoveryHash(3)
 	if err := db.ReplaceRecoveryCodes(ctx, owner, []string{fresh}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.RedeemRecoveryCode(ctx, owner, second, roomyMFALimits); !errors.Is(err, store.ErrInvalidCode) {
+	if err := db.RedeemRecoveryCode(ctx, owner, uuid.Nil, second, roomyMFALimits); !errors.Is(err, store.ErrInvalidCode) {
 		t.Fatalf("a replaced code still works: %v", err)
 	}
 	limits := roomyMFALimits
 	limits.MaxFailures = 3
-	if err := db.RedeemRecoveryCode(ctx, owner, fresh, limits); !errors.Is(err, store.ErrTooManyAttempts) {
-		t.Fatalf("past the account's budget: %v", err)
+	if err := db.RedeemRecoveryCode(ctx, owner, uuid.Nil, fresh, limits); !errors.Is(err, store.ErrTooManyAttempts) {
+		t.Fatalf("past the session's budget: %v", err)
 	}
 	if listing, _ := db.ListFactors(ctx, owner); listing.RecoveryCodesRemaining != 1 {
 		t.Fatal("a refused attempt spent the code")
