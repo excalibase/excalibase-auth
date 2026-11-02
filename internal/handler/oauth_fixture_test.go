@@ -26,6 +26,7 @@ import (
 	"github.com/excalibase/auth/internal/testutil/idpfake"
 	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -82,6 +83,10 @@ type oauthFixture struct {
 	count func(t *testing.T, table string) int
 	// countAudit reads how many audit rows have the event.
 	countAudit func(t *testing.T, event string) int
+	// auditMethods reads the method of every audit row with the event, oldest first.
+	auditMethods func(t *testing.T, event string) []string
+	// dropRecoveryCodes deletes an account's recovery codes straight in the database.
+	dropRecoveryCodes func(t *testing.T, userID int64)
 	// disable switches an account off straight in the database.
 	disable func(t *testing.T, email string)
 	// backdate ages an account, its last sign-in and its refresh tokens.
@@ -263,6 +268,22 @@ func newPostgresOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFix
 		}
 		return n
 	}
+	fx.auditMethods = func(t *testing.T, event string) []string {
+		rows, err := direct.Query(ctx, "SELECT COALESCE(method, '') FROM auth.audit_log WHERE event = $1 ORDER BY id", event)
+		if err != nil {
+			t.Fatalf("audit methods %s: %v", event, err)
+		}
+		methods, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatalf("audit methods %s: %v", event, err)
+		}
+		return methods
+	}
+	fx.dropRecoveryCodes = func(t *testing.T, userID int64) {
+		if _, err := direct.Exec(ctx, "DELETE FROM auth.mfa_recovery_codes WHERE user_id = $1", userID); err != nil {
+			t.Fatalf("drop recovery codes of %d: %v", userID, err)
+		}
+	}
 	return fx
 }
 
@@ -317,6 +338,27 @@ func newMySQLOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFixtur
 			t.Fatalf("count audit %s: %v", event, err)
 		}
 		return n
+	}
+	fx.auditMethods = func(t *testing.T, event string) []string {
+		rows, err := root.Query("SELECT COALESCE(method, '') FROM `auth`.`audit_log` WHERE event = ? ORDER BY id", event)
+		if err != nil {
+			t.Fatalf("audit methods %s: %v", event, err)
+		}
+		defer rows.Close()
+		var methods []string
+		for rows.Next() {
+			var method string
+			if err := rows.Scan(&method); err != nil {
+				t.Fatalf("audit methods %s: %v", event, err)
+			}
+			methods = append(methods, method)
+		}
+		return methods
+	}
+	fx.dropRecoveryCodes = func(t *testing.T, userID int64) {
+		if _, err := root.Exec("DELETE FROM `auth`.`mfa_recovery_codes` WHERE user_id = ?", userID); err != nil {
+			t.Fatalf("drop recovery codes of %d: %v", userID, err)
+		}
 	}
 	return fx
 }

@@ -39,7 +39,7 @@ const (
 )
 
 var defaultMFALimits = store.MFALimits{MaxFactors: 10, MaxFailures: 5, FailureWindow: 5 * time.Minute,
-	MaxDailyFailures: 20, StaleUnverified: 24 * time.Hour}
+	MaxDailyFailures: 10, MaxAccountDailyFailures: 20, StaleUnverified: 24 * time.Hour}
 
 // mfaRoutes mounts /factors (EXC-662); a project without MFA answers 404.
 func (h *AuthHandler) mfaRoutes(r chi.Router) {

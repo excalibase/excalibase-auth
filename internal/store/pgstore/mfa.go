@@ -128,7 +128,8 @@ func (s *Store) VerifyFactor(ctx context.Context, attempt store.FactorAttempt, l
 	if err := s.liveChallenge(ctx, tx, attempt); err != nil {
 		return store.VerifiedFactor{}, err
 	}
-	if err := failureBudget(ctx, tx, attempt.UserID, &attempt.FactorID, limits); err != nil {
+	spender := failureSpender{userID: attempt.UserID, familyID: attempt.FamilyID, factorID: &attempt.FactorID, callerAAL2: attempt.CallerAAL2}
+	if err := failureBudget(ctx, tx, spender, limits); err != nil {
 		return store.VerifiedFactor{}, err
 	}
 	step, ok, err := check(secret)
@@ -136,7 +137,7 @@ func (s *Store) VerifyFactor(ctx context.Context, attempt store.FactorAttempt, l
 		return store.VerifiedFactor{}, err
 	}
 	if !ok {
-		return store.VerifiedFactor{}, recordFailure(ctx, tx, attempt.UserID, &attempt.FactorID)
+		return store.VerifiedFactor{}, recordFailure(ctx, tx, spender)
 	}
 	return acceptFactor(ctx, tx, attempt, secret.Factor, step)
 }
@@ -193,30 +194,43 @@ func (s *Store) liveChallenge(ctx context.Context, tx pgx.Tx, attempt store.Fact
 	return nil
 }
 
-// failureBudget refuses once the window holds MaxFailures wrong codes for the
-// factor, or for the account's recovery codes when factorID is nil, or the
-// account's day holds MaxDailyFailures across all of them.
-func failureBudget(ctx context.Context, tx pgx.Tx, userID int64, factorID *string, limits store.MFALimits) error {
-	var recent, today int
+// failureSpender is who a wrong code is counted against: the session, for
+// one factor or (factorID nil) the recovery codes.
+type failureSpender struct {
+	userID     int64
+	familyID   uuid.UUID
+	factorID   *string
+	callerAAL2 bool
+}
+
+// failureBudget refuses once the session's window holds MaxFailures wrong
+// codes for the factor or the recovery codes, its day holds MaxDailyFailures,
+// or, for a TOTP code from aal1, the account's day holds MaxAccountDailyFailures.
+func failureBudget(ctx context.Context, tx pgx.Tx, spender failureSpender, limits store.MFALimits) error {
+	var recent, session, account int
 	if err := tx.QueryRow(ctx,
-		`SELECT count(*) FILTER (WHERE factor_id IS NOT DISTINCT FROM $2::uuid AND failed_at > NOW() - make_interval(secs => $3)),
-		        count(*)
+		`SELECT count(*) FILTER (WHERE family_id = $2 AND factor_id IS NOT DISTINCT FROM $3::uuid
+		                           AND failed_at > NOW() - make_interval(secs => $4)),
+		        count(*) FILTER (WHERE family_id = $2),
+		        count(*) FILTER (WHERE factor_id IS NOT NULL)
 		 FROM auth.mfa_failures WHERE user_id = $1 AND failed_at > NOW() - INTERVAL '1 day'`,
-		userID, factorID, limits.FailureWindow.Seconds()).Scan(&recent, &today); err != nil {
+		spender.userID, spender.familyID, spender.factorID, limits.FailureWindow.Seconds()).Scan(&recent, &session, &account); err != nil {
 		return err
 	}
-	if recent >= limits.MaxFailures || today >= limits.MaxDailyFailures {
+	accountCapped := spender.factorID != nil && !spender.callerAAL2 && account >= limits.MaxAccountDailyFailures
+	if recent >= limits.MaxFailures || session >= limits.MaxDailyFailures || accountCapped {
 		return store.ErrTooManyAttempts
 	}
 	return nil
 }
 
 // recordFailure commits the wrong code's row and answers ErrInvalidCode.
-func recordFailure(ctx context.Context, tx pgx.Tx, userID int64, factorID *string) error {
-	if _, err := tx.Exec(ctx, "DELETE FROM auth.mfa_failures WHERE user_id = $1 AND failed_at < NOW() - INTERVAL '1 day'", userID); err != nil {
+func recordFailure(ctx context.Context, tx pgx.Tx, spender failureSpender) error {
+	if _, err := tx.Exec(ctx, "DELETE FROM auth.mfa_failures WHERE user_id = $1 AND failed_at < NOW() - INTERVAL '1 day'", spender.userID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, "INSERT INTO auth.mfa_failures (user_id, factor_id) VALUES ($1, $2::uuid)", userID, factorID); err != nil {
+	if _, err := tx.Exec(ctx, "INSERT INTO auth.mfa_failures (user_id, factor_id, family_id) VALUES ($1, $2::uuid, $3)",
+		spender.userID, spender.factorID, spender.familyID); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -303,7 +317,38 @@ func (s *Store) ReplaceRecoveryCodes(ctx context.Context, userID int64, hashes [
 	return tx.Commit(ctx)
 }
 
-func (s *Store) RedeemRecoveryCode(ctx context.Context, userID int64, hash string, limits store.MFALimits) error {
+func (s *Store) AddRecoveryCodesIfNone(ctx context.Context, userID int64, hashes []string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", store.ErrUnavailable, err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockAccount(ctx, tx, userID); err != nil {
+		return false, err
+	}
+	var unspent bool
+	if err := tx.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM auth.mfa_recovery_codes WHERE user_id = $1 AND used_at IS NULL)", userID).Scan(&unspent); err != nil {
+		return false, err
+	}
+	if unspent {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM auth.mfa_recovery_codes WHERE user_id = $1", userID); err != nil {
+		return false, err
+	}
+	for _, hash := range hashes {
+		if _, err := tx.Exec(ctx, "INSERT INTO auth.mfa_recovery_codes (user_id, code_hash) VALUES ($1, $2)", userID, hash); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) RedeemRecoveryCode(ctx context.Context, userID int64, familyID uuid.UUID, hash string, limits store.MFALimits) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: %w", store.ErrUnavailable, err)
@@ -312,7 +357,8 @@ func (s *Store) RedeemRecoveryCode(ctx context.Context, userID int64, hash strin
 	if err := lockAccount(ctx, tx, userID); err != nil {
 		return err
 	}
-	if err := failureBudget(ctx, tx, userID, nil, limits); err != nil {
+	spender := failureSpender{userID: userID, familyID: familyID}
+	if err := failureBudget(ctx, tx, spender, limits); err != nil {
 		return err
 	}
 	tag, err := tx.Exec(ctx,
@@ -323,7 +369,7 @@ func (s *Store) RedeemRecoveryCode(ctx context.Context, userID int64, hash strin
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return recordFailure(ctx, tx, userID, nil)
+		return recordFailure(ctx, tx, spender)
 	}
 	return tx.Commit(ctx)
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/excalibase/auth/internal/store"
 	"github.com/excalibase/auth/internal/token"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 // mfaFailureRetry is what a locked caller is told to wait, the failure window.
@@ -30,11 +31,12 @@ type recoveryRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
-// elevatedSession is an aal2 session, with the recovery codes of an account
-// that just turned MFA on.
+// elevatedSession is an aal2 session, with a set of recovery codes when the
+// account had none unspent, or recoveryCodesMissing when that set could not be stored.
 type elevatedSession struct {
 	*domain.AuthResponse
-	RecoveryCodes []string `json:"recoveryCodes,omitempty"`
+	RecoveryCodes        []string `json:"recoveryCodes,omitempty"`
+	RecoveryCodesMissing bool     `json:"recoveryCodesMissing,omitempty"`
 }
 
 // stepUpSession is the caller's account and refresh token, checked before any
@@ -43,6 +45,7 @@ type stepUpSession struct {
 	account   store.Account
 	roles     accountRoles
 	presented string
+	familyID  uuid.UUID
 }
 
 func (h *AuthHandler) stepUpSession(w http.ResponseWriter, r *http.Request, db store.Store, refreshToken string) (stepUpSession, bool) {
@@ -81,11 +84,11 @@ func (h *AuthHandler) stepUpSession(w http.ResponseWriter, r *http.Request, db s
 		httpError(w, errSettingsUnreadable, http.StatusServiceUnavailable)
 		return stepUpSession{}, false
 	}
-	return stepUpSession{account: account, roles: roles, presented: presented}, true
+	return stepUpSession{account: account, roles: roles, presented: presented, familyID: state.FamilyID}, true
 }
 
 // VerifyFactor checks a TOTP code against a live challenge and moves the
-// caller's session to aal2. The first verified factor also gets recovery codes.
+// caller's session to aal2.
 func (h *AuthHandler) VerifyFactor(w http.ResponseWriter, r *http.Request) {
 	var req verifyFactorRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxFactorBody)).Decode(&req); err != nil || req.ChallengeID == "" || req.Code == "" {
@@ -106,8 +109,8 @@ func (h *AuthHandler) VerifyFactor(w http.ResponseWriter, r *http.Request) {
 	}
 	userID, factorID := session.account.ID, chi.URLParam(r, "factorId")
 	attempt := store.FactorAttempt{UserID: userID, FactorID: factorID, ChallengeID: req.ChallengeID,
-		CallerAAL2: atAAL2(middleware.ClaimsFromContext(r.Context()))}
-	verified, err := db.VerifyFactor(r.Context(), attempt,
+		FamilyID: session.familyID, CallerAAL2: atAAL2(middleware.ClaimsFromContext(r.Context()))}
+	_, err := db.VerifyFactor(r.Context(), attempt,
 		h.mfaLimits, func(factor store.FactorSecret) (int64, bool, error) {
 			secret, err := keys.Open(factor.SecretSealed, userID, factor.ID)
 			if err != nil {
@@ -119,13 +122,7 @@ func (h *AuthHandler) VerifyFactor(w http.ResponseWriter, r *http.Request) {
 	if !h.writeCodeFailure(w, r, db, userID, methodTOTP, err) {
 		return
 	}
-	// Codes are issued once the session is elevated, so they are never stored unseen.
-	h.finishStepUp(w, r, db, session, methodTOTP, func() []string {
-		if !verified.FirstForAccount {
-			return nil
-		}
-		return h.issueRecoveryCodes(r, db, keys, userID)
-	})
+	h.finishStepUp(w, r, db, keys, session, methodTOTP)
 }
 
 // writeCodeFailure answers a refused code and audits it; true when there was none.
@@ -137,6 +134,7 @@ func (h *AuthHandler) writeCodeFailure(w http.ResponseWriter, r *http.Request, d
 		h.recordAudit(r.Context(), db, projectKey(r), store.AuditEvent{UserID: userID, Event: "mfa_failed", Method: method, IP: h.clientIP(r)})
 		httpError(w, codeInvalidCode, http.StatusBadRequest)
 	case errors.Is(err, store.ErrTooManyAttempts):
+		h.recordAudit(r.Context(), db, projectKey(r), store.AuditEvent{UserID: userID, Event: "mfa_too_many_attempts", Method: method, IP: h.clientIP(r)})
 		w.Header().Set("Retry-After", strconv.Itoa(int(mfaFailureRetry.Seconds())))
 		httpError(w, codeTooManyAttempts, http.StatusTooManyRequests)
 	case errors.Is(err, store.ErrInsufficientAAL):
@@ -154,13 +152,11 @@ func (h *AuthHandler) writeCodeFailure(w http.ResponseWriter, r *http.Request, d
 	return false
 }
 
-// issueRecoveryCodes stores a new set and returns it; a failure leaves the
-// account to regenerate them from its aal2 session.
-func (h *AuthHandler) issueRecoveryCodes(r *http.Request, db store.Store, keys mfa.Keys, userID int64) []string {
+// newRecoveryCodes is a fresh set and the hashes it is stored as.
+func newRecoveryCodes(keys mfa.Keys) ([]string, []string, error) {
 	codes, err := mfa.NewRecoveryCodes(mfa.RecoveryCodeCount)
 	if err != nil {
-		log.Printf("auth.mfa.recovery_codes_failed project=%s userId=%d: %v", safeLog(projectKey(r)), userID, err)
-		return nil
+		return nil, nil, err
 	}
 	hashes := make([]string, 0, len(codes))
 	for _, code := range codes {
@@ -168,16 +164,50 @@ func (h *AuthHandler) issueRecoveryCodes(r *http.Request, db store.Store, keys m
 		hash, _ := keys.HashRecoveryCode(code)
 		hashes = append(hashes, hash)
 	}
-	if err := db.ReplaceRecoveryCodes(r.Context(), userID, hashes); err != nil {
-		log.Printf("auth.mfa.recovery_codes_failed project=%s userId=%d", safeLog(projectKey(r)), userID)
+	return codes, hashes, nil
+}
+
+// issueRecoveryCodes stores a new set and returns it; a failure leaves the
+// account to regenerate them from its aal2 session.
+func (h *AuthHandler) issueRecoveryCodes(r *http.Request, db store.Store, keys mfa.Keys, userID int64) []string {
+	codes, hashes, err := newRecoveryCodes(keys)
+	if err == nil {
+		err = db.ReplaceRecoveryCodes(r.Context(), userID, hashes)
+	}
+	if err != nil {
+		log.Printf("auth.mfa.recovery_codes_failed project=%s userId=%d: %v", safeLog(projectKey(r)), userID, err)
 		return nil
 	}
 	return codes
 }
 
+type recoveryCodesOutcome struct {
+	codes   []string
+	missing bool
+}
+
+// stepUpRecoveryCodes hands out a set when the account has no unspent code:
+// its first factor, a set whose answer was lost, or the last code spent.
+func (h *AuthHandler) stepUpRecoveryCodes(r *http.Request, db store.Store, keys mfa.Keys, userID int64) recoveryCodesOutcome {
+	codes, hashes, err := newRecoveryCodes(keys)
+	added := false
+	if err == nil {
+		added, err = db.AddRecoveryCodesIfNone(r.Context(), userID, hashes)
+	}
+	switch {
+	case err != nil:
+		log.Printf("auth.mfa.recovery_codes_failed project=%s userId=%d: %v", safeLog(projectKey(r)), userID, err)
+		return recoveryCodesOutcome{missing: true}
+	case !added:
+		return recoveryCodesOutcome{}
+	}
+	return recoveryCodesOutcome{codes: codes}
+}
+
 // finishStepUp spends the presented refresh token into an aal2 successor in
-// the same session and answers it.
-func (h *AuthHandler) finishStepUp(w http.ResponseWriter, r *http.Request, db store.Store, session stepUpSession, method string, recoveryCodes func() []string) {
+// the same session and answers it. Codes are issued only after that, so a
+// refused elevation never stores a set unseen; the next step-up issues it.
+func (h *AuthHandler) finishStepUp(w http.ResponseWriter, r *http.Request, db store.Store, keys mfa.Keys, session stepUpSession, method string) {
 	successor, successorHash, err := token.New()
 	if err != nil {
 		httpError(w, errRefreshTokenStore.Error(), http.StatusInternalServerError)
@@ -189,10 +219,7 @@ func (h *AuthHandler) finishStepUp(w http.ResponseWriter, r *http.Request, db st
 		return
 	}
 	h.recordAudit(r.Context(), db, projectKey(r), store.AuditEvent{UserID: account.ID, Event: "mfa_verified", Method: method, IP: h.clientIP(r)})
-	var codes []string
-	if recoveryCodes != nil {
-		codes = recoveryCodes()
-	}
+	codes := h.stepUpRecoveryCodes(r, db, keys, account.ID)
 	claims, err := h.accessClaims(r, projectKey(r), userInfoOf(account), session.roles, account.EmailVerified)
 	if err != nil {
 		writeSessionFailure(w, err)
@@ -204,7 +231,7 @@ func (h *AuthHandler) finishStepUp(w http.ResponseWriter, r *http.Request, db st
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, elevatedSession{AuthResponse: resp, RecoveryCodes: codes})
+	writeJSON(w, elevatedSession{AuthResponse: resp, RecoveryCodes: codes.codes, RecoveryCodesMissing: codes.missing})
 }
 
 func writeElevateFailure(w http.ResponseWriter, err error) {
@@ -245,11 +272,11 @@ func (h *AuthHandler) RecoverWithCode(w http.ResponseWriter, r *http.Request) {
 	if !wellFormed {
 		hash = unmatchableHash
 	}
-	err := db.RedeemRecoveryCode(r.Context(), session.account.ID, hash, h.mfaLimits)
+	err := db.RedeemRecoveryCode(r.Context(), session.account.ID, session.familyID, hash, h.mfaLimits)
 	if !h.writeCodeFailure(w, r, db, session.account.ID, methodRecovery, err) {
 		return
 	}
-	h.finishStepUp(w, r, db, session, methodRecovery, nil)
+	h.finishStepUp(w, r, db, keys, session, methodRecovery)
 }
 
 // RegenerateRecoveryCodes replaces the caller's set; it takes an aal2 session.
@@ -303,7 +330,7 @@ func (h *AuthHandler) ResetUserMFA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor, _ := userManagerActor(middleware.ClaimsFromContext(r.Context()), projectKey(r))
-	h.recordAudit(r.Context(), db, projectKey(r), store.AuditEvent{UserID: userID, Event: "mfa_reset", Method: "admin", IP: h.clientIP(r)})
+	h.recordAudit(r.Context(), db, projectKey(r), store.AuditEvent{UserID: userID, Event: "mfa_reset", Method: auditActorKind(actor), IP: h.clientIP(r)})
 	log.Printf("auth.mfa.reset project=%s userId=%d actor=%s", safeLog(projectKey(r)), userID, safeLog(actor))
 	w.WriteHeader(http.StatusNoContent)
 }
