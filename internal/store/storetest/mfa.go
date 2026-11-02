@@ -198,6 +198,16 @@ func recoveryCodesIfNone(t *testing.T, db store.Store) {
 	if listing, _ := db.ListFactors(ctx, owner); listing.RecoveryCodesRemaining != 1 {
 		t.Fatalf("remaining after a new set = %d", listing.RecoveryCodesRemaining)
 	}
+	// A step-up racing a reset must not leave a set behind the wipe.
+	if err := db.ResetMFA(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := db.AddRecoveryCodesIfNone(ctx, owner, []string{recoveryHash(5)}); err != nil || added {
+		t.Fatalf("codes added with no verified factor: %v %v", added, err)
+	}
+	if listing, _ := db.ListFactors(ctx, owner); listing.RecoveryCodesRemaining != 0 {
+		t.Fatalf("remaining after a reset = %d", listing.RecoveryCodesRemaining)
+	}
 }
 
 func enroll(t *testing.T, db store.Store, userID int64, name string) store.Factor {

@@ -326,12 +326,14 @@ func (s *Store) AddRecoveryCodesIfNone(ctx context.Context, userID int64, hashes
 	if err := lockAccount(ctx, tx, userID); err != nil {
 		return false, err
 	}
-	var unspent bool
+	// A reset or removal racing the step-up leaves no factor; no set may outlive it.
+	var unspent, enrolled bool
 	if err := tx.QueryRow(ctx,
-		"SELECT EXISTS (SELECT 1 FROM auth.mfa_recovery_codes WHERE user_id = $1 AND used_at IS NULL)", userID).Scan(&unspent); err != nil {
+		`SELECT EXISTS (SELECT 1 FROM auth.mfa_recovery_codes WHERE user_id = $1 AND used_at IS NULL),
+		        EXISTS (SELECT 1 FROM auth.mfa_factors WHERE user_id = $1 AND status = 'verified')`, userID).Scan(&unspent, &enrolled); err != nil {
 		return false, err
 	}
-	if unspent {
+	if unspent || !enrolled {
 		return false, nil
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM auth.mfa_recovery_codes WHERE user_id = $1", userID); err != nil {
