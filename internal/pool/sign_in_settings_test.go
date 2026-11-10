@@ -2,6 +2,8 @@ package pool
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -171,34 +173,60 @@ func TestGuestSwitchReadsAsOffWhileTheFlagIsOff(t *testing.T) {
 	}
 }
 
-func TestMFAKeyReadsTheProjectsVaultEntryAndRefusesABadOne(t *testing.T) {
-	var path string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path = r.URL.Path
+const testMFAKeyB64 = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
+func mfaFingerprint(encoded string) string {
+	sum := sha256.Sum256([]byte(encoded))
+	return hex.EncodeToString(sum[:])
+}
+
+// mfaServer serves a vault key and the project info that records its fingerprint.
+func mfaServer(vaultKey, recordedFingerprint string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/vault/secrets/projects/p1/auth/mfa":
-			_, _ = w.Write([]byte(`{"key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}`))
-		case "/vault/secrets/projects/short/auth/mfa":
-			_, _ = w.Write([]byte(`{"key":"c2hvcnQ="}`))
-		case "/vault/secrets/projects/garbled/auth/mfa":
-			_, _ = w.Write([]byte(`{"key":"%%%"}`))
+		case "/projects/p/info":
+			_, _ = w.Write([]byte(`{"mfaEnabled":true,"mfaKeyFingerprint":"` + recordedFingerprint + `"}`))
+		case "/vault/secrets/projects/p/auth/mfa":
+			_, _ = w.Write([]byte(`{"key":"` + vaultKey + `"}`))
 		default:
 			w.WriteHeader(http.StatusForbidden)
 		}
 	}))
+}
+
+func TestMFAKeyReadsTheProjectsVaultEntryAndRefusesABadOne(t *testing.T) {
+	ctx := context.Background()
+	for _, bad := range []string{"c2hvcnQ=", "%%%"} {
+		srv := mfaServer(bad, mfaFingerprint(bad))
+		mgr := NewManager(srv.URL, token.Literal("pat"), time.Hour)
+		if _, err := mgr.MFAKey(ctx, "p"); !errors.Is(err, ErrNoMFAKey) {
+			t.Fatalf("%s key: %v", bad, err)
+		}
+		srv.Close()
+	}
+	srv := mfaServer(testMFAKeyB64, mfaFingerprint(testMFAKeyB64))
 	defer srv.Close()
 	mgr := NewManager(srv.URL, token.Literal("pat"), time.Hour)
-	ctx := context.Background()
-	if key, err := mgr.MFAKey(ctx, "p1"); err != nil || string(key) != "0123456789abcdef0123456789abcdef" || path != "/vault/secrets/projects/p1/auth/mfa" {
-		t.Fatalf("key len=%d err=%v path=%s", len(key), err, path)
-	}
-	for _, project := range []string{"short", "garbled"} {
-		if _, err := mgr.MFAKey(ctx, project); !errors.Is(err, ErrNoMFAKey) {
-			t.Fatalf("%s key: %v", project, err)
-		}
+	if key, err := mgr.MFAKey(ctx, "p"); err != nil || string(key) != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("key len=%d err=%v", len(key), err)
 	}
 	if _, err := mgr.MFAKey(ctx, "p3"); err == nil {
 		t.Fatal("a refused read returned a key")
+	}
+}
+
+func TestMFAKeyIsRefusedWhenItIsNotTheOneTheFactorsWereSealedWith(t *testing.T) {
+	other := "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA="
+	for name, recorded := range map[string]string{
+		"a different key recorded": mfaFingerprint(other),
+		"no fingerprint recorded":  "",
+	} {
+		srv := mfaServer(testMFAKeyB64, recorded)
+		mgr := NewManager(srv.URL, token.Literal("pat"), time.Hour)
+		if key, err := mgr.MFAKey(context.Background(), "p"); !errors.Is(err, ErrMFAKeyMismatch) || key != nil {
+			t.Errorf("%s: key=%v err=%v", name, key != nil, err)
+		}
+		srv.Close()
 	}
 }
 
