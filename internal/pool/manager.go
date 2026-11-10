@@ -63,6 +63,9 @@ type ProjectInfo struct {
 	// MFAEnabled turns on TOTP second factors and the aal/amr claims; sent
 	// only while the control plane's authmfa flag is on.
 	MFAEnabled bool `json:"mfaEnabled,omitempty"`
+	// MFAKeyFingerprint is the SHA-256 of the key the project's factors were
+	// sealed with, as the control plane recorded it.
+	MFAKeyFingerprint string `json:"mfaKeyFingerprint,omitempty"`
 }
 
 type infoEntry struct {

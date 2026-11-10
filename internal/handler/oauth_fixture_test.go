@@ -5,7 +5,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -124,6 +126,8 @@ func (s *signInSettings) info(authURL string) map[string]any {
 	}
 	if s.mfa {
 		info["mfaEnabled"] = true
+		sum := sha256.Sum256([]byte(testMFAKey))
+		info["mfaKeyFingerprint"] = hex.EncodeToString(sum[:])
 	}
 	return info
 }

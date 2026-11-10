@@ -2,7 +2,10 @@ package pool
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	neturl "net/url"
@@ -141,8 +144,14 @@ func (m *Manager) HookSecret(ctx context.Context, projectID string) (string, err
 // ErrNoMFAKey means the vault holds no usable MFA key for the project.
 var ErrNoMFAKey = errors.New("mfa key is not set")
 
+// ErrMFAKeyMismatch means the vault's MFA key is not the one the project's
+// factors were sealed with (or none was recorded); using it would lock users
+// out or seal new factors under a second key.
+var ErrMFAKeyMismatch = errors.New("mfa key does not match the recorded fingerprint")
+
 // MFAKey reads the project's 32-byte MFA key from the vault on every call, so
-// nothing but the vault keeps it.
+// nothing but the vault keeps it. It answers only the key whose fingerprint
+// the control plane recorded.
 func (m *Manager) MFAKey(ctx context.Context, projectID string) ([]byte, error) {
 	var entry struct {
 		Key string `json:"key"`
@@ -154,6 +163,15 @@ func (m *Manager) MFAKey(ctx context.Context, projectID string) ([]byte, error) 
 	key, err := base64.StdEncoding.DecodeString(entry.Key)
 	if err != nil || len(key) != mfaKeySize {
 		return nil, ErrNoMFAKey
+	}
+	info, err := m.GetProjectInfo(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(entry.Key))
+	recorded, decodeErr := hex.DecodeString(info.MFAKeyFingerprint)
+	if decodeErr != nil || subtle.ConstantTimeCompare(sum[:], recorded) != 1 {
+		return nil, ErrMFAKeyMismatch
 	}
 	return key, nil
 }
