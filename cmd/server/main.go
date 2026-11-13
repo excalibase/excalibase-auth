@@ -87,7 +87,7 @@ func main() {
 
 	// Router
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(custommw.AccessLog(log.Default()))
 	r.Use(middleware.Recoverer)
 	r.Use(custommw.SecurityHeaders)
 	// Project routes answer CORS from the project's own allowlist (see Routes).

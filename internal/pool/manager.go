@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	neturl "net/url"
+	"regexp"
 	"sync"
 	"time"
 
@@ -272,6 +273,13 @@ func (m *Manager) openMySQL(ctx context.Context, projectID string, record creden
 // the handlers answer 409 rather than 503.
 var ErrNoDatabase = errors.New("project has no database")
 
+// ErrInvalidProjectID refuses an id that could alter the vault path.
+var ErrInvalidProjectID = errors.New("invalid project id")
+
+// projectIDPattern is what provisioning mints (proj-<alnum>); anything else
+// must not reach a vault path.
+var projectIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+
 // refreshUnchanged keeps the existing store when the vault record is identical.
 func (m *Manager) refreshUnchanged(projectID, fingerprint string) (store.Store, bool) {
 	m.mu.Lock()
@@ -290,7 +298,10 @@ func (m *Manager) fetchCredentials(ctx context.Context, orgSlug, projectID strin
 	// project-scoped only (provisioning refactor 2026-05). Drop the org
 	// dimension to match what provisioning writes.
 	_ = orgSlug
-	url := fmt.Sprintf("%s/vault/secrets/projects/%s/credentials/auth_admin", m.provisioningURL, projectID)
+	if !projectIDPattern.MatchString(projectID) {
+		return credentialRecord{}, fmt.Errorf("%w: %q", ErrInvalidProjectID, projectID)
+	}
+	url := fmt.Sprintf("%s/vault/secrets/projects/%s/credentials/auth_admin", m.provisioningURL, neturl.PathEscape(projectID))
 	log.Printf("INFO: fetching credentials from %s", url)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

@@ -304,7 +304,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("auth.register tenant=%s org=%s email=%s", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email))
+	log.Printf("auth.register tenant=%s org=%s", safeLog(tenantID), safeLog(orgSlug))
 	// Asked on every attempt, before the account check, so neither its answer
 	// nor its latency tells whether the address has an account.
 	if err := h.allowNewUser(r.Context(), projectID, newUser{Method: "password", Email: req.Email}); err != nil {
@@ -428,11 +428,11 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "invalid request", 400)
 		return
 	}
-	log.Printf("auth.login tenant=%s org=%s email=%s", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email))
+	log.Printf("auth.login tenant=%s org=%s", safeLog(tenantID), safeLog(orgSlug))
 	resp, code, err := h.exchangePassword(r, projectID, req.Email, req.Password)
 	if err != nil {
 		metrics.LoginFailures.Inc()
-		log.Printf("auth.login.fail tenant=%s org=%s email=%s code=%d err=%v", safeLog(tenantID), safeLog(orgSlug), safeLog(req.Email), code, err)
+		log.Printf("auth.login.fail tenant=%s org=%s code=%d err=%v", safeLog(tenantID), safeLog(orgSlug), code, err)
 		writeError(w, err, code)
 		return
 	}
@@ -449,19 +449,9 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 		return nil, status, perr
 	}
 
-	user, err := db.AccountByEmail(r.Context(), email)
+	user, status, err := h.authenticate(r.Context(), db, email, password)
 	if err != nil {
-		return nil, 401, errInvalidCredentials
-	}
-	if !user.Enabled {
-		return nil, 403, errAccountDisabled
-	}
-	matched, err := h.checkPassword(r.Context(), password, user.PasswordHash)
-	if err != nil {
-		return nil, 503, errHashingBusy
-	}
-	if !matched {
-		return nil, 401, errInvalidCredentials
+		return nil, status, err
 	}
 	// EXC-11: checked only after the password, so this never tells an
 	// unauthenticated caller whether an address is registered.
@@ -481,6 +471,32 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 		return nil, status, failure
 	}
 	return resp, 200, nil
+}
+
+// accountLookup is the one store call authenticate needs.
+type accountLookup interface {
+	AccountByEmail(ctx context.Context, email string) (store.Account, error)
+}
+
+// authenticate checks the password for every address, known or not, so timing
+// does not reveal registration; a disabled account is reported only once the
+// password was right, so it never confirms an address to a guesser.
+func (h *AuthHandler) authenticate(ctx context.Context, accounts accountLookup, email, password string) (store.Account, int, error) {
+	user, err := accounts.AccountByEmail(ctx, email)
+	if err != nil {
+		user = store.Account{}
+	}
+	matched, checkErr := h.checkPassword(ctx, password, user.PasswordHash)
+	if checkErr != nil {
+		return store.Account{}, 503, errHashingBusy
+	}
+	if err != nil || !matched {
+		return store.Account{}, 401, errInvalidCredentials
+	}
+	if !user.Enabled {
+		return store.Account{}, 403, errAccountDisabled
+	}
+	return user, 0, nil
 }
 
 func (h *AuthHandler) Validate(w http.ResponseWriter, r *http.Request) {
