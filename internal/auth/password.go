@@ -28,7 +28,11 @@ const (
 	// DefaultHashSlots fits the smallest shipped memory limit (128Mi); the
 	// charts set PASSWORD_HASH_CONCURRENCY to match their own limit.
 	DefaultHashSlots = 2
-	DefaultHashWait  = time.Second
+	DefaultHashWait  = 500 * time.Millisecond
+
+	// Shares of the container hashing may occupy at once.
+	hashMemoryPercent = 25
+	hashCPUPercent    = 50
 
 	maxStoredKeyLen  = 64
 	maxStoredSaltLen = 64
@@ -65,6 +69,20 @@ func NewHasher(slots int, wait time.Duration) *Hasher {
 		panic(fmt.Sprintf("auth: password hash slots must be at least 1, got %d", slots))
 	}
 	return &Hasher{slots: make(chan struct{}, slots), wait: wait, derive: argon2.IDKey}
+}
+
+// HashSlots sizes the gate as the smaller of a CPU share and a memory share
+// (each hash holds HashMemoryBytes), never below one so sign-in always works
+// on a small container. Unknown memory (0) leaves the CPU share to decide.
+func HashSlots(memoryBytes int64, cpus int) int {
+	slots := cpus * hashCPUPercent / 100
+	if memoryBytes > 0 {
+		byMemory := int(memoryBytes * hashMemoryPercent / 100 / HashMemoryBytes)
+		if byMemory < slots || slots < 1 {
+			slots = byMemory
+		}
+	}
+	return max(slots, 1)
 }
 
 // CheckHashBudget refuses a slot count whose hashes alone would take more

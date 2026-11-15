@@ -247,7 +247,7 @@ func (h *AuthHandler) currentPasswordMatches(w http.ResponseWriter, r *http.Requ
 	}
 	matched, err := h.checkPassword(r.Context(), *current, account.PasswordHash)
 	if err != nil {
-		writeHashFailure(w, err)
+		writeHashFailure(w, r, err)
 		return false
 	}
 	if h.limits != nil {
@@ -280,7 +280,7 @@ func (h *AuthHandler) applyUserUpdate(w http.ResponseWriter, r *http.Request, db
 	}
 	if update.request.Password != nil {
 		if result.Session, err = h.changePassword(r, db, account, *update.request.Password); err != nil {
-			writeError(w, err, statusOf(err))
+			writeError(w, r, err, statusOf(err))
 			return result, false
 		}
 	}

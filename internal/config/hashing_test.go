@@ -12,7 +12,7 @@ func TestParseHashConcurrency(t *testing.T) {
 		want    int
 		wantErr bool
 	}{
-		{raw: "", want: 2},
+		{raw: "", want: 0}, // unset: size from the container
 		{raw: "4", want: 4},
 		{raw: " 3 ", want: 3},
 		{raw: "0", wantErr: true},

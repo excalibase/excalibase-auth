@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"time"
 
@@ -132,13 +133,17 @@ func newSigner(privateKeyPEM string, cfg config.Config) (*auth.JWTService, error
 	return signer, nil
 }
 
-// configureHashing sizes the password hasher against the container's memory
+// configureHashing sizes the password hasher (slots 0 = a share of the
+// container) against the container's memory
 // limit and, unless GOMEMLIMIT is set, keeps Go's heap below that limit so the
 // collector runs before the kernel OOM-kills the pod.
 func configureHashing(slots int, memoryMaxPath string) (*auth.Hasher, error) {
 	limit, err := config.MemoryLimitBytes(memoryMaxPath)
 	if err != nil {
 		return nil, err
+	}
+	if slots == 0 {
+		slots = auth.HashSlots(limit, runtime.GOMAXPROCS(0))
 	}
 	if err := auth.CheckHashBudget(slots, limit); err != nil {
 		return nil, fmt.Errorf("PASSWORD_HASH_CONCURRENCY: %w", err)

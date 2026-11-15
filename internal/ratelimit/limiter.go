@@ -95,6 +95,17 @@ func (l *Limiter) Exhausted(key string) Decision {
 	return Decision{Allowed: true}
 }
 
+// Refund gives back one token consumed by Allow for work that never ran (the
+// request was refused for load). It never raises a key above its limit and
+// never creates one.
+func (l *Limiter) Refund(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b, ok := l.buckets[key]; ok {
+		b.tokens = min(b.tokens+1, l.limit)
+	}
+}
+
 // Reset forgets key, restoring its full budget.
 func (l *Limiter) Reset(key string) {
 	l.mu.Lock()

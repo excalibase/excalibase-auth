@@ -41,6 +41,13 @@ func TestConfigureHashingSetsTheGoMemoryLimitBelowTheContainers(t *testing.T) {
 	}
 }
 
+func TestConfigureHashingSizesAnUnsetGateFromTheContainer(t *testing.T) {
+	hasher, err := configureHashing(0, memoryMaxFile(t, "134217728"))
+	if err != nil || hasher == nil {
+		t.Fatalf("hasher=%v err=%v", hasher, err)
+	}
+}
+
 func TestConfigureHashingWithoutALimitStillBoundsHashing(t *testing.T) {
 	hasher, err := configureHashing(2, memoryMaxFile(t, "max"))
 	if err != nil || hasher == nil {

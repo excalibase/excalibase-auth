@@ -178,3 +178,22 @@ func TestLimiter_ConcurrentAccessIsSafe(t *testing.T) {
 		t.Fatal("500 concurrent requests must exhaust a limit of 100")
 	}
 }
+
+func TestLimiter_RefundGivesBackOneTokenNeverAboveTheLimit(t *testing.T) {
+	l := New(2, time.Minute)
+	l.Allow("k")
+	l.Allow("k")
+	if l.Allow("k").Allowed {
+		t.Fatal("third request admitted")
+	}
+	l.Refund("k")
+	if !l.Allow("k").Allowed {
+		t.Fatal("a refunded token was not usable")
+	}
+	l.Refund("fresh")
+	l.Refund("fresh")
+	l.Refund("fresh")
+	if !l.Allow("fresh").Allowed || !l.Allow("fresh").Allowed || l.Allow("fresh").Allowed {
+		t.Fatal("refunds raised a key above its limit")
+	}
+}

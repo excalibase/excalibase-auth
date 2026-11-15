@@ -163,7 +163,7 @@ func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	hash, err := h.hasher.Hash(r.Context(), req.NewPassword)
 	if err != nil {
-		writeHashFailure(w, err)
+		writeHashFailure(w, r, err)
 		return
 	}
 	userID, err := passwordResetTokens.redeem(r.Context(), db, req.Token)

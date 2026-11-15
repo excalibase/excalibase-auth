@@ -411,3 +411,59 @@ func TestRateLimit_GuestIsPerClientAndLeavesTheRegisterBudget(t *testing.T) {
 		}
 	}
 }
+
+// busyHandler is a route whose handler could not hash and says so.
+func busyHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		MarkBusy(r.Context())
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+}
+
+// A request refused for load (503) never checked a password, so it must not
+// spend the per-IP or per-project budget.
+func TestRateLimit_BusyRefusalIsRefunded(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	limits := NewRateLimits(testConfig(), ratelimit.WithClock(clock.Now))
+	r := chi.NewRouter()
+	r.Route("/auth/{orgSlug}/{projectId}", func(r chi.Router) {
+		r.With(limits.Login).Post("/login", busyHandler().ServeHTTP)
+		r.With(limits.Token).Post("/token", busyHandler().ServeHTTP)
+	})
+	for i := 0; i < 10; i++ {
+		if rr := post(r, testLoginPath, "9.9.9.9", loginBody); rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("login %d: got %d, want 503 (budget spent by refusals)", i, rr.Code)
+		}
+		if rr := post(r, testTokenPath, "9.9.9.9", `{"grant_type":"password","email":"a@b.c"}`); rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("token %d: got %d", i, rr.Code)
+		}
+	}
+}
+
+func TestRateLimit_BusyRegisterRefundsIPAndProject(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	limits := NewRateLimits(testConfig(), ratelimit.WithClock(clock.Now))
+	r := chi.NewRouter()
+	r.Route("/auth/{orgSlug}/{projectId}", func(r chi.Router) {
+		r.With(limits.Register).Post("/register", busyHandler().ServeHTTP)
+	})
+	for i := 0; i < 10; i++ {
+		if rr := post(r, testRegisterPath, "9.9.9.9", "{}"); rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("register %d: got %d, want 503", i, rr.Code)
+		}
+	}
+}
+
+// A 503 that is not a load refusal (a pool or vault failure) still spends the
+// budget, so the limiter keeps shielding those lookups.
+func TestRateLimit_OtherServerErrorsStillSpendTheBudget(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	r := newTestRouter(testConfig(), clock, http.StatusServiceUnavailable)
+	codes := []int{}
+	for i := 0; i < 4; i++ {
+		codes = append(codes, post(r, testLoginPath, "9.9.9.9", loginBody).Code)
+	}
+	if codes[3] != http.StatusTooManyRequests {
+		t.Fatalf("codes %v: the fourth must be 429", codes)
+	}
+}

@@ -240,3 +240,30 @@ func TestHashBudgetFitsTheMemoryLimit(t *testing.T) {
 		t.Errorf("no limit known: %v", err)
 	}
 }
+
+func TestHashSlotsAreAShareOfMemoryAndCPU(t *testing.T) {
+	const gib = 1 << 30
+	cases := []struct {
+		name string
+		mem  int64
+		cpus int
+		want int
+	}{
+		{"128Mi pod keeps the one-slot floor", 128 << 20, 1, 1},
+		{"1 GiB, 2 cpus: cpu share is the cap", 1 * gib, 2, 1},
+		{"1 GiB, 32 cpus: memory share is the cap", 1 * gib, 32, 13},
+		{"4 GiB, 8 cpus: cpu share is the cap", 4 * gib, 8, 4},
+		{"unknown memory leaves the cpu share", 0, 8, 4},
+	}
+	for _, tc := range cases {
+		if got := HashSlots(tc.mem, tc.cpus); got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDefaultHashWaitIsHalfASecond(t *testing.T) {
+	if DefaultHashWait != 500*time.Millisecond {
+		t.Fatalf("wait = %v", DefaultHashWait)
+	}
+}
