@@ -321,7 +321,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	// Hashed before the insert, so a taken address costs the same time as a new one.
 	hash, err := h.hasher.Hash(r.Context(), req.Password)
 	if err != nil {
-		writeHashFailure(w, err)
+		writeHashFailure(w, r, err)
 		return
 	}
 	user, role, created, err := insertUser(r.Context(), db, req, hash)
@@ -433,7 +433,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		metrics.LoginFailures.Inc()
 		log.Printf("auth.login.fail tenant=%s org=%s code=%d err=%v", safeLog(tenantID), safeLog(orgSlug), code, err)
-		writeError(w, err, code)
+		writeError(w, r, err, code)
 		return
 	}
 	metrics.Logins.Inc()
@@ -970,25 +970,26 @@ func (h *AuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, err, code)
+		writeError(w, r, err, code)
 		return
 	}
 	writeJSON(w, resp)
 }
 
 // writeError is httpError that also tells a busy caller when to come back.
-func writeError(w http.ResponseWriter, err error, code int) {
+func writeError(w http.ResponseWriter, r *http.Request, err error, code int) {
 	if errors.Is(err, errHashingBusy) {
 		w.Header().Set("Retry-After", "1")
+		middleware.MarkBusy(r.Context())
 	}
 	httpError(w, err.Error(), code)
 }
 
 // writeHashFailure answers a hash that could not run: saturation and a
 // cancelled request are capacity, anything else is ours.
-func writeHashFailure(w http.ResponseWriter, err error) {
+func writeHashFailure(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, auth.ErrHashBusy) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		writeError(w, errHashingBusy, 503)
+		writeError(w, r, errHashingBusy, 503)
 		return
 	}
 	httpError(w, "internal error", 500)

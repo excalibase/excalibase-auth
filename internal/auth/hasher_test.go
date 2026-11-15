@@ -36,10 +36,7 @@ func TestCheckVerifiesItsOwnHash(t *testing.T) {
 }
 
 // Hashes live in the tenant's own database, which its developer can write, so
-// a stored hash must not be able to name a cost above the highest this
-// service has ever run at (see maxAcceptedMemory/Time/Threads) — that ceiling
-// stays fixed even as the configured profile changes, see
-// TestCheckStillVerifiesAHashEncodedAtTheOldCostlierProfile below.
+// a stored hash must not be able to name a cost above the current profile.
 func TestCheckRefusesHashesCostlierThanOurs(t *testing.T) {
 	salt := "c2FsdHNhbHRzYWx0c2FsdA"
 	key := "a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2U"
@@ -83,21 +80,44 @@ func (h *Hasher) hashWithParams(ctx context.Context, password string, time, memo
 	), nil
 }
 
-// EXC-459 lowered the running profile from m=64 MiB,t=3,p=4 to OWASP's
-// m=19 MiB,t=2,p=1. There are no live tenants to migrate, but a hash already
-// encoded at the old, costlier profile must still verify: Argon2 stores its
-// own parameters, and downgrading the default must not strand it.
-func TestCheckStillVerifiesAHashEncodedAtTheOldCostlierProfile(t *testing.T) {
-	oldHash, err := NewHasher(1, time.Second).hashWithParams(context.Background(), "correct-horse", 3, 64*1024, 4)
+// Stored hashes sit in a database the tenant can write, and the gate is sized
+// for the current profile (19 MiB), so a hash costing more than that must be
+// refused without ever being computed (EXC-749). No tenant is live, so there
+// is no older, costlier profile to keep verifying.
+func TestCheckRefusesAHashCostlierThanTheCurrentProfileWithoutComputingIt(t *testing.T) {
+	cases := map[string]string{
+		"the old 64 MiB profile": "m=65536,t=3,p=4",
+		"one KiB more memory":    "m=19457,t=2,p=1",
+		"one more pass":          "m=19456,t=3,p=1",
+		"two lanes":              "m=19456,t=2,p=2",
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			computed := false
+			h := NewHasher(1, time.Second)
+			h.derive = func(password, salt []byte, time, memory uint32, threads uint8, keyLen uint32) []byte {
+				computed = true
+				return make([]byte, keyLen)
+			}
+			encoded := fmt.Sprintf("$argon2id$v=19$%s$c2FsdHNhbHRzYWx0c2FsdA$a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2U", params)
+			if ok, err := h.Check(context.Background(), "pw", encoded); ok || err != nil {
+				t.Fatalf("ok=%v err=%v, want a plain refusal", ok, err)
+			}
+			if computed {
+				t.Fatal("a costlier hash was computed before being refused")
+			}
+		})
+	}
+}
+
+func TestCheckStillVerifiesAHashAtTheCurrentProfile(t *testing.T) {
+	h := NewHasher(1, time.Second)
+	hash, err := h.hashWithParams(context.Background(), "correct-horse", 2, 19*1024, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.HasPrefix(oldHash, "$argon2id$v=19$m=19456,t=2,p=1$") {
-		t.Fatalf("test hash was not encoded at the old profile: %s", oldHash)
-	}
-	ok, err := NewHasher(1, time.Second).Check(context.Background(), "correct-horse", oldHash)
-	if err != nil || !ok {
-		t.Fatalf("old-profile hash: ok=%v err=%v", ok, err)
+	if ok, err := h.Check(context.Background(), "correct-horse", hash); err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
 	}
 }
 
@@ -238,5 +258,32 @@ func TestHashBudgetFitsTheMemoryLimit(t *testing.T) {
 	}
 	if err := CheckHashBudget(64, 0); err != nil {
 		t.Errorf("no limit known: %v", err)
+	}
+}
+
+func TestHashSlotsAreAShareOfMemoryAndCPU(t *testing.T) {
+	const gib = 1 << 30
+	cases := []struct {
+		name string
+		mem  int64
+		cpus int
+		want int
+	}{
+		{"128Mi pod keeps the one-slot floor", 128 << 20, 1, 1},
+		{"1 GiB, 2 cpus: cpu share is the cap", 1 * gib, 2, 1},
+		{"1 GiB, 32 cpus: memory share is the cap", 1 * gib, 32, 13},
+		{"4 GiB, 8 cpus: cpu share is the cap", 4 * gib, 8, 4},
+		{"unknown memory leaves the cpu share", 0, 8, 4},
+	}
+	for _, tc := range cases {
+		if got := HashSlots(tc.mem, tc.cpus); got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDefaultHashWaitIsHalfASecond(t *testing.T) {
+	if DefaultHashWait != 500*time.Millisecond {
+		t.Fatalf("wait = %v", DefaultHashWait)
 	}
 }

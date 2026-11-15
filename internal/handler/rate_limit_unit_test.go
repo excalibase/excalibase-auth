@@ -191,3 +191,28 @@ func TestIntegration_RateLimit_LoginFailureCounterResetsOnSuccess(t *testing.T) 
 		t.Fatalf("6th attempt with the identity locked: got %d, want 429 even with the right password", got)
 	}
 }
+
+// A sign-in the hasher refused for load never checked a password, so a flood
+// of them must not use up the caller's per-IP budget (EXC-749).
+func TestRateLimit_HashBusyRefusalsDoNotSpendTheIPBudget(t *testing.T) {
+	limits := middleware.NewRateLimits(middleware.RateLimitConfig{
+		Window: time.Minute, LoginPerIP: 2, LoginFailures: 100, FailureWindow: time.Minute,
+	})
+	busy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeHashFailure(w, r, auth.ErrHashBusy)
+	})
+	r := chi.NewRouter()
+	r.With(limits.Login).Post("/login", busy.ServeHTTP)
+	// Budget 2 plus one refund (half the budget): three refusals, then the
+	// limit applies, so a busy gate cannot switch it off for the database.
+	for i := 0; i < 6; i++ {
+		w := postFrom(r, "/login", "203.0.113.50", `{"email":"a@b.com","password":"x"}`)
+		want := http.StatusServiceUnavailable
+		if i >= 3 {
+			want = http.StatusTooManyRequests
+		}
+		if w.Code != want || w.Header().Get("Retry-After") == "" {
+			t.Fatalf("attempt %d: got %d (Retry-After %q), want %d with Retry-After", i, w.Code, w.Header().Get("Retry-After"), want)
+		}
+	}
+}

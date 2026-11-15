@@ -8,17 +8,17 @@ import (
 	"os"
 	"strconv"
 	"strings"
-
-	"github.com/excalibase/auth/internal/auth"
 )
 
 // CgroupMemoryMax is where cgroup v2 publishes the container's memory limit.
 const CgroupMemoryMax = "/sys/fs/cgroup/memory.max"
 
+// parseHashConcurrency reads the optional override; 0 means size the gate from
+// the container (auth.HashSlots).
 func parseHashConcurrency(raw string) (int, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return auth.DefaultHashSlots, nil
+		return 0, nil
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 1 {

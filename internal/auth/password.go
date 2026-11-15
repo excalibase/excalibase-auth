@@ -28,21 +28,22 @@ const (
 	// DefaultHashSlots fits the smallest shipped memory limit (128Mi); the
 	// charts set PASSWORD_HASH_CONCURRENCY to match their own limit.
 	DefaultHashSlots = 2
-	DefaultHashWait  = time.Second
+	DefaultHashWait  = 500 * time.Millisecond
+
+	// Shares of the container hashing may occupy at once.
+	hashMemoryPercent = 25
+	hashCPUPercent    = 50
 
 	maxStoredKeyLen  = 64
 	maxStoredSaltLen = 64
 
-	// maxAcceptedMemory/Time/Threads is the highest argon2id cost this
-	// service has ever run at (its pre-EXC-459 profile: m=64 MiB, t=3, p=4).
-	// Check compares a stored hash against this fixed ceiling, not against
-	// the currently configured profile, so lowering the default cost never
-	// strands a hash written under a costlier one. A tenant-writable row
-	// naming a cost above this ceiling is still refused unread: that is the
-	// resource-exhaustion case this guard exists for.
-	maxAcceptedMemory  = 64 * 1024 // KiB
-	maxAcceptedTime    = 3
-	maxAcceptedThreads = 4
+	// maxAccepted* is the cost a stored hash may name: the current profile and
+	// no more. Hashes sit in a database the tenant can write and the gate is
+	// sized for this memory, so a costlier one is refused unread (EXC-749). No
+	// tenant is live, so there is no older profile to keep verifying.
+	maxAcceptedMemory  = argon2Memory
+	maxAcceptedTime    = argon2Time
+	maxAcceptedThreads = argon2Threads
 )
 
 // ErrHashBusy means every hashing slot stayed taken for the whole wait.
@@ -59,12 +60,29 @@ type Hasher struct {
 	derive deriveFunc
 }
 
+// Slots is how many hashes may run at once.
+func (h *Hasher) Slots() int { return cap(h.slots) }
+
 // NewHasher panics on fewer than one slot: that is a wiring mistake.
 func NewHasher(slots int, wait time.Duration) *Hasher {
 	if slots < 1 {
 		panic(fmt.Sprintf("auth: password hash slots must be at least 1, got %d", slots))
 	}
 	return &Hasher{slots: make(chan struct{}, slots), wait: wait, derive: argon2.IDKey}
+}
+
+// HashSlots sizes the gate as the smaller of a CPU share and a memory share
+// (each hash holds HashMemoryBytes), never below one so sign-in always works
+// on a small container. Unknown memory (0) leaves the CPU share to decide.
+func HashSlots(memoryBytes int64, cpus int) int {
+	slots := cpus * hashCPUPercent / 100
+	if memoryBytes > 0 {
+		byMemory := int(memoryBytes * hashMemoryPercent / 100 / HashMemoryBytes)
+		if byMemory < slots || slots < 1 {
+			slots = byMemory
+		}
+	}
+	return max(slots, 1)
 }
 
 // CheckHashBudget refuses a slot count whose hashes alone would take more

@@ -411,3 +411,118 @@ func TestRateLimit_GuestIsPerClientAndLeavesTheRegisterBudget(t *testing.T) {
 		}
 	}
 }
+
+// busyHandler is a route whose handler could not hash and says so.
+func busyHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		MarkBusy(r.Context())
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+}
+
+// A request refused for load (503) never checked a password, so it must not
+// spend the per-IP or per-project budget.
+func TestRateLimit_BusyRefusalIsRefunded(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	cfg := testConfig() // login budget 3, so one refund a window
+	limits := NewRateLimits(cfg, ratelimit.WithClock(clock.Now))
+	r := chi.NewRouter()
+	r.Route("/auth/{orgSlug}/{projectId}", func(r chi.Router) {
+		r.With(limits.Login).Post("/login", busyHandler().ServeHTTP)
+	})
+	codes := []int{}
+	for i := 0; i < 6; i++ {
+		codes = append(codes, post(r, testLoginPath, "9.9.9.9", loginBody).Code)
+	}
+	want := []int{503, 503, 503, 503, 429, 429}
+	for i := range want {
+		if codes[i] != want[i] {
+			t.Fatalf("codes %v, want %v: refunds are capped per IP per window so a busy gate cannot switch the limit off", codes, want)
+		}
+	}
+}
+
+// A busy gate still costs a pool and account lookup per attempt, so refunds
+// are bounded per client and window; the budget is not unlimited.
+func TestRateLimit_RefundsAreBoundedPerIP(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	limits := NewRateLimits(testConfig(), ratelimit.WithClock(clock.Now))
+	r := chi.NewRouter()
+	r.Route("/auth/{orgSlug}/{projectId}", func(r chi.Router) {
+		r.With(limits.Token).Post("/token", busyHandler().ServeHTTP)
+	})
+	limited := 0
+	for i := 0; i < 20; i++ {
+		if post(r, testTokenPath, "9.9.9.9", `{"grant_type":"password","email":"a@b.c"}`).Code == http.StatusTooManyRequests {
+			limited++
+		}
+	}
+	if limited == 0 {
+		t.Fatal("twenty busy refusals never hit the per-IP limit")
+	}
+	clock.Advance(time.Minute)
+	if post(r, testTokenPath, "9.9.9.9", `{"grant_type":"password","email":"a@b.c"}`).Code != http.StatusServiceUnavailable {
+		t.Fatal("the budget must recover after the window")
+	}
+}
+
+// A request the per-project cap turns away never reached the database, so it
+// gives its IP token back: one full project must not use up a client's budget
+// for the others.
+func TestRateLimit_ProjectCapRefusalRefundsTheIPToken(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	cfg := testConfig()
+	cfg.RegisterPerProject = 1
+	limits := NewRateLimits(cfg, ratelimit.WithClock(clock.Now))
+	r := chi.NewRouter()
+	r.Route("/auth/{orgSlug}/{projectId}", func(r chi.Router) {
+		r.With(limits.Register).Post("/register", statusHandler(http.StatusCreated).ServeHTTP)
+	})
+	if rr := post(r, "/auth/org/full/register", "9.9.9.9", "{}"); rr.Code != http.StatusCreated {
+		t.Fatalf("first register: %d", rr.Code)
+	}
+	for i := 0; i < 5; i++ {
+		if rr := post(r, "/auth/org/full/register", "9.9.9.9", "{}"); rr.Code != http.StatusTooManyRequests {
+			t.Fatalf("full project %d: got %d, want 429", i, rr.Code)
+		}
+	}
+	if rr := post(r, "/auth/org/other/register", "9.9.9.9", "{}"); rr.Code != http.StatusCreated {
+		t.Fatalf("another project from the same IP: got %d, want 201 (the IP budget was spent by refusals)", rr.Code)
+	}
+}
+
+func TestRateLimit_BusyRegisterRefundsIPAndProject(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	limits := NewRateLimits(testConfig(), ratelimit.WithClock(clock.Now))
+	r := chi.NewRouter()
+	r.Route("/auth/{orgSlug}/{projectId}", func(r chi.Router) {
+		r.With(limits.Register).Post("/register", busyHandler().ServeHTTP)
+	})
+	for i := 0; i < 2; i++ { // within the refund allowance
+		if rr := post(r, testRegisterPath, "9.9.9.9", "{}"); rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("register %d: got %d, want 503", i, rr.Code)
+		}
+	}
+	// The allowance (one refund) is spent: later refusals now use the budget.
+	last := 0
+	for i := 0; i < 4; i++ {
+		last = post(r, testRegisterPath, "9.9.9.9", "{}").Code
+	}
+	if last != http.StatusTooManyRequests {
+		t.Fatalf("after the refund allowance: got %d, want 429", last)
+	}
+}
+
+// A 503 that is not a load refusal (a pool or vault failure) still spends the
+// budget, so the limiter keeps shielding those lookups.
+func TestRateLimit_OtherServerErrorsStillSpendTheBudget(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	r := newTestRouter(testConfig(), clock, http.StatusServiceUnavailable)
+	codes := []int{}
+	for i := 0; i < 4; i++ {
+		codes = append(codes, post(r, testLoginPath, "9.9.9.9", loginBody).Code)
+	}
+	if codes[3] != http.StatusTooManyRequests {
+		t.Fatalf("codes %v: the fourth must be 429", codes)
+	}
+}

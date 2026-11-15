@@ -33,7 +33,8 @@ type Config struct {
 	SiteURL string
 	// TenantDBSSLMode is the sslmode auth opens every tenant database with.
 	TenantDBSSLMode string
-	// PasswordHashConcurrency is how many argon2id hashes may run at once.
+	// PasswordHashConcurrency is how many argon2id hashes may run at once; 0
+	// sizes it from the container's CPU and memory.
 	PasswordHashConcurrency int
 	RequestMetrics          RequestMetrics
 	// GuestInactiveDays is how long a guest account may go unused before it is deleted.
