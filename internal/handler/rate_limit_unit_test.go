@@ -203,10 +203,16 @@ func TestRateLimit_HashBusyRefusalsDoNotSpendTheIPBudget(t *testing.T) {
 	})
 	r := chi.NewRouter()
 	r.With(limits.Login).Post("/login", busy.ServeHTTP)
+	// Budget 2 plus one refund (half the budget): three refusals, then the
+	// limit applies, so a busy gate cannot switch it off for the database.
 	for i := 0; i < 6; i++ {
 		w := postFrom(r, "/login", "203.0.113.50", `{"email":"a@b.com","password":"x"}`)
-		if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") == "" {
-			t.Fatalf("attempt %d: got %d (Retry-After %q), want 503 with Retry-After", i, w.Code, w.Header().Get("Retry-After"))
+		want := http.StatusServiceUnavailable
+		if i >= 3 {
+			want = http.StatusTooManyRequests
+		}
+		if w.Code != want || w.Header().Get("Retry-After") == "" {
+			t.Fatalf("attempt %d: got %d (Retry-After %q), want %d with Retry-After", i, w.Code, w.Header().Get("Retry-After"), want)
 		}
 	}
 }

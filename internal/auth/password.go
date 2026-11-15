@@ -37,16 +37,13 @@ const (
 	maxStoredKeyLen  = 64
 	maxStoredSaltLen = 64
 
-	// maxAcceptedMemory/Time/Threads is the highest argon2id cost this
-	// service has ever run at (its pre-EXC-459 profile: m=64 MiB, t=3, p=4).
-	// Check compares a stored hash against this fixed ceiling, not against
-	// the currently configured profile, so lowering the default cost never
-	// strands a hash written under a costlier one. A tenant-writable row
-	// naming a cost above this ceiling is still refused unread: that is the
-	// resource-exhaustion case this guard exists for.
-	maxAcceptedMemory  = 64 * 1024 // KiB
-	maxAcceptedTime    = 3
-	maxAcceptedThreads = 4
+	// maxAccepted* is the cost a stored hash may name: the current profile and
+	// no more. Hashes sit in a database the tenant can write and the gate is
+	// sized for this memory, so a costlier one is refused unread (EXC-749). No
+	// tenant is live, so there is no older profile to keep verifying.
+	maxAcceptedMemory  = argon2Memory
+	maxAcceptedTime    = argon2Time
+	maxAcceptedThreads = argon2Threads
 )
 
 // ErrHashBusy means every hashing slot stayed taken for the whole wait.
@@ -62,6 +59,9 @@ type Hasher struct {
 	wait   time.Duration
 	derive deriveFunc
 }
+
+// Slots is how many hashes may run at once.
+func (h *Hasher) Slots() int { return cap(h.slots) }
 
 // NewHasher panics on fewer than one slot: that is a wiring mistake.
 func NewHasher(slots int, wait time.Duration) *Hasher {

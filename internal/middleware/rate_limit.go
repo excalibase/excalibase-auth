@@ -78,8 +78,17 @@ type RateLimits struct {
 	registerProject *ratelimit.Limiter
 	loginFailures   *ratelimit.Limiter
 	otpIP           *ratelimit.Limiter
+	// Refunds of a load refusal are themselves capped per client and window:
+	// the attempt still cost a pool and account lookup, so a busy gate must
+	// not switch the per-IP limit off for the database.
+	registerRefunds *ratelimit.Limiter
+	loginRefunds    *ratelimit.Limiter
+	tokenRefunds    *ratelimit.Limiter
 	trusted         []*net.IPNet
 }
+
+// refundAllowance is half a route's per-IP budget, at least one.
+func refundAllowance(limit int) int { return max(limit/2, 1) }
 
 // NewRateLimits builds the limiters. Options (e.g. ratelimit.WithClock) are
 // applied to every limiter.
@@ -91,6 +100,9 @@ func NewRateLimits(cfg RateLimitConfig, opts ...ratelimit.Option) *RateLimits {
 		registerProject: ratelimit.New(cfg.RegisterPerProject, cfg.Window, opts...),
 		loginFailures:   ratelimit.New(cfg.LoginFailures, cfg.FailureWindow, opts...),
 		otpIP:           ratelimit.New(cfg.OTPPerIP, cfg.Window, opts...),
+		registerRefunds: ratelimit.New(refundAllowance(cfg.RegisterPerIP), cfg.Window, opts...),
+		loginRefunds:    ratelimit.New(refundAllowance(cfg.LoginPerIP), cfg.Window, opts...),
+		tokenRefunds:    ratelimit.New(refundAllowance(cfg.TokenPerIP), cfg.Window, opts...),
 		trusted:         cfg.TrustedProxyCIDRs,
 	}
 }
@@ -111,7 +123,7 @@ func (rl *RateLimits) Register(next http.Handler) http.Handler {
 				return
 			}
 		}
-		serveRefundingBusy(w, r, next, func() {
+		serveRefundingBusy(w, r, next, rl.registerRefunds, ip, func() {
 			rl.registerIP.Refund(ip)
 			if project != "" {
 				rl.registerProject.Refund(project)
@@ -164,7 +176,7 @@ func (rl *RateLimits) Login(next http.Handler) http.Handler {
 			reject(w, routeLogin, decision)
 			return
 		}
-		serveRefundingBusy(w, r, guarded, func() { rl.loginIP.Refund(ip) })
+		serveRefundingBusy(w, r, guarded, rl.loginRefunds, ip, func() { rl.loginIP.Refund(ip) })
 	})
 }
 
@@ -183,7 +195,7 @@ func (rl *RateLimits) Token(next http.Handler) http.Handler {
 			reject(w, routeToken, decision)
 			return
 		}
-		serveRefundingBusy(w, r, guarded, func() { rl.tokenIP.Refund(ip) })
+		serveRefundingBusy(w, r, guarded, rl.tokenRefunds, ip, func() { rl.tokenIP.Refund(ip) })
 	})
 }
 
@@ -216,12 +228,14 @@ func MarkBusy(ctx context.Context) {
 
 // serveRefundingBusy runs next and calls refund when it reported a load
 // refusal: no password was checked, so the attempt must not spend the caller's
-// budget, or a flood could lock out the clients it crowded out. Other 5xx
-// still spend it, since they may have cost a vault or database round trip.
-func serveRefundingBusy(w http.ResponseWriter, r *http.Request, next http.Handler, refund func()) {
+// budget, or a flood could lock out the clients it crowded out. Refunds are
+// capped per client by allowance, since each attempt still cost a lookup. Other
+// 5xx still spend the budget, since they may have cost a vault or database
+// round trip.
+func serveRefundingBusy(w http.ResponseWriter, r *http.Request, next http.Handler, allowance *ratelimit.Limiter, client string, refund func()) {
 	busy := &atomic.Bool{}
 	next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), busyKey{}, busy)))
-	if busy.Load() {
+	if busy.Load() && allowance.Allow(client).Allowed {
 		refund()
 	}
 }
