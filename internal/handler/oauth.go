@@ -48,11 +48,13 @@ const (
 )
 
 var (
-	errRedirectNotAllowed = errors.New("redirect_to is not an allowed redirect URL")
-	errChallengeRequired  = errors.New("code_challenge with code_challenge_method=S256 is required")
-	errFlowInvalid        = errors.New("sign-in state is invalid or has expired")
-	errInvalidGrant       = errors.New("invalid or expired code")
-	errSignupDisabled     = errors.New(codeSignupDisabled)
+	// errSettingsUnavailable is a project whose settings were never read and cannot be now.
+	errSettingsUnavailable = errors.New(errSettingsUnreadable)
+	errRedirectNotAllowed  = errors.New("redirect_to is not an allowed redirect URL")
+	errChallengeRequired   = errors.New("code_challenge with code_challenge_method=S256 is required")
+	errFlowInvalid         = errors.New("sign-in state is invalid or has expired")
+	errInvalidGrant        = errors.New("invalid or expired code")
+	errSignupDisabled      = errors.New(codeSignupDisabled)
 )
 
 // WithOAuthProviders replaces the sign-in providers and the HTTP client that
@@ -76,18 +78,18 @@ func (h *AuthHandler) signInSettings(ctx context.Context, projectID string) (poo
 	return h.poolMgr.GetProjectInfoWithin(ctx, projectID, h.signInMaxAge)
 }
 
-// signupsOpen reads the sign-up switch no older than signInMaxAge. A project
-// whose control plane never sent the switch (the flag off) keeps today's
-// behaviour when it cannot be read; one that did fails closed.
+// signupsOpen reads the sign-up switch no older than signInMaxAge. An
+// unreadable control plane is an error, except for a project whose last copy
+// never carried the switch (an older control plane), which stays open.
 func (h *AuthHandler) signupsOpen(ctx context.Context, projectID string) (bool, error) {
 	info, err := h.signInSettings(ctx, projectID)
 	if err == nil {
 		return info.NewUsersAllowed(), nil
 	}
-	if cached, ok := h.poolMgr.CachedProjectInfo(projectID); ok && cached.AllowNewUsers != nil {
-		return false, err
+	if cached, ok := h.poolMgr.CachedProjectInfo(projectID); ok && cached.AllowNewUsers == nil {
+		return true, nil
 	}
-	return true, nil
+	return false, err
 }
 
 // enabledProvider is a provider this service knows and the project switched on.

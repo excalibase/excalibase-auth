@@ -47,14 +47,17 @@ func (h *AuthHandler) WithHooks(client hookCaller) *AuthHandler {
 }
 
 // hookSettings is the project's hooks, read no older than signInMaxAge.
-// Unreadable settings fail closed when the last copy had hooks, so a control
-// plane with the flag off behaves as before.
+// Unreadable settings fail closed: errHookFailed when the last copy had hooks,
+// errSettingsUnavailable when there is no copy at all, since the project's
+// hooks are then unknown and skipping them would skip its policy.
 func (h *AuthHandler) hookSettings(ctx context.Context, projectID string) (pool.AuthHooks, error) {
 	info, err := h.signInSettings(ctx, projectID)
 	if err != nil {
-		// With no copy at all the project's database and the relay are out of
-		// reach too (both come from the control plane), so nothing proceeds unchecked.
-		if cached, ok := h.poolMgr.CachedProjectInfo(projectID); ok && cached.AuthHooks != nil {
+		cached, ok := h.poolMgr.CachedProjectInfo(projectID)
+		switch {
+		case !ok:
+			return pool.AuthHooks{}, errSettingsUnavailable
+		case cached.AuthHooks != nil:
 			return pool.AuthHooks{}, errHookFailed
 		}
 		return pool.AuthHooks{}, nil
@@ -63,6 +66,15 @@ func (h *AuthHandler) hookSettings(ctx context.Context, projectID string) (pool.
 		return pool.AuthHooks{}, nil
 	}
 	return *info.AuthHooks, nil
+}
+
+// settingsFailure is the answer when the hook settings could not be read: the
+// settings error itself when the project is unknown, else a hook failure.
+func (h *AuthHandler) settingsFailure(ctx context.Context, projectID, hook string, userID int64, err error) error {
+	if errors.Is(err, errSettingsUnavailable) {
+		return err
+	}
+	return h.hookFailure(ctx, projectID, hook, userID, "the hook settings are unreadable")
 }
 
 // callHook signs and sends one call; every failure is logged, audited and errHookFailed.
@@ -113,7 +125,7 @@ type accessTokenHookAnswer struct {
 func (h *AuthHandler) withAccessHook(ctx context.Context, projectID string, claims auth.Claims) (auth.Claims, error) {
 	settings, err := h.hookSettings(ctx, projectID)
 	if err != nil {
-		return claims, h.hookFailure(ctx, projectID, hookCustomAccessToken, claims.UserID, "the hook settings are unreadable")
+		return claims, h.settingsFailure(ctx, projectID, hookCustomAccessToken, claims.UserID, err)
 	}
 	if settings.CustomAccessToken == "" {
 		return claims, nil
@@ -160,7 +172,7 @@ type userCreatedHookAnswer struct {
 func (h *AuthHandler) allowNewUser(ctx context.Context, projectID string, user newUser) error {
 	settings, err := h.hookSettings(ctx, projectID)
 	if err != nil {
-		return h.hookFailure(ctx, projectID, hookBeforeUserCreated, 0, "the hook settings are unreadable")
+		return h.settingsFailure(ctx, projectID, hookBeforeUserCreated, 0, err)
 	}
 	if settings.BeforeUserCreated == "" {
 		return nil
@@ -197,7 +209,7 @@ type hookEmailBody struct {
 func (h *AuthHandler) sendMail(ctx context.Context, msg email.Message) error {
 	settings, err := h.hookSettings(ctx, msg.ProjectID)
 	if err != nil {
-		return h.hookFailure(ctx, msg.ProjectID, hookSendEmail, 0, "the hook settings are unreadable")
+		return h.settingsFailure(ctx, msg.ProjectID, hookSendEmail, 0, err)
 	}
 	if settings.SendEmail == "" {
 		return h.emailSender.Send(ctx, msg)
@@ -227,7 +239,7 @@ func hookRefusalCode(err error) string {
 func (h *AuthHandler) guestUpgradeAllowed(ctx context.Context, db store.Store, projectID string, userID int64, provider, address string) error {
 	settings, err := h.hookSettings(ctx, projectID)
 	if err != nil {
-		return h.hookFailure(ctx, projectID, hookBeforeUserCreated, userID, "the hook settings are unreadable")
+		return h.settingsFailure(ctx, projectID, hookBeforeUserCreated, userID, err)
 	}
 	if settings.BeforeUserCreated == "" {
 		return nil

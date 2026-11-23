@@ -94,6 +94,8 @@ type oauthFixture struct {
 	// backdate ages an account, its last sign-in and its refresh tokens.
 	backdate func(t *testing.T, id int64, age time.Duration)
 	handler  *AuthHandler
+	// newManager is a manager with no copy of any project info, on the same control plane.
+	newManager func() *pool.Manager
 	// ageSends moves an address's emailed sends back in time, straight in the database.
 	ageSends func(t *testing.T, email string, by time.Duration)
 }
@@ -207,7 +209,13 @@ func newOAuthFixture(t *testing.T, record any, configure func(*pool.Manager), tu
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	authURL = srv.URL
-	return &oauthFixture{integrationFixture: &integrationFixture{srv: srv, signingKey: priv, jwtSvc: jwtSvc}, idp: idp, settings: settings, handler: h}
+	newManager := func() *pool.Manager {
+		fresh := pool.NewManager(provisioning.URL, token.Literal("test-pat"), time.Hour)
+		fresh.SetSSLMode("disable")
+		configure(fresh)
+		return fresh
+	}
+	return &oauthFixture{integrationFixture: &integrationFixture{srv: srv, signingKey: priv, jwtSvc: jwtSvc}, idp: idp, settings: settings, handler: h, newManager: newManager}
 }
 
 func newPostgresOAuthFixture(t *testing.T, tune ...func(*AuthHandler)) *oauthFixture {
