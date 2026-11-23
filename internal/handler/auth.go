@@ -298,18 +298,18 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Asked on every attempt, before the account check, so neither its answer
-	// nor its latency tells whether the address has an account.
-	if err := h.allowNewUser(r.Context(), projectID, newUser{Method: "password", Email: req.Email}); err != nil {
-		writeSessionFailure(w, err)
-		return
-	}
-
 	if open, err := h.signupsOpen(r.Context(), projectID); err != nil {
 		httpError(w, errSettingsUnreadable, http.StatusServiceUnavailable)
 		return
 	} else if !open {
 		httpError(w, errSignupDisabled.Error(), http.StatusForbidden)
+		return
+	}
+
+	// Asked on every attempt, before the account check, so neither its answer
+	// nor its latency tells whether the address has an account.
+	if err := h.allowNewUser(r.Context(), projectID, newUser{Method: "password", Email: req.Email}); err != nil {
+		writeSessionFailure(w, err)
 		return
 	}
 
