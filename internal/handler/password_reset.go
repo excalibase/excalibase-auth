@@ -72,7 +72,7 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.settingsFor(r.Context(), projectID).siteURL == "" {
+	if h.siteURLFor(r.Context(), projectID) == "" {
 		writeSiteURLRequired(w, projectID)
 		return
 	}
@@ -101,7 +101,7 @@ func (h *AuthHandler) sendPasswordReset(r *http.Request, projectID, address stri
 // outstanding, so the newest link is the only live one and an older leaked link
 // stops working.
 func (h *AuthHandler) mailPasswordReset(ctx context.Context, db store.Store, projectID string, userID int64, address string) {
-	siteURL := h.settingsFor(ctx, projectID).siteURL
+	siteURL := h.siteURLFor(ctx, projectID)
 	if siteURL == "" {
 		log.Printf("auth.reset.no_site_url project=%s userId=%d: not sent, set the project's site URL", safeLog(projectID), userID)
 		return
