@@ -38,24 +38,39 @@ type verifyEmailRequest struct {
 }
 
 // projectSettings is the subset of provisioning's project info that shapes the
-// verification flow. Lookup failures fall back to the permissive default so a
-// control-plane outage never blocks logins.
+// verification flow.
 type projectSettings struct {
 	requireEmailVerification bool
 	siteURL                  string
 }
 
-func (h *AuthHandler) settingsFor(ctx context.Context, projectID string) projectSettings {
+// settingsFor reads the project's verification settings. When provisioning
+// cannot be reached it serves the last copy read, however old: a stale "on" is
+// safe, and so is a stale "off" that the project once chose. With no copy at
+// all it is an error, never the permissive default, so an outage cannot turn
+// verification off. The returned settings carry the default site URL even then.
+func (h *AuthHandler) settingsFor(ctx context.Context, projectID string) (projectSettings, error) {
 	settings := projectSettings{siteURL: h.siteURL}
 	info, err := h.poolMgr.GetProjectInfo(ctx, projectID)
 	if err != nil {
-		return settings
+		cached, ok := h.poolMgr.CachedProjectInfo(projectID)
+		if !ok {
+			return settings, err
+		}
+		info = cached
 	}
 	settings.requireEmailVerification = info.RequireEmailVerification
 	if own := normalizeSiteURL(info.SiteURL); own != "" {
 		settings.siteURL = own
 	}
-	return settings
+	return settings, nil
+}
+
+// siteURLFor is the address mailed links point at. It decides no access, so an
+// unreadable control plane leaves the operator's default site URL.
+func (h *AuthHandler) siteURLFor(ctx context.Context, projectID string) string {
+	settings, _ := h.settingsFor(ctx, projectID)
+	return settings.siteURL
 }
 
 // verificationLink builds the address the user clicks. The token is a query
@@ -189,7 +204,7 @@ func (h *AuthHandler) ResendVerification(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if h.settingsFor(r.Context(), projectID).siteURL == "" {
+	if h.siteURLFor(r.Context(), projectID) == "" {
 		writeSiteURLRequired(w, projectID)
 		return
 	}
@@ -212,5 +227,5 @@ func (h *AuthHandler) resendVerificationFor(r *http.Request, projectID, address 
 		return
 	}
 
-	h.sendVerification(r.Context(), db, projectID, account.ID, address, h.settingsFor(r.Context(), projectID).siteURL, false)
+	h.sendVerification(r.Context(), db, projectID, account.ID, address, h.siteURLFor(r.Context(), projectID), false)
 }

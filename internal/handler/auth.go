@@ -298,12 +298,6 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		httpError(w, errSignupDisabled.Error(), http.StatusForbidden)
 		return
 	}
-	settings := h.settingsFor(r.Context(), projectID)
-	if settings.requireEmailVerification && settings.siteURL == "" {
-		writeSiteURLRequired(w, projectID)
-		return
-	}
-
 	log.Printf("auth.register tenant=%s org=%s", safeLog(tenantID), safeLog(orgSlug))
 	// Asked on every attempt, before the account check, so neither its answer
 	// nor its latency tells whether the address has an account.
@@ -315,6 +309,16 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
 	if err != nil {
 		writePoolFailure(w, err)
+		return
+	}
+
+	settings, err := h.settingsFor(r.Context(), projectID)
+	if err != nil {
+		httpError(w, errSettingsUnreadable, http.StatusServiceUnavailable)
+		return
+	}
+	if settings.requireEmailVerification && settings.siteURL == "" {
+		writeSiteURLRequired(w, projectID)
 		return
 	}
 
@@ -455,8 +459,14 @@ func (h *AuthHandler) exchangePassword(r *http.Request, projectID, email, passwo
 	}
 	// EXC-11: checked only after the password, so this never tells an
 	// unauthenticated caller whether an address is registered.
-	if !user.EmailVerified && h.settingsFor(r.Context(), projectID).requireEmailVerification {
-		return nil, 403, errEmailNotVerified
+	if !user.EmailVerified {
+		settings, err := h.settingsFor(r.Context(), projectID)
+		if err != nil {
+			return nil, http.StatusServiceUnavailable, errors.New(errSettingsUnreadable)
+		}
+		if settings.requireEmailVerification {
+			return nil, 403, errEmailNotVerified
+		}
 	}
 	roles := accountRoles{role: user.Role, allowed: user.AllowedRoles}
 	if err := roles.validate(); err != nil {
@@ -685,10 +695,23 @@ func (h *AuthHandler) refreshAllowed(ctx context.Context, projectID string, acco
 	case account.IsGuest:
 		// A guest has no address to verify; its session lives with the flag.
 		return roles, h.guestRefreshAllowed(ctx, projectID)
-	case !account.EmailVerified && h.settingsFor(ctx, projectID).requireEmailVerification:
-		return roles, refreshRefusal{status: 403, err: errEmailNotVerified}
+	case !account.EmailVerified:
+		return roles, h.verifiedOrNotRequired(ctx, projectID)
 	}
 	return roles, nil
+}
+
+// verifiedOrNotRequired is nil when the project does not require a verified
+// address, and the refusal for an unverified account when it does.
+func (h *AuthHandler) verifiedOrNotRequired(ctx context.Context, projectID string) error {
+	settings, err := h.settingsFor(ctx, projectID)
+	switch {
+	case err != nil:
+		return refreshRefusal{status: http.StatusServiceUnavailable, err: errors.New(errSettingsUnreadable)}
+	case settings.requireEmailVerification:
+		return refreshRefusal{status: 403, err: errEmailNotVerified}
+	}
+	return nil
 }
 
 // sessionFailure is the status and message for a session that could not start.
