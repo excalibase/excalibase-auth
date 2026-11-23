@@ -237,7 +237,8 @@ func (h *AuthHandler) EnrollFactor(w http.ResponseWriter, r *http.Request) {
 	h.recordAudit(r.Context(), db, projectKey(r), store.AuditEvent{UserID: claims.UserID, Event: "mfa_enrolled", Method: methodTOTP, IP: h.clientIP(r)})
 	issuer := req.Issuer
 	if issuer == "" {
-		issuer = h.labelsFor(r, projectKey(r)).projectName
+		labels, _ := h.labelsFor(r, projectKey(r)) // a display name; the default will do
+		issuer = labels.projectName
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusCreated)

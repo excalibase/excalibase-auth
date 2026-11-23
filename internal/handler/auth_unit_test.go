@@ -180,7 +180,12 @@ func TestAuthResponses_ExpMatchesAdvertisedTTL(t *testing.T) {
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: b}))
 	const accessTTL = 900
 	jwtSvc, _ := auth.NewJWTService(keyPEM, "excalibase", accessTTL)
-	mgr := pool.NewManager("http://127.0.0.1:1", token.Literal("fake-pat"), time.Hour)
+	// The project's settings are read for every token, so the control plane answers.
+	provisioning := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"projectId":"test-project","orgSlug":"test-org"}`))
+	}))
+	defer provisioning.Close()
+	mgr := pool.NewManager(provisioning.URL, token.Literal("fake-pat"), time.Hour)
 	h := NewAuthHandler(mgr, jwtSvc, 604800)
 
 	rctx := chi.NewRouteContext()

@@ -93,6 +93,7 @@ type Manager struct {
 	mysqlMigrator   func(ctx context.Context, config *mysql.Config) error
 	mysqlOpener     func(config *mysql.Config) (store.Store, error)
 	sslMode         string
+	now             func() time.Time // clock for the project-info cache
 }
 
 // defaultTenantSSLMode: tenant logins are client-certificate only (EXC-410),
@@ -102,6 +103,14 @@ const defaultTenantSSLMode = "verify-full"
 // maxCredentialAge bounds how long a vault record is trusted, so a renewed
 // certificate or CA reaches new connections within the hour, restart-free.
 const maxCredentialAge = time.Hour
+
+// SetClock replaces the clock the project-info cache ages by, so a test can
+// move a copy past its TTL without waiting.
+func (m *Manager) SetClock(now func() time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.now = now
+}
 
 // SetSSLMode sets the sslmode every tenant connection is opened with:
 // disable (password, docker AIO only) or any TLS mode (verify-full + client cert).
@@ -121,6 +130,7 @@ func NewManager(provisioningURL string, tokens token.Source, ttl time.Duration) 
 		pools:           make(map[string]*poolEntry),
 		infos:           make(map[string]*infoEntry),
 		ttl:             ttl,
+		now:             time.Now,
 		httpClient:      &http.Client{Timeout: 10 * time.Second},
 		poolCreator:     defaultPoolCreator,
 		mysqlOpener:     openMySQLStore,
@@ -347,7 +357,7 @@ func (m *Manager) GetProjectInfo(ctx context.Context, projectID string) (Project
 // asks provisioning; a failed ask is an error, never the older copy.
 func (m *Manager) GetProjectInfoWithin(ctx context.Context, projectID string, maxAge time.Duration) (ProjectInfo, error) {
 	m.mu.RLock()
-	if entry, ok := m.infos[projectID]; ok && time.Since(entry.createdAt) < maxAge {
+	if entry, ok := m.infos[projectID]; ok && m.now().Sub(entry.createdAt) < maxAge {
 		info := entry.info
 		m.mu.RUnlock()
 		return info, nil
@@ -359,7 +369,7 @@ func (m *Manager) GetProjectInfoWithin(ctx context.Context, projectID string, ma
 		return ProjectInfo{}, err
 	}
 	m.mu.Lock()
-	m.infos[projectID] = &infoEntry{info: info, createdAt: time.Now()}
+	m.infos[projectID] = &infoEntry{info: info, createdAt: m.now()}
 	m.mu.Unlock()
 	return info, nil
 }

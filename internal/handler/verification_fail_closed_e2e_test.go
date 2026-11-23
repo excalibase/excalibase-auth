@@ -47,7 +47,7 @@ func (fx *failClosedFixture) controlPlaneDown() {
 
 // neverRead leaves the service with no copy of the project's settings.
 func (fx *failClosedFixture) neverRead() {
-	fx.handler.poolMgr.ForgetProjectInfo("test-project")
+	fx.handler.poolMgr = fx.newManager()
 }
 
 // staleRequired leaves a copy past its TTL that says verification is required.
@@ -56,7 +56,7 @@ func (fx *failClosedFixture) staleRequired(t *testing.T) {
 	if resp, body := fx.login(fx.unverified); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("priming read: %d %v", resp.StatusCode, body)
 	}
-	fx.handler.poolMgr.AgeProjectInfo("test-project", 3*time.Hour)
+	fx.handler.poolMgr.SetClock(func() time.Time { return time.Now().Add(3 * time.Hour) })
 }
 
 func TestIntegration_VerificationFailsClosed(t *testing.T) {

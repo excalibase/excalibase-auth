@@ -291,14 +291,13 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if open, err := h.signupsOpen(r.Context(), projectID); err != nil {
-		httpError(w, errSettingsUnreadable, http.StatusServiceUnavailable)
-		return
-	} else if !open {
-		httpError(w, errSignupDisabled.Error(), http.StatusForbidden)
+	log.Printf("auth.register tenant=%s org=%s", safeLog(tenantID), safeLog(orgSlug))
+	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
+	if err != nil {
+		writePoolFailure(w, err)
 		return
 	}
-	log.Printf("auth.register tenant=%s org=%s", safeLog(tenantID), safeLog(orgSlug))
+
 	// Asked on every attempt, before the account check, so neither its answer
 	// nor its latency tells whether the address has an account.
 	if err := h.allowNewUser(r.Context(), projectID, newUser{Method: "password", Email: req.Email}); err != nil {
@@ -306,9 +305,11 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db, err := h.poolMgr.GetStore(r.Context(), chi.URLParam(r, "orgSlug"), projectID)
-	if err != nil {
-		writePoolFailure(w, err)
+	if open, err := h.signupsOpen(r.Context(), projectID); err != nil {
+		httpError(w, errSettingsUnreadable, http.StatusServiceUnavailable)
+		return
+	} else if !open {
+		httpError(w, errSignupDisabled.Error(), http.StatusForbidden)
 		return
 	}
 
@@ -642,7 +643,7 @@ func (h *AuthHandler) refreshPreview(r *http.Request, db store.Store, projectID,
 	ctx := r.Context()
 	settings, err := h.hookSettings(ctx, projectID)
 	if err != nil {
-		return refreshPreviewed{}, h.hookFailure(ctx, projectID, hookCustomAccessToken, 0, "the hook settings are unreadable")
+		return refreshPreviewed{}, h.settingsFailure(ctx, projectID, hookCustomAccessToken, 0, err)
 	}
 	if settings.CustomAccessToken == "" {
 		return refreshPreviewed{}, nil
@@ -719,6 +720,8 @@ func sessionFailure(err error) (int, error) {
 	switch {
 	case errors.Is(err, errHookFailed):
 		return http.StatusServiceUnavailable, errHookFailed
+	case errors.Is(err, errSettingsUnavailable):
+		return http.StatusServiceUnavailable, errSettingsUnavailable
 	case errors.Is(err, errSignupDenied):
 		return http.StatusForbidden, errSignupDenied
 	}
@@ -814,16 +817,18 @@ type projectLabels struct {
 }
 
 // labelsFor looks up display names from provisioning (cached per projectId).
-// Best-effort: an unreachable provisioning serves the last copy read, else
-// projectId/orgSlug, so sign-in never blocks on a metadata lookup.
-func (h *AuthHandler) labelsFor(r *http.Request, projectID string) projectLabels {
+// An unreachable provisioning serves the last copy read. With no copy at all
+// the labels are the projectId/orgSlug defaults and the error is
+// errSettingsUnavailable: the defaults are fine for a display name, but not
+// for a token, whose subject and assurance claims come from the settings.
+func (h *AuthHandler) labelsFor(r *http.Request, projectID string) (projectLabels, error) {
 	labels := projectLabels{orgSlug: chi.URLParam(r, "orgSlug"), projectName: projectID}
 	labels.orgName = labels.orgSlug
 	info, err := h.poolMgr.GetProjectInfo(r.Context(), projectID)
 	if err != nil {
 		cached, ok := h.poolMgr.CachedProjectInfo(projectID)
 		if !ok {
-			return labels
+			return labels, errSettingsUnavailable
 		}
 		info = cached
 	}
@@ -838,7 +843,7 @@ func (h *AuthHandler) labelsFor(r *http.Request, projectID string) projectLabels
 	if info.OrgSlug != "" {
 		labels.orgSlug = info.OrgSlug
 	}
-	return labels
+	return labels, nil
 }
 
 // accountRoles is an account's users.role and users.allowed_roles (nil = [role]).
@@ -914,7 +919,11 @@ func apiKeyClaims(projectID string, labels projectLabels, keyID int64, keyType s
 // accessClaims are an end-user access token's claims, after the project's
 // custom_access_token hook when it has one.
 func (h *AuthHandler) accessClaims(r *http.Request, projectID string, user domain.UserInfo, roles accountRoles, emailVerified bool) (auth.Claims, error) {
-	claims, err := endUserClaims(projectID, h.labelsFor(r, projectID), user, roles, emailVerified)
+	labels, err := h.labelsFor(r, projectID)
+	if err != nil {
+		return auth.Claims{}, err
+	}
+	claims, err := endUserClaims(projectID, labels, user, roles, emailVerified)
 	if err != nil {
 		return claims, err
 	}
@@ -929,7 +938,11 @@ func (h *AuthHandler) signSession(r *http.Request, projectID string, claims auth
 	}
 	// An aal2 session exists only through MFA, so it keeps its level even
 	// while the settings cannot be read.
-	if h.labelsFor(r, projectID).mfa || store.LevelOf(session.AAL) == store.AAL2 {
+	labels, err := h.labelsFor(r, projectID)
+	if err != nil && store.LevelOf(session.AAL) != store.AAL2 {
+		return nil, err
+	}
+	if labels.mfa || store.LevelOf(session.AAL) == store.AAL2 {
 		claims.AAL, claims.AMR = assuranceClaims(session)
 	}
 	accessToken, err := h.jwtService.Sign(claims)
@@ -948,7 +961,10 @@ func (h *AuthHandler) signSession(r *http.Request, projectID string, claims auth
 // generateAPIKeyAuthResponse issues a JWT for an api-key grant. It does not
 // create a refresh token: the api key itself is the long-lived credential.
 func (h *AuthHandler) generateAPIKeyAuthResponse(r *http.Request, projectID string, keyID int64, keyType string) (*domain.AuthResponse, error) {
-	claims, err := apiKeyClaims(projectID, h.labelsFor(r, projectID), keyID, keyType)
+	// Display names only: an api-key token has no subject or assurance claims
+	// that depend on the settings, so the defaults are enough without a copy.
+	labels, _ := h.labelsFor(r, projectID)
+	claims, err := apiKeyClaims(projectID, labels, keyID, keyType)
 	if err != nil {
 		return nil, err
 	}
