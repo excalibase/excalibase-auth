@@ -247,7 +247,7 @@ func emailChange(t *testing.T, fx *otpFixture) {
 		t.Fatalf("a link spent twice: %d %v", resp.StatusCode, body)
 	}
 	resp, refreshed := fx.refreshWith(refreshTokenOf(session))
-	if resp.StatusCode != http.StatusOK || jwtPayload(t, accessTokenOf(refreshed))["sub"] != target {
+	if resp.StatusCode != http.StatusOK || jwtPayload(t, accessTokenOf(refreshed))["sub"] != accountSub(session) || jwtPayload(t, accessTokenOf(refreshed))["email"] != target {
 		t.Fatalf("refresh after the change: %d %v", resp.StatusCode, refreshed)
 	}
 	if again := fx.signIn(t, "google", google); userIDOf(again) != userIDOf(session) {

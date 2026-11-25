@@ -57,7 +57,8 @@ type ProjectInfo struct {
 	// plane's authguest flag is off. GuestCaptchaEnabled asks for a Turnstile token.
 	GuestSignInEnabled  *bool `json:"guestSignInEnabled,omitempty"`
 	GuestCaptchaEnabled bool  `json:"guestCaptchaEnabled,omitempty"`
-	// StableSubject makes a token's sub the account id instead of its address.
+	// StableSubject only adds the is_guest claim. A token's sub is always the
+	// account id, so the control plane can stop sending this.
 	StableSubject bool `json:"stableSubject,omitempty"`
 	// AuthHooks is nil while the control plane's authhooks flag is off.
 	AuthHooks *AuthHooks `json:"authHooks,omitempty"`

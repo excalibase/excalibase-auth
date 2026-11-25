@@ -99,7 +99,7 @@ func mysqlSignUpAndSignIn(t *testing.T, fx *integrationFixture) {
 	userID := registered["user"].(map[string]any)["id"].(float64)
 	claims := jwtPayload(t, registered["accessToken"].(string))
 	if claims["projectId"] != "test-project" || claims["userId"] != userID || claims["role"] != "user" ||
-		claims["scope"] != "authenticated" || claims["sub"] != "alice@mysql.test" {
+		claims["scope"] != "authenticated" || claims["sub"] != accountSub(registered) {
 		t.Fatalf("claims = %v", claims)
 	}
 
@@ -142,7 +142,7 @@ func mysqlRefresh(t *testing.T, fx *integrationFixture) {
 	if successor == "" || successor == first {
 		t.Fatalf("refresh issued %q", successor)
 	}
-	if jwtPayload(t, rotated["accessToken"].(string))["sub"] != "bob@mysql.test" {
+	if jwtPayload(t, rotated["accessToken"].(string))["sub"] != accountSub(rotated) {
 		t.Fatal("refreshed token names another user")
 	}
 	if resp := refreshWith(fx.srv, first); resp.StatusCode != http.StatusUnauthorized {

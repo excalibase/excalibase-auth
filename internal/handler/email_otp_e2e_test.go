@@ -185,7 +185,7 @@ func otpCodeSignUpThenIn(t *testing.T, fx *otpFixture) {
 		t.Fatalf("verify: %d %v", resp.StatusCode, first)
 	}
 	claims := jwtPayload(t, first["accessToken"].(string))
-	if claims["sub"] != address || claims["email_verified"] != true || claims["role"] != "user" || first["refreshToken"] == "" {
+	if claims["sub"] != accountSub(first) || claims["email"] != address || claims["email_verified"] != true || claims["role"] != "user" || first["refreshToken"] == "" {
 		t.Fatalf("claims = %v", claims)
 	}
 	if !fx.passwordIsNull(t, address) {
@@ -232,7 +232,7 @@ func otpMagicLink(t *testing.T, fx *otpFixture) {
 	ageOTPSends(t, fx, address)
 	tokenHash, verifier = send()
 	resp, body := fx.verify(map[string]any{"type": "magiclink", "token_hash": tokenHash, "code_verifier": verifier})
-	if resp.StatusCode != http.StatusOK || jwtPayload(t, body["accessToken"].(string))["sub"] != address {
+	if resp.StatusCode != http.StatusOK || jwtPayload(t, body["accessToken"].(string))["sub"] != accountSub(body) {
 		t.Fatalf("magic link: %d %v", resp.StatusCode, body)
 	}
 }

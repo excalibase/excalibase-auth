@@ -77,7 +77,7 @@ func oauthSignUpThenIn(t *testing.T, fx *oauthFixture, provider string) {
 	user := person(provider)
 	first := fx.signIn(t, provider, user)
 	claims := jwtPayload(t, first["accessToken"].(string))
-	if claims["sub"] != user.Email || claims["email_verified"] != true || claims["role"] != "user" || claims["scope"] != "authenticated" {
+	if claims["sub"] != accountSub(first) || claims["email"] != user.Email || claims["email_verified"] != true || claims["role"] != "user" || claims["scope"] != "authenticated" {
 		t.Fatalf("claims = %v", claims)
 	}
 	if first["refreshToken"] == "" || userIDOf(first) <= 0 {

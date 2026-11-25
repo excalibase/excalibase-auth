@@ -331,7 +331,7 @@ func tokenShapeFollowsTheFlag(t *testing.T, fx *otpFixture) {
 	fx.settings.set(func(s *signInSettings) { s.guests, s.stableSubject = nil, false })
 	session, address := fx.passwordAccount(t, "token-shape")
 	claims := jwtPayload(t, accessTokenOf(session))
-	if claims["sub"] != address || claims["email"] != address {
+	if claims["sub"] != accountSub(session) || claims["email"] != address {
 		t.Fatalf("flag off: %v", claims)
 	}
 	if _, ok := claims["is_guest"]; ok {
