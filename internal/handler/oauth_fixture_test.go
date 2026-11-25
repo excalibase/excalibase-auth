@@ -15,6 +15,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -447,6 +448,11 @@ func (fx *oauthFixture) signIn(t *testing.T, provider string, user idpfake.User)
 		t.Fatalf("exchange: %d %v", resp.StatusCode, body)
 	}
 	return body
+}
+
+// accountSub is the token subject a session's account must carry: its id.
+func accountSub(body map[string]any) string {
+	return strconv.FormatInt(int64(userIDOf(body)), 10)
 }
 
 func userIDOf(body map[string]any) float64 {

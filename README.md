@@ -468,12 +468,12 @@ may act as and always contains `role`.
 
 | Token | `role` / `allowed_roles` | `scope` | `userId` | `sub` |
 |-------|--------------------------|---------|----------|-------|
-| password login, registration, refresh | `users.role` / `users.allowed_roles` (or `[role]` when unset) | `authenticated` | the account id | the account id, or its address while `stableSubject` is off |
+| password login, registration, refresh | `users.role` / `users.allowed_roles` (or `[role]` when unset) | `authenticated` | the account id | the account id |
 | guest | `guest` / `["guest"]` until changed | `authenticated` | the account id | the account id |
 | publishable api key | `anon` / `["anon"]` | `public` | absent | `apikey:<id>` |
 | secret api key | `service` / `["service"]` | `service` | absent | `apikey:<id>` |
 
-`email` is the account's address, absent when it has none. While the control plane sends `stableSubject` (flag `authguest`), `sub` is the account id, which an address change does not move, and `is_guest` says whether the account is a guest; with it off `sub` is the address and `is_guest` is absent.
+`email` is the account's address, absent when it has none. `sub` is always the account id, which an address change does not move, and `userId` equals it. While the control plane sends `stableSubject` (flag `authguest`), `is_guest` says whether the account is a guest; with it off `is_guest` is absent. `stableSubject` no longer changes `sub`.
 
 An account's roles are read from `users.role` and `users.allowed_roles` at every login and refresh.
 Every name must match `^[a-z][a-z0-9_]{0,62}$` and must not be reserved: `anon`, `service`, the platform

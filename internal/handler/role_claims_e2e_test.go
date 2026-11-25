@@ -152,3 +152,40 @@ func TestIntegration_RoleClaims_APIKeyTokens(t *testing.T) {
 		t.Errorf("validate must not report a userId for an api-key token: %v", validated)
 	}
 }
+
+func assertSubIsAccount(t *testing.T, session map[string]interface{}, address, what string) {
+	t.Helper()
+	claims := jwtPayload(t, session["accessToken"].(string))
+	if claims["sub"] != accountSub(session) || claims["userId"] != userIDOf(session) || claims["email"] != address {
+		t.Errorf("%s: sub/userId/email = %v/%v/%v, want %s/%v/%s", what, claims["sub"], claims["userId"], claims["email"], accountSub(session), userIDOf(session), address)
+	}
+}
+
+func TestIntegration_SubIsAccountIdOnPasswordPaths(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	fx, cleanup := setupIntegrationFixture(t)
+	defer cleanup()
+	const address = "sub@test.com"
+
+	registered := tokenResponse(t, postJSON(fx.srv, "/auth/test-org/test-project/register", map[string]string{
+		"email": address, "password": "password123", "fullName": "Sub",
+	}), "register")
+	assertSubIsAccount(t, registered, address, "register")
+
+	loggedIn := tokenResponse(t, postJSON(fx.srv, "/auth/test-org/test-project/login", map[string]string{
+		"email": address, "password": "password123",
+	}), "login")
+	assertSubIsAccount(t, loggedIn, address, "login")
+
+	granted := tokenResponse(t, postJSON(fx.srv, "/auth/test-org/test-project/token", map[string]string{
+		"grant_type": "password", "email": address, "password": "password123",
+	}), "password grant")
+	assertSubIsAccount(t, granted, address, "password grant")
+
+	// A refresh token from before this change was minted with an address sub;
+	// it is an opaque row keyed by account, so it refreshes into an id sub.
+	refreshed := tokenResponse(t, refreshWith(fx.srv, registered["refreshToken"].(string)), "refresh")
+	assertSubIsAccount(t, refreshed, address, "refresh")
+}

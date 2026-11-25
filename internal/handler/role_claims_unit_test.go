@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/excalibase/auth/internal/auth"
@@ -21,7 +22,7 @@ func TestEndUserClaims_CarryAccountRole(t *testing.T) {
 	if claims.Role != "editor" || !slices.Equal(claims.AllowedRoles, []string{"editor"}) {
 		t.Errorf("role %q allowed %v, want editor [editor]", claims.Role, claims.AllowedRoles)
 	}
-	if claims.Scope != "authenticated" || claims.UserID != 12 || claims.Sub != "ed@test.com" || !claims.EmailVerified {
+	if claims.Scope != "authenticated" || claims.UserID != 12 || claims.Sub != "12" || !claims.EmailVerified {
 		t.Errorf("unexpected end-user claims: %+v", claims)
 	}
 	if claims.OrgSlug != "acme" || claims.ProjectName != "blog" || claims.OrgName != "Acme" || claims.ProjectID != "proj_1" {
@@ -92,5 +93,31 @@ func TestAPIKeyClaims_SecretIsService(t *testing.T) {
 func TestAPIKeyClaims_RefuseUnknownKeyType(t *testing.T) {
 	if _, err := apiKeyClaims("proj_1", testLabels, 7, "master"); err == nil {
 		t.Error("unknown key type must not mint a token")
+	}
+}
+
+func TestEndUserClaims_SubIsAccountIdWhateverTheFlags(t *testing.T) {
+	user := domain.UserInfo{ID: 12, Email: "ed@test.com"}
+	guest := domain.UserInfo{ID: 13, IsGuest: true}
+	for name, tc := range map[string]struct {
+		labels projectLabels
+		user   domain.UserInfo
+		email  string
+	}{
+		"flag off":    {testLabels, user, "ed@test.com"},
+		"flag on":     {projectLabels{stableSubject: true}, user, "ed@test.com"},
+		"guest":       {testLabels, guest, ""},
+		"zero labels": {projectLabels{}, user, "ed@test.com"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			claims, err := endUserClaims("proj_1", tc.labels, tc.user, accountRoles{role: "user"}, true)
+			if err != nil {
+				t.Fatalf("endUserClaims: %v", err)
+			}
+			wantID := strconv.FormatInt(tc.user.ID, 10)
+			if claims.Sub != wantID || claims.UserID != tc.user.ID || claims.Email != tc.email {
+				t.Errorf("sub %q userId %d email %q, want %s %d %q", claims.Sub, claims.UserID, claims.Email, wantID, tc.user.ID, tc.email)
+			}
+		})
 	}
 }

@@ -806,7 +806,7 @@ func (h *AuthHandler) startSession(r *http.Request, projectID string, user domai
 }
 
 // projectLabels are the display names a token carries next to projectId,
-// and whether its subject is the account id (EXC-662).
+// and whether tokens carry is_guest (stableSubject, EXC-662).
 type projectLabels struct {
 	orgSlug       string
 	projectName   string
@@ -865,16 +865,16 @@ func endUserClaims(projectID string, labels projectLabels, user domain.UserInfo,
 	if err != nil {
 		return auth.Claims{}, err
 	}
-	subject := user.Email
 	var isGuest *bool
-	// Guests exist only while the flag is on, and have no address to name.
+	// is_guest rides with the flag; the subject does not depend on it.
 	if labels.stableSubject || user.IsGuest {
-		subject = strconv.FormatInt(user.ID, 10)
 		guest := user.IsGuest
 		isGuest = &guest
 	}
 	return auth.Claims{
-		Sub:          subject,
+		// The account id, which an address change never moves; the engine
+		// reads the end user from sub.
+		Sub:          strconv.FormatInt(user.ID, 10),
 		Email:        user.Email,
 		IsGuest:      isGuest,
 		UserID:       user.ID,
