@@ -13,8 +13,8 @@ check() {
   if [[ $expected == "$actual" ]]; then echo "ok   $name"; else echo "FAIL $name: expected '$expected', got '$actual'"; failures=$((failures + 1)); fi
 }
 
-job_condition() { awk -v job="  $1:" '$0 == job {f=1; next} f && /^    if:/ {sub(/^    if: */, ""); print; exit}' "$cd_yml" | tr -s ' '; }
-job_body() { awk -v job="  $1:" '$0 == job {f=1; next} /^  [a-z-]+:$/ {f=0} f' "$cd_yml"; }
+job_condition() { local job_name=$1; awk -v job="  $job_name:" '$0 == job {f=1; next} f && /^    if:/ {sub(/^    if: */, ""); print; exit}' "$cd_yml" | tr -s ' '; }
+job_body() { local job_name=$1; awk -v job="  $job_name:" '$0 == job {f=1; next} /^  [a-z-]+:$/ {f=0} f' "$cd_yml"; }
 
 grep -qF '"release/**"' "$cd_yml"; check "cd.yml listens to release branches" "0" "$?"
 grep -qF '"release/**"' "$ci_yml"; check "ci.yml runs on release branches" "0" "$?"
@@ -31,7 +31,7 @@ job_body docker-release | grep -qE 'type=raw,value=(latest|[0-9]|main)'; check "
 job_body docker-release | grep -qF 'imagetools inspect'; check "an existing release tag is refused" "0" "$?"
 
 # The token goes on disk only after the checked-out trivy action has run, in both jobs (EXC-791).
-step_line() { job_body "$1" | grep -nF -- "- name: $2" | head -1 | cut -d: -f1; }
+step_line() { local job_name=$1 step_name=$2; job_body "$job_name" | grep -nF -- "- name: $step_name" | head -1 | cut -d: -f1; }
 for job in docker docker-release; do
   login=$(step_line "$job" "Login to DockerHub"); scan=$(step_line "$job" "Trivy"); push=$(step_line "$job" "Build and push")
   [[ -n $login && -n $scan && $scan -lt $login ]]; check "$job logs in to Docker Hub only after the scan" "0" "$?"
