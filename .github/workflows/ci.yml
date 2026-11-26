@@ -1,14 +1,15 @@
 name: Continuous Integration
 
+# release/** runs the same suites as main; CD (cd.yml) publishes release-<major>.<minor>-<sha7> from the commit this run passes on.
 on:
   push:
-    branches: [ main ]
+    branches: [ main, "release/**" ]
     paths-ignore:
       - '*.md'
       - 'helm/**'
       - 'devbox/**'
   pull_request:
-    branches: [ main ]
+    branches: [ main, "release/**" ]
     paths-ignore:
       - '*.md'
       - 'helm/**'
@@ -28,6 +29,9 @@ jobs:
       with:
         go-version: '1.26.10'
         cache: true
+
+    - name: Check the release CD wiring
+      run: scripts/ci/test-release-cd.sh
 
     - name: Run unit tests
       run: go test ./... -short -count=1
