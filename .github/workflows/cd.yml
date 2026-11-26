@@ -20,27 +20,21 @@ jobs:
     runs-on: ubuntu-24.04
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch == 'main'
 
+    env:
+      COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+
     steps:
     - name: Checkout code
       uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-    - name: Login to DockerHub
-      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-      with:
-        images: ${{ env.DOCKER_IMAGE }}
-        tags: |
-          type=ref,event=branch
-          type=sha,prefix={{branch}}-
+    - name: Work out the commit
+      id: commit
+      run: echo "short=${COMMIT_SHA::7}" >> "$GITHUB_OUTPUT"
 
     # Built into the local daemon and scanned before anything is pushed
     # (EXC-642); the push below is served from this build's cache.
@@ -50,14 +44,49 @@ jobs:
         context: .
         load: true
         push: false
-        tags: auth-candidate:${{ github.sha }}
+        tags: auth-candidate:${{ env.COMMIT_SHA }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
     - name: Trivy
       uses: ./.github/actions/trivy
       with:
-        image: auth-candidate:${{ github.sha }}
+        image: auth-candidate:${{ env.COMMIT_SHA }}
+
+    # Read again right before the tags are written: a later push can have moved the branch while
+    # this run built and scanned. The floating tag moves only while this commit is still the tip.
+    - name: Check the branch tip again
+      id: tip
+      env:
+        BRANCH: main
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -eu
+        current=false
+        tip=$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq .object.sha) || tip=""
+        if [ "$tip" = "$COMMIT_SHA" ]; then
+          current=true
+        else
+          echo "::notice::$COMMIT_SHA is not the tip of $BRANCH any more, or the tip could not be read; the floating tag is not moved"
+        fi
+        echo "current=$current" >> "$GITHUB_OUTPUT"
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+      with:
+        images: ${{ env.DOCKER_IMAGE }}
+        labels: org.opencontainers.image.revision=${{ env.COMMIT_SHA }}
+        tags: |
+          type=raw,value=main-${{ steps.commit.outputs.short }}
+          type=raw,value=main,enable=${{ steps.tip.outputs.current == 'true' }}
+
+    - name: Login to DockerHub
+      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
 
     - name: Build and push Docker image
       uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
@@ -78,7 +107,6 @@ jobs:
     outputs:
       prefix: ${{ steps.plan.outputs.prefix }}
       short: ${{ steps.plan.outputs.short }}
-      floating: ${{ steps.plan.outputs.floating }}
     steps:
     - name: Work out the release tags
       id: plan
@@ -86,7 +114,6 @@ jobs:
         BRANCH: ${{ github.event.workflow_run.head_branch }}
         COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
         REPO: ${{ github.repository }}
-        GH_TOKEN: ${{ github.token }}
       run: |
         set -eu
         printf '%s' "$COMMIT_SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "::error::head_sha is not a commit"; exit 1; }
@@ -94,21 +121,9 @@ jobs:
           echo "::notice::$BRANCH is not release/<major>.<minor>; nothing to publish"
           exit 0
         fi
-        # The floating tag moves only while this commit is still the branch tip, so an
-        # older run that finishes late cannot move it backwards.
-        floating=false
-        tip=$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq .object.sha) || tip=""
-        if ! printf '%s' "$tip" | grep -Eq '^[0-9a-f]{40}$'; then
-          echo "::warning::could not read the tip of $BRANCH; the floating tag is not moved"
-        elif [ "$tip" = "$COMMIT_SHA" ]; then
-          floating=true
-        else
-          echo "::notice::$COMMIT_SHA is no longer the tip of $BRANCH; the floating tag is not moved"
-        fi
         {
           echo "prefix=release-${BRANCH#release/}"
           echo "short=${COMMIT_SHA::7}"
-          echo "floating=$floating"
         } >> "$GITHUB_OUTPUT"
 
   docker-release:
@@ -129,28 +144,12 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-    - name: Login to DockerHub
-      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
-
     # A release-<x.y>-<sha7> tag is written once: a re-run must not replace a tested image.
     # Any answer but "not found" (a registry error included) stops the build.
     - name: Refuse to overwrite an existing release tag
       run: |
         out=$(docker buildx imagetools inspect "$DOCKER_IMAGE:$RELEASE_TAG" 2>&1) && { echo "::error::$DOCKER_IMAGE:$RELEASE_TAG already exists and is immutable"; exit 1; }
         printf '%s' "$out" | grep -qi 'not found' || { echo "::error::could not check $DOCKER_IMAGE:$RELEASE_TAG"; exit 1; }
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-      with:
-        images: ${{ env.DOCKER_IMAGE }}
-        labels: org.opencontainers.image.revision=${{ env.COMMIT_SHA }}
-        tags: |
-          type=raw,value=${{ env.RELEASE_TAG }}
-          type=raw,value=${{ needs.release-plan.outputs.prefix }},enable=${{ needs.release-plan.outputs.floating == 'true' }}
 
     - name: Build the candidate image
       uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
@@ -166,6 +165,41 @@ jobs:
       uses: ./.github/actions/trivy
       with:
         image: auth-candidate:${{ env.COMMIT_SHA }}
+
+    # Read again right before the tags are written: a later push can have moved the branch while
+    # this run built and scanned. The floating tag moves only while this commit is still the tip.
+    - name: Check the branch tip again
+      id: tip
+      env:
+        BRANCH: ${{ github.event.workflow_run.head_branch }}
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -eu
+        current=false
+        tip=$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq .object.sha) || tip=""
+        if [ "$tip" = "$COMMIT_SHA" ]; then
+          current=true
+        else
+          echo "::notice::$COMMIT_SHA is not the tip of $BRANCH any more, or the tip could not be read; the floating tag is not moved"
+        fi
+        echo "current=$current" >> "$GITHUB_OUTPUT"
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+      with:
+        images: ${{ env.DOCKER_IMAGE }}
+        labels: org.opencontainers.image.revision=${{ env.COMMIT_SHA }}
+        tags: |
+          type=raw,value=${{ env.RELEASE_TAG }}
+          type=raw,value=${{ needs.release-plan.outputs.prefix }},enable=${{ steps.tip.outputs.current == 'true' }}
+
+    - name: Login to DockerHub
+      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
 
     - name: Build and push release image
       uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
